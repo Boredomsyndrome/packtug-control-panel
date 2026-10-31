@@ -5,6 +5,10 @@ web page. **The Django server on your laptop is the ONLY server in the
 system**: robots are pure HTTP clients that call it — no rosbridge, no
 websockets, no listening ports, no hotspot on the robots.
 
+> **Setting up? Start at [`SETUP.md`](SETUP.md)** — ordered zero→fleet-driving
+> guide. `ROBOT_SETUP.md` = exhaustive robot-side reference; this README =
+> architecture, API and verification.
+
 ```
  browser (any device on the LAN)                LAPTOP = the only server
    │ Basic Auth, WASD/hold-to-move             ┌───────────────────────────┐

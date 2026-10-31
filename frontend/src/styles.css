@@ -1,0 +1,106 @@
+:root {
+  --bg: #10131a;
+  --panel: #1a1f2b;
+  --line: #2a3142;
+  --text: #e8ecf4;
+  --dim: #8a93a6;
+  --accent: #4cc2ff;
+  --ok: #3ddc84;
+  --bad: #ff5d5d;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid var(--line);
+  flex-wrap: wrap; gap: 8px;
+}
+.topbar h1 { font-size: 18px; margin: 0; letter-spacing: 1px; }
+.topbar h1 span { color: var(--accent); }
+.badges { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.dot.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+.estopbadge { color: var(--bad); font-weight: 700; border: 1px solid var(--bad);
+  padding: 2px 8px; border-radius: 6px; }
+.batt { display: flex; align-items: center; gap: 6px; }
+.bar { width: 90px; height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; display: inline-block; }
+.bar i { display: block; height: 100%; background: var(--ok); }
+
+.grid {
+  flex: 1; display: grid; grid-template-columns: 1fr 340px;
+  gap: 14px; padding: 14px; min-height: 0;
+}
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+.video { background: #000; border: 1px solid var(--line); border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden; min-height: 260px; }
+.video img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.camfail { text-align: center; color: var(--dim); padding: 20px; }
+.camfail code { color: var(--accent); }
+.camfail button { margin-top: 8px; }
+
+.drive { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; display: flex; flex-direction: column; gap: 16px; align-items: center; }
+
+.dpad { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.dpad-mid { display: flex; gap: 8px; align-items: center; }
+.dpad-center { width: 76px; text-align: center; color: var(--dim); font-size: 12px; }
+.dbtn {
+  width: 76px; height: 64px; font-size: 22px; border-radius: 10px;
+  border: 1px solid var(--line); background: #232a3a; color: var(--text);
+  touch-action: none; cursor: pointer;
+}
+.dbtn.active { background: var(--accent); color: #00121f; border-color: var(--accent); }
+
+.sliders { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+.sliders label { font-size: 13px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+.sliders b { color: var(--text); }
+.sliders input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+.estop {
+  width: 100%; padding: 18px; font-size: 20px; font-weight: 800;
+  background: #c81e1e; color: #fff; border: none; border-radius: 10px;
+  cursor: pointer; touch-action: none;
+}
+.estop small { font-weight: 400; opacity: 0.8; }
+.estop:active { background: #ff3b3b; }
+
+.hint { color: var(--dim); font-size: 12px; text-align: center; margin: 0; }
+
+.foot { padding: 8px 16px; border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 12px; }
+button { font-family: inherit; }
+
+.row { display: flex; gap: 8px; width: 100%; }
+.presets .preset {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 6px; font-size: 13px; border-radius: 8px;
+  border: 1px solid var(--line); background: #232a3a; color: var(--text); cursor: pointer;
+}
+.presets .preset small { color: var(--dim); font-size: 11px; }
+.presets .preset.on { background: var(--accent); color: #00121f; border-color: var(--accent); }
+.presets .preset.on small { color: #00121f; }
+
+.stopbtn {
+  flex: 1; padding: 14px; font-size: 16px; font-weight: 700; border-radius: 10px;
+  background: #2c3550; color: var(--text); border: 1px solid var(--line); cursor: pointer;
+}
+.stopbtn:active { background: #3a4568; }
+.stopbtn small { font-weight: 400; color: var(--dim); }
+.clearbtn {
+  flex: 1; padding: 14px; font-size: 15px; font-weight: 700; border-radius: 10px;
+  background: #1d6b3c; color: #fff; border: none; cursor: pointer;
+}
+.clearbtn:active { background: var(--ok); }

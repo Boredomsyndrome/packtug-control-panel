@@ -1,0 +1,6 @@
+Django>=6.1,<6.2
+djangorestframework>=3.18
+websockets>=12
+requests>=2.31
+whitenoise>=6.6
+python-dotenv>=1.0

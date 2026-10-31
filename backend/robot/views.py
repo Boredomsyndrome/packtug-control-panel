@@ -1,46 +1,48 @@
-"""Non-DRF views: the MJPEG camera stream proxy and the SPA index.
+"""Non-DRF views: the MJPEG camera relay and the SPA index.
 
-The JSON API lives in robot/viewsets.py + robot/serializers.py.
-Streaming needs a plain Django StreamingHttpResponse (DRF renderers would
-buffer/serialize and break the endless MJPEG multipart stream).
+The robot client PUSHES each camera JPEG to /robotctl/<id>/frame (it is a
+pure client — we never connect to it). The browser gets a live
+multipart/x-mixed-replace relay of the newest frame at /cam/<id>. Serving
+same-origin also keeps the stream behind the same Basic Auth + HTTPS as the
+rest of the app.
 """
 from pathlib import Path
 
-import requests
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.template.response import TemplateResponse
 
-from robot.bridge import bridge
+from robot.hub import registry
 
 
 def _err(status, msg):
     return JsonResponse({"ok": False, "error": msg}, status=status)
 
 
-def cam_view(request):
-    """Stream MJPEG from web_video_server through this server (same-origin,
-    works behind HTTPS/Caddy without mixed-content issues)."""
-    url = f"{settings.CAMERA_BASE_URL}/stream"
-    params = {"topic": settings.CAMERA_TOPIC}
-    try:
-        upstream = requests.get(url, params=params, stream=True, timeout=10)
-    except requests.RequestException as e:
-        return _err(502, f"camera upstream unreachable: {e}")
-    if upstream.status_code != 200:
-        body = upstream.content[:300].decode("utf-8", "replace")
-        upstream.close()
-        return _err(502, f"camera upstream returned {upstream.status_code}: {body}")
-    ctype = upstream.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+def cam_view(request, robot_id):
+    hub = registry.robot(robot_id)
+    if hub is None:
+        return _err(404, "unknown robot")
+    # first frame may take a moment after page open if the robot just started
+    frame, seen = hub.next_frame(0, timeout=2.0)
+    if frame is None:
+        return _err(503, "no camera frames from this robot (yet) — "
+                         "is its client running with WEBCTL_CAM_URL set?")
 
-    def gen():
-        try:
-            for chunk in upstream.iter_content(chunk_size=4096):
-                yield chunk
-        finally:
-            upstream.close()
+    def gen(first, first_seq):
+        f, s = first, first_seq
+        while True:
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
+                   b"Content-Length: " + str(len(f)).encode() + b"\r\n\r\n")
+            yield f
+            yield b"\r\n"
+            nxt, s2 = hub.next_frame(s, timeout=5.0)
+            if nxt is None:
+                continue          # stale link: re-send last frame at 5 s timeout
+            f, s = nxt, s2
 
-    resp = StreamingHttpResponse(gen(), content_type=ctype)
+    resp = StreamingHttpResponse(gen(frame, seen),
+                                 content_type="multipart/x-mixed-replace; boundary=frame")
     resp["Cache-Control"] = "no-store, no-transform"
     resp["X-Accel-Buffering"] = "no"   # disable proxy buffering (nginx/Caddy)
     return resp

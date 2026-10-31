@@ -6,15 +6,19 @@ from django.http import HttpResponse
 
 
 class BasicAuthMiddleware:
-    """Optional HTTP Basic auth. Active only when WEBCTL_AUTH_USER is set.
-    Enable this before any internet exposure (DuckDNS/Caddy/tunnel)."""
+    """Optional HTTP Basic auth for the BROWSER-facing site. Active only when
+    WEBCTL_AUTH_USER is set. Enable before any internet exposure.
+
+    Skips /robotctl/ entirely: robot clients authenticate there with their
+    OWN per-robot token (robot.robotctl views), independent of the browser
+    password, so fleet credentials never equal UI credentials."""
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
         user = settings.WEBCTL_AUTH_USER
-        if not user:
+        if not user or request.path.startswith("/robotctl/"):
             return self.get_response(request)
         header = request.headers.get("Authorization", "")
         if header.startswith("Basic "):

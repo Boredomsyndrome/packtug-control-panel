@@ -1,138 +1,146 @@
-# wheeltec-webctl — WHEELTEC S2000 browser control (Django 6.1 + DRF + React + rosbridge)
+# wheeltec-webctl — WHEELTEC S2000 fleet browser control (pull-mode v2)
 
-Control the WHEELTEC S2000 brushless robot (ROS2 SBC on board) from a web page,
-over LAN or internet. Django backend holds ONE authenticated rosbridge
-WebSocket connection to the robot and enforces safety; the React page talks
-only to Django.
-
-## API (DRF ViewSet + serializers)
-
-- `GET  /api/robot` — status/telemetry snapshot (`robot/serializers.py: RobotStatusSerializer`)
-- `POST /api/robot/cmd` `{"vx": m/s, "wz": rad/s}` — validated by `VelocityCommandSerializer`, clamped by bridge
-- `POST /api/robot/stop` — zero velocity AND clear latched e-stop
-- `POST /api/robot/estop` — latch zero until next explicit command
-- `GET  /cam` — MJPEG proxy (plain Django streaming view; DRF renderers would break the endless stream)
+Control **multiple** WHEELTEC brushless robots (ROS2 SBC on board) from one
+web page. **The Django server on your laptop is the ONLY server in the
+system**: robots are pure HTTP clients that call it — no rosbridge, no
+websockets, no listening ports, no hotspot on the robots.
 
 ```
-browser (phone/laptop)                control computer (anywhere)          robot SBC
-   │  HTTPS + Basic Auth                 Django :8000                      ROS2
-   │  WASD/gamepad → /api/cmd ~10 Hz   ┌──────────────────┐   WiFi/LAN   ┌─────────────────┐
-   ├──────────────────────────────────▶│ rosbridge client  ├─────────────▶│ rosbridge :9090 │
-   │   MJPEG <img src=/cam>            │  • clamp 0.5 m/s  │              │  → /cmd_vel     │
-   └◀───────────────────────────────────┤  • watchdog 0.5 s │              │  wheeltec node  │
-              built React page         │  • e-stop latch   │              │  → STM32 UART   │ → ESCs → hub motors
-                                       │  • camera proxy   │◀─────────────┤ web_video :8080 │
-                                       └──────────────────┘              └─────────────────┘
+ browser (any device on the LAN)                LAPTOP = the only server
+   │ Basic Auth, WASD/hold-to-move             ┌───────────────────────────┐
+   │ POST /api/robot/<id>/cmd   (10 Hz)        │ Django :8000              │
+   ├──────────────────────────────────────────▶│  per-robot hub:           │
+   │ GET /api/robot  (fleet status, 1 Hz)      │   • clamp MAX_LIN/MAX_ROT │
+   │ GET /cam/<id>   (MJPEG relay)             │   • staleness watchdog    │
+   ◀───────────────────────────────────────────┤   • e-stop latch          │
+                                               │  camera frame relay       │
+ robots — PURE CLIENTS, outbound HTTP only     │  flock: one process owns  │
+   robotctl/client.py on each robot            └───────────▲───────────────┘
+   • GET  /robotctl/<id>/cmd   long-poll  ◀────────────────┘ one conn/robot
+   • POST /robotctl/<id>/telemetry   (battery, applied cmd)
+   • POST /robotctl/<id>/frame       (camera JPEGs, optional)
+        │
+        ▼ ROS2 (localhost only): /cmd_vel → STM32 → hub motors
 ```
 
-Safety model (non-negotiable for brushless):
-- velocities clamped server-side (`MAX_LIN`, `MAX_ROT`)
-- 10 Hz publish; nothing fresh for `CMD_TIMEOUT` s → zero Twist (watchdog)
-- big red e-stop: latched zero until an explicit new command
-- one process owns the robot connection (flock); others return 503
-- never port-forward 9090/8080 — only Django's port goes through HTTPS/VPN
+## Why pull-mode (vs. v1 rosbridge push)
 
-## A. Robot side (SBC, run once + on boot)
+| | v1 (rosbridge WS) | v2 (this) |
+|---|---|---|
+| robot listens on | 9090 + 8080 + 22 | **nothing** |
+| network topology | robot AP ⇒ one robot visible | robot joins shared WiFi ⇒ **whole fleet** |
+| server must reach robot IP | yes (fragile DHCP/AP) | never — robot dials home |
+| multiple robots | one bridge = one robot | N registry entries |
+| command transport | server pushes WS | robot long-polls HTTPS |
 
-Full step-by-step (power-on safety → hotspot → SSH → ROS2 → autostart →
-first drive → demo checklist): see **ROBOT_SETUP.md** in this folder.
+Safety is now **two-layered**: the server never serves a command older than
+`CMD_TIMEOUT` (0.5 s) or during a latched e-stop, AND each robot client has
+an onboard watchdog that publishes zero if the server itself becomes
+unreachable for `WEBCTL_WATCHDOG` (1.0 s) — verified in the integration
+suite by SIGSTOPping the server under load.
 
-Wheeltec ROS2 images (Humble). For ROS1 Noetic kits, same app works — the
-protocol differs slightly; see skill `wheeltec-s2000-wifi-control`.
+## A. Server (laptop) — once
 
 ```bash
-sudo apt install ros-humble-rosbridge-suite ros-humble-web-video-server
-# start the normal wheeltec stack first (bringup), then:
-ros2 launch rosbridge_server rosbridge_websocket_launch.xml &   # ws :9090
-ros2 run web_video_server web_video_server --ros-args -p port:=8080 &
-```
-
-Optional systemd unit `/etc/systemd/system/wheeltec-web.service`:
-
-```ini
-[Unit]
-Description=rosbridge + web_video_server for wheeltec-webctl
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=ubuntu
-Environment=ROS_DOMAIN_ID=0
-ExecStartPre=/bin/sleep 20
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && ros2 launch rosbridge_server rosbridge_websocket_launch.xml'
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-(find the robot's camera topic with `ros2 topic list`; web_video_server serves it at
-`http://ROBOT_IP:8080/stream?topic=/<topic>`)
-
-## B. Control computer (the "other computer")
-
-Requirements: Python ≥3.10 (edit `pyproject.toml` requires-python if older),
-Node 18+ (only when rebuilding the UI), Linux/macOS.
-
-```bash
-# copy this whole folder to the new machine, then:
-cd wheeltec-webctl
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 cd frontend && npm ci && npm run build && cd ..
-cp .env.example .env    # then edit it (see below)
+cp .env.example .env      # register the fleet + set passwords (see comments)
+.venv/bin/python -u tools/integration_test.py    # ALL CHECKS PASSED? proceed
 ```
 
-`.env` keys that matter:
-
-| key | meaning |
-|---|---|
-| `ROBOT_WS_URL` | `ws://<robot-ip>:9090` (or `wss://` via Tailscale) |
-| `CAMERA_BASE_URL` | `http://<robot-ip>:8080` |
-| `CAMERA_TOPIC` | leave empty to auto-match; force with e.g. `/camera/image_raw` |
-| `BATTERY_TOPIC` | wheeltec ROS2 default publishes `/PowerVoltage`; empty = try both |
-| `MAX_LIN` / `MAX_ROT` | speed clamp (start small: 0.5 / 0.7) |
-| `CMD_TIMEOUT` | watchdog seconds (0.5) |
-| `WEBCTL_AUTH_USER` / `WEBCTL_AUTH_PASS` | Basic Auth — REQUIRED for internet |
-| `DJANGO_SECRET_KEY` | random string (`python3 -c "import secrets;print(secrets.token_urlsafe(40))"`) |
-| `ALLOWED_HOSTS` | hostnames/IPs the page answers to |
-
-## C. Run (exactly ONE process)
+Run (exactly ONE process — the flock refuses second ones for a reason):
 
 ```bash
 tmux new -s webctl -d '.venv/bin/python backend/manage.py runserver 0.0.0.0:8000'
-# production-ish single process (never -w >1, the bridge must be unique):
-tmux new -s webctl -d '.venv/bin/gunicorn webctl.wsgi:application -b 0.0.0.0:8000 -w 1 --threads 8 -t 120 --chdir backend'
+# production-ish:
+bash tools/prod_smoke_test.sh   # starts gunicorn -w1 --threads 16, curls, kills
 ```
 
-Open `http://<control-computer>:8000` → WASD/arrows (hold = drive, release =
-stop), Space = e-stop, E = clear e-stop. Status shows bridge connection,
-latched cmd, battery, watchdog timeout.
+`.env` keys: `WEBCTL_ROBOTS="alpha:tokA,beta:tokB"` (generate a random token
+per robot), `MAX_LIN/MAX_ROT/CMD_TIMEOUT`, browser `WEBCTL_AUTH_USER/PASS`
+(required before anything crosses a untrusted network).
 
-Internet access: put HTTPS in front of 8000 only (Caddy + DDNS like the existing
-stack, or Tailscale). Basic Auth is minimum; keep 9090/8080 LAN-only.
+Network for the LAN: any WiFi both laptop and robots join works. Simplest
+without router: turn ON the laptop's WiFi hotspot — GNOME uses 10.42.0.0/24,
+the laptop is **10.42.0.1**, robots join it and call the server there. On a
+router LAN, reserve the laptop's address in the router (robots need a stable
+`WEBCTL_SERVER`).
 
-## D. Verify without the robot
+## B. Each robot — once (full procedure: ROBOT_SETUP.md)
+
+```bash
+# 1. hotspot off, join the server WiFi (persistent, survives reboot)
+sudo scripts/robot_wifi_join.sh <SSID> <PSK>
+# 2. copy repo, install client autostart
+sudo cp robotctl/wheeltec-robotctl.service /etc/systemd/system/
+sudo cp robotctl/robotctl.env.example /etc/wheeltec-robotctl.env && sudo nano /etc/wheeltec-robotctl.env
+sudo systemctl daemon-reload && sudo systemctl enable --now wheeltec-robotctl
+```
+
+The robot needs only: the ROS2 base driver (`turn_on_wheeltec_robot`), this
+client, and optionally `web_video_server` **bound to 127.0.0.1** for the
+camera. No rosbridge, no ports open, nothing to firewall.
+
+## API reference
+
+Browser (Basic Auth when enabled):
+
+| route | meaning |
+|---|---|
+| `GET  /api/robot` | fleet: every robot's status |
+| `GET  /api/robot/<id>` | one robot's status (battery, cmd, estop, camera) |
+| `POST /api/robot/<id>/cmd` `{"vx","wz"}` | hold-to-move; validated + clamped |
+| `POST /api/robot/<id>/stop` | zero velocity AND clear latched e-stop |
+| `POST /api/robot/<id>/estop` | latch zero until next explicit cmd |
+| `GET  /cam/<id>` | MJPEG relay of the frames that robot pushes up |
+
+Robot (Basic `<id>:<token>`; middleware never gates browser creds here):
+
+| route | meaning |
+|---|---|
+| `GET  /robotctl/<id>/cmd?seq=N&wait=0.4` | long-poll the effective cmd `{vx,wz,estop,seq,cmd_timeout}` |
+| `POST /robotctl/<id>/telemetry` | `{battery_v, applied_vx, applied_wz, watchdog_trips}` |
+| `POST /robotctl/<id>/frame` | one JPEG per request (≤ MAX_FRAME) |
+
+## C. Verify without any robot (always after changes)
 
 ```bash
 .venv/bin/python -u tools/integration_test.py
 ```
 
-Starts fake rosbridge (:9091) + fake MJPEG cam (:9093) + Django (:8000),
-asserts: connect+telemetry, clamping, 10 Hz publish, watchdog stop, e-stop
-override, camera proxy, SPA serving, and the single-bridge-owner guard.
-Exits and cleans up — safe to re-run.
+Spawns fake MJPEG cam (:9103) + Django (:8100) + duplicate Django (:8111) +
+**two real robot clients in dry-run mode** (sink files record exactly what a
+real base would receive). Asserts: fleet listing/online/offline, telemetry
+uplink, 10 Hz publishing, command routing + per-robot isolation, token auth
+(401/404), clamp + serializer 400s, server staleness zero, e-stop latch +
+unlatch, **client watchdog on a frozen (SIGSTOP'd) server**, camera
+push→relay, SPA, flock single-owner 503. Self-cleaning; safe to re-run.
+Ports are 8100/8111/9103 — this host has live services on 8000/8001/8080;
+never bind/kill those.
+
+## Safety model (brushless — non-negotiable)
+
+- velocity clamped server-side before a robot can ever see it (`MAX_LIN`, `MAX_ROT`)
+- browser heartbeat ~10 Hz; held command older than `CMD_TIMEOUT` → zero served
+- e-stop latches zero; `/stop` or an explicit new cmd unlatches
+- robot onboard watchdog: no successful poll for `WEBCTL_WATCHDOG` s → zero
+- one server process owns all robot state (flock `.server.lock`); others 503
+- robots expose no ports at all; only the Django port needs network access
+- physical e-stop stays reachable; test with wheels in the air first
 
 ## Troubleshooting
 
-- `/api/cmd` → 503 "does not own the robot bridge": more than one server
-  process started; kill extras (the flock guard protects you, but fix the
-  supervision).
-- `connected: false`: wrong `ROBOT_WS_URL`, robot's rosbridge down, or
-  ROS_DOMAIN_ID mismatch on the robot.
-- camera 502: web_video_server down or `CAMERA_TOPIC` guess wrong — force it
-  in `.env` after `ros2 topic list`.
-- robot doesn't move though page says moving: wheeltec bringup node not
-  running on SBC (the bridge only publishes `/cmd_vel`; the bringup node
-  forwards it over UART to the STM32).
+- **robot OFFLINE in UI** → client down or WiFi joined wrong:
+  `journalctl -u wheeltec-robotctl` on the robot; test reachability from it:
+  `curl -u <id>:<token> http://<server>:8000/robotctl/<id>/cmd?wait=0`.
+- **401** on polls → token mismatch with `WEBCTL_ROBOTS` entry.
+- **503 "does not own"** → two server processes running; keep one.
+- **robot moves then stops ~1 s later** → browser tab lost focus / heartbeat
+  died (by design — that's the watchdog working).
+- **camera "unavailable"** → that robot's `WEBCTL_CAM_URL` unset, or
+  web_video_server down (`journalctl -u wheeltec-camera`); driving is
+  unaffected by camera failure by design.
+- **motors dead though UI says driving** → base driver not running on the
+  robot (client only publishes `/cmd_vel`; `turn_on_wheeltec_robot` forwards
+  it to the STM32).

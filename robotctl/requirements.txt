@@ -1,0 +1,4 @@
+# Robot-side dependency (rclpy itself comes from the ROS2 image on the SBC).
+# The wheeltec Ubuntu images already ship python3-requests; this is only for
+# images that do not.
+requests>=2.31

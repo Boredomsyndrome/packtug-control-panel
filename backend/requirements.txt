@@ -1,6 +1,8 @@
-Django>=6.1,<6.2
-djangorestframework>=3.18
-websockets>=12
-requests>=2.31
-whitenoise>=6.6
-python-dotenv>=1.0
+# Server (Django box / laptop) — pinned to the exact versions the integration
+# suite passed against (derive from `pip freeze`, cross-check imports first).
+# Robot-side deps live in robotctl/requirements.txt (client needs only requests).
+Django==6.1.2
+djangorestframework==3.18.3
+whitenoise==6.12.0
+python-dotenv==1.2.4
+gunicorn==26.0.0

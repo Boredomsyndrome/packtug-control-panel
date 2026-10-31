@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Fake MJPEG camera (emulates web_video_server) for offline testing."""
+"""Fake MJPEG camera (emulates web_video_server) for offline testing.
+
+Usage: fake_cam.py [port]   (default 9093)
+"""
 import http.server
 import socketserver
+import sys
 
 # smallest 1x1 JPEG
 JPEG = bytes.fromhex(
@@ -42,7 +46,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 9093
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", 9093), Handler) as httpd:
-        print("fake cam on http://127.0.0.1:9093/stream")
+    with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+        print(f"fake cam on http://127.0.0.1:{port}/stream")
         httpd.serve_forever()

@@ -1,7 +1,8 @@
 """DRF serializers for the wheeltec-webctl API.
 
 Input validation (VelocityCommandSerializer) is the first safety layer;
-the bridge clamps again to MAX_LIN/MAX_ROT regardless of what passes here.
+the hub clamps again to MAX_LIN/MAX_ROT regardless of what passes here.
+TelemetrySerializer guards the robot uplink (numbers only, no NaN/inf).
 """
 import math
 
@@ -27,7 +28,7 @@ class VelocityCommandSerializer(serializers.Serializer):
 
 
 class CommandResultSerializer(serializers.Serializer):
-    """Response for /api/robot/cmd — the actually-applied (clamped) values."""
+    """Response for /api/robot/<id>/cmd — the actually-applied (clamped) values."""
     ok = serializers.BooleanField()
     vx = serializers.FloatField()
     wz = serializers.FloatField()
@@ -35,19 +36,37 @@ class CommandResultSerializer(serializers.Serializer):
 
 
 class RobotStatusSerializer(serializers.Serializer):
-    """Read-only representation of robot.bridge.status()."""
-    connected = serializers.BooleanField()
-    owns_bridge = serializers.BooleanField()
-    ws_url = serializers.CharField()
+    """Read-only representation of RobotHub.status()."""
+    id = serializers.CharField()
+    online = serializers.BooleanField()
     battery_v = serializers.FloatField(allow_null=True)
-    battery_topic = serializers.CharField(allow_null=True)
     battery_age = serializers.FloatField(allow_null=True)
     cmd = VelocityCommandSerializer(read_only=True)
     cmd_age = serializers.FloatField(allow_null=True)
+    applied = VelocityCommandSerializer(read_only=True)
     estop = serializers.BooleanField()
+    watchdog_trips = serializers.IntegerField()
+    camera = serializers.BooleanField()
     cmd_timeout = serializers.FloatField()
-    uptime = serializers.FloatField()
-    publishes = serializers.IntegerField()
-    last_error = serializers.CharField(allow_null=True)
     max_lin = serializers.FloatField()
     max_rot = serializers.FloatField()
+    uptime = serializers.FloatField()
+    seq = serializers.IntegerField()
+
+
+class TelemetrySerializer(serializers.Serializer):
+    """Uplink body for POST /robotctl/<id>/telemetry (robot client -> server)."""
+    battery_v = serializers.FloatField(required=False, allow_null=True,
+                                       min_value=0.0, max_value=100.0)
+    applied_vx = serializers.FloatField(required=False, default=0.0,
+                                        min_value=-1e3, max_value=1e3)
+    applied_wz = serializers.FloatField(required=False, default=0.0,
+                                        min_value=-1e3, max_value=1e3)
+    watchdog_trips = serializers.IntegerField(required=False, default=0,
+                                              min_value=0, max_value=10**9)
+
+    def validate(self, attrs):
+        for value in attrs.values():
+            if isinstance(value, float) and not math.isfinite(value):
+                raise serializers.ValidationError("values must be finite")
+        return attrs

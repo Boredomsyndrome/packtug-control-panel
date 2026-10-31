@@ -7,3 +7,8 @@ __pycache__/
 bridge.lock
 frontend/dist/
 db.sqlite3
+
+.server.lock
+.bridge.lock
+.DS_Store
+__MACOSX/

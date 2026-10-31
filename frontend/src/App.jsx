@@ -21,17 +21,23 @@ async function post(url, body) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState(null)
-  const [lin, setLin] = useState(0.3)     // m/s applied while forward/back held
-  const [rot, setRot] = useState(0.5)     // rad/s applied while turning held
+  const [robots, setRobots] = useState([])
+  const [sel, setSel] = useState(null)          // selected robot id
+  const [lin, setLin] = useState(0.3)           // m/s applied while forward/back held
+  const [rot, setRot] = useState(0.5)           // rad/s applied while turning held
   const [estopLatch, setEstopLatch] = useState(false)
   const [camKey, setCamKey] = useState(0)
   const [camError, setCamError] = useState(false)
 
   const keysRef = useRef({ fwd: false, back: false, left: false, right: false })
   const movingRef = useRef(false)
+  const selRef = useRef(null)
+  selRef.current = sel
+
+  const status = robots.find((r) => r.id === sel) || null
   const maxLin = status?.max_lin ?? 0.5
   const maxRot = status?.max_rot ?? 0.7
+  const api = (path) => `/api/robot/${encodeURIComponent(sel)}${path}`
 
   const axisValues = useCallback(() => {
     const k = keysRef.current
@@ -41,9 +47,9 @@ export default function App() {
   }, [lin, rot])
 
   const sendStop = useCallback(async () => {
-    if (movingRef.current) {
+    if (movingRef.current && selRef.current) {
       movingRef.current = false
-      await post('/api/robot/stop', {})
+      await post(`/api/robot/${encodeURIComponent(selRef.current)}/stop`, {})
     }
   }, [])
 
@@ -52,7 +58,9 @@ export default function App() {
     keysRef.current = { fwd: false, back: false, left: false, right: false }
     movingRef.current = false
     setEstopLatch(false)
-    await post('/api/robot/stop', {})
+    if (selRef.current) {
+      await post(`/api/robot/${encodeURIComponent(selRef.current)}/stop`, {})
+    }
   }, [])
 
   const press = useCallback((dir, on) => {
@@ -62,23 +70,27 @@ export default function App() {
   const doEstop = useCallback(async () => {
     keysRef.current = { fwd: false, back: false, left: false, right: false }
     movingRef.current = false
-    await post('/api/robot/estop', {})
+    if (!selRef.current) return
+    await post(`/api/robot/${encodeURIComponent(selRef.current)}/estop`, {})
     setEstopLatch(true)
   }, [])
 
-  // ---- status polling (1 Hz) ----
+  // ---- fleet status polling (1 Hz) ----
   useEffect(() => {
     let stop = false
     const tick = async () => {
       try {
         const res = await fetch('/api/robot')
-        const s = await res.json()
-        if (!stop) {
-          setStatus(s)
-          setEstopLatch(!!s.estop)
-        }
+        const d = await res.json()
+        if (stop) return
+        const list = d.robots || []
+        setRobots(list)
+        setSel((cur) => {
+          if (cur && list.some((r) => r.id === cur)) return cur
+          return list.length ? list[0].id : null
+        })
       } catch {
-        if (!stop) setStatus((prev) => ({ ...(prev || {}), connected: false }))
+        if (!stop) setRobots((prev) => prev.map((r) => ({ ...r, online: false })))
       }
     }
     tick()
@@ -86,7 +98,7 @@ export default function App() {
     return () => { stop = true; clearInterval(id) }
   }, [])
 
-  // ---- keyboard driving ----
+  // keyboard driving (attached once; reads refs so it survives robot switches)
   useEffect(() => {
     const down = (e) => {
       if (e.repeat) return
@@ -122,24 +134,40 @@ export default function App() {
   }, [press, sendStop, doEstop, hardStop])
 
   // ---- 10 Hz command heartbeat while buttons/keys are held ----
+  // Commands only go to the SELECTED robot; offline robots get nothing
+  // (their hub-side staleness would zero the cmd anyway).
   useEffect(() => {
     const id = setInterval(async () => {
+      if (!sel) return
       const { vx, wz } = axisValues()
       if (vx !== 0 || wz !== 0) {
         movingRef.current = true
-        await post('/api/robot/cmd', { vx, wz })
+        await post(api('/cmd'), { vx, wz })
       } else if (movingRef.current) {
         await sendStop()
       }
     }, 100)
     return () => clearInterval(id)
-  }, [axisValues, sendStop])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [axisValues, sendStop, sel])
+
+  const pickRobot = (id) => {
+    if (id === sel) return
+    keysRef.current = { fwd: false, back: false, left: false, right: false }
+    if (movingRef.current) {
+      movingRef.current = false
+      post(`/api/robot/${encodeURIComponent(sel)}/stop`, {})  // stop the old one
+    }
+    setSel(id)
+    setCamError(false)
+    setCamKey((k) => k + 1)
+  }
 
   const battV = status?.battery_v
   const battPct = battV == null ? null :
     Math.max(0, Math.min(100, Math.round(((battV - BATT_EMPTY) / (BATT_FULL - BATT_EMPTY)) * 100)))
 
-  const connected = !!status?.connected
+  const connected = !!status?.online
 
   const presets = [
     { name: '🐢 crawl', lin: 0.15, rot: 0.25 },
@@ -151,10 +179,24 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <h1>WHEELTEC <span>WebCtl</span></h1>
+        <h1>WHEELTEC <span>Fleet WebCtl</span></h1>
+        <div className="fleet">
+          {robots.map((r) => (
+            <button key={r.id}
+                    className={`rchip ${r.id === sel ? 'sel' : ''}`}
+                    onClick={() => pickRobot(r.id)}
+                    title={`${r.id}: ${r.online ? 'online' : 'offline'}`}>
+              <span className={`dot ${r.online ? 'ok' : 'bad'}`} />
+              {r.id}
+              <small>{r.battery_v != null ? `${r.battery_v.toFixed(1)}V` : '--'}</small>
+              {r.estop && <span className="mini-estop">STOP</span>}
+            </button>
+          ))}
+          {robots.length === 0 && <span className="dim">no robots registered</span>}
+        </div>
         <div className="badges">
           <span className={`dot ${connected ? 'ok' : 'bad'}`} />
-          <span>{connected ? 'robot connected' : 'robot OFFLINE'}</span>
+          <span>{sel ? (connected ? `${sel} online` : `${sel} OFFLINE`) : '—'}</span>
           {status?.estop && <span className="estopbadge">E-STOP latched</span>}
           <span className="batt">
             {battV != null ? `${battV.toFixed(1)} V` : '-- V'}
@@ -167,27 +209,28 @@ export default function App() {
 
       <main className="grid">
         <section className="video">
-          {camError ? (
+          {!sel || camError ? (
             <div className="camfail">
-              <p>Camera stream unavailable.</p>
-              <p className="dim">Check the robot’s <code>web_video_server</code> and CAMERA_TOPIC.</p>
-              <button onClick={() => { setCamError(false); setCamKey(camKey + 1) }}>Retry stream</button>
+              <p>Camera stream unavailable{sel ? ` for ${sel}` : ''}.</p>
+              <p className="dim">That robot's client must run with WEBCTL_CAM_URL
+                {' '}set to its local MJPEG source.</p>
+              {sel && <button onClick={() => { setCamError(false); setCamKey(camKey + 1) }}>Retry stream</button>}
             </div>
           ) : (
-            <img key={camKey} src="/cam" alt="robot camera"
-                 onError={() => setCamError(true)} />
+            <img key={`${sel}-${camKey}`} src={`/cam/${encodeURIComponent(sel)}`}
+                 alt={`${sel} camera`} onError={() => setCamError(true)} />
           )}
         </section>
 
         <section className="drive">
           <div className="dpad" onContextMenu={(e) => e.preventDefault()}>
-            <DriveBtn label="▲" dir="fwd" press={press} />
+            <DriveBtn label="▲" dir="fwd" press={press} disabled={!connected} />
             <div className="dpad-mid">
-              <DriveBtn label="◀" dir="left" press={press} />
-              <div className="dpad-center">hold to move<br/>WASD/arrows ok</div>
-              <DriveBtn label="▶" dir="right" press={press} />
+              <DriveBtn label="◀" dir="left" press={press} disabled={!connected} />
+              <div className="dpad-center">hold to move<br />WASD/arrows ok</div>
+              <DriveBtn label="▶" dir="right" press={press} disabled={!connected} />
             </div>
-            <DriveBtn label="▼" dir="back" press={press} />
+            <DriveBtn label="▼" dir="back" press={press} disabled={!connected} />
           </div>
 
           <div className="row presets">
@@ -226,8 +269,8 @@ export default function App() {
           </button>
 
           <p className="hint">
-            Server watchdog stops the robot if commands lapse &gt;
-            {status?.cmd_timeout ?? 0.5}s. Page blur/hide always sends stop.
+            Robot stops if commands lapse &gt; {status?.cmd_timeout ?? 0.5}s (server) or its
+            own link dies (onboard watchdog). Page blur/hide always sends stop.
           </p>
         </section>
       </main>
@@ -235,8 +278,10 @@ export default function App() {
       <footer className="foot">
         {status ? (
           <span>
-            {status.ws_url} · publishes {status.publishes} ·
-            cam topic via /cam · clamps ±{maxLin} m/s ±{maxRot} rad/s
+            {status.id} · applied {status.applied.vx.toFixed(2)} m/s {status.applied.wz.toFixed(2)} rad/s ·
+            link state {status.applied.vx !== 0 || status.applied.wz !== 0 ? 'driving' : 'idle'} ·
+            watchdog trips {status.watchdog_trips} · seq {status.seq} ·
+            clamps ±{maxLin} m/s ±{maxRot} rad/s
           </span>
         ) : <span>connecting…</span>}
       </footer>
@@ -244,13 +289,18 @@ export default function App() {
   )
 }
 
-function DriveBtn({ label, dir, press }) {
+function DriveBtn({ label, dir, press, disabled }) {
   const [active, setActive] = useState(false)
-  const on = (e) => { e.preventDefault(); setActive(true); press(dir, true) }
+  const on = (e) => {
+    e.preventDefault()
+    if (disabled) return
+    setActive(true); press(dir, true)
+  }
   const off = () => { setActive(false); press(dir, false) }
   return (
     <button
-      className={`dbtn ${active ? 'active' : ''}`}
+      className={`dbtn ${active ? 'active' : ''} ${disabled ? 'off' : ''}`}
+      disabled={disabled}
       onPointerDown={on} onPointerUp={off} onPointerLeave={off}
       onPointerCancel={off}>
       {label}

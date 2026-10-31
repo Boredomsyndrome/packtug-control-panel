@@ -20,6 +20,14 @@ export interface Sku {
   weight: number
 }
 
+/** user-entered goods parameters (id is assigned by the store) */
+export interface SkuInput {
+  name: string
+  category: string
+  size: Size3
+  weight: number
+}
+
 export interface OrderItem {
   skuId: string
   qty: number
@@ -124,6 +132,8 @@ export interface Mission {
 }
 
 export interface Placement {
+  /** 1-based placement order the robotic arm executes */
+  seq: number
   skuId: string
   name: string
   x: number
@@ -133,6 +143,8 @@ export interface Placement {
   d: number
   h: number
   weight: number
+  /** fraction of the base resting on the floor / cartons below (0-1) */
+  support: number
 }
 
 export interface CagePlan {

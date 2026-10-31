@@ -9,17 +9,21 @@ import type {
   Zone,
 } from '../types'
 
-export const CAGE_BIN = { w: 1150, d: 750, h: 1650, maxWeight: 500 }
+// Plan A cage — reach-matched to Ned2 (side placement, standard gripper):
+// internal 550 (W) x 200 (D) x 400 (H) mm, floor level with the arm base plane.
+export const CAGE_BIN = { w: 550, d: 200, h: 400, maxWeight: 20 }
 
+// Demo goods sized for the Ned2: every carton fits the 550x200x400 cage and
+// weighs <= 0.3 kg (Ned2 payload).
 export const SKUS: Sku[] = [
-  { id: 'SKU-1001', name: 'Frozen Dumplings 1kg×10', category: 'Frozen dim sum', size: { w: 400, d: 300, h: 200 }, weight: 11 },
-  { id: 'SKU-1002', name: 'Frozen Buns 1kg×8', category: 'Frozen dim sum', size: { w: 500, d: 350, h: 250 }, weight: 9 },
-  { id: 'SKU-1003', name: 'Frozen Beef Carton 10kg', category: 'Frozen meat', size: { w: 600, d: 400, h: 300 }, weight: 15 },
-  { id: 'SKU-1004', name: 'Frozen Mixed Veg 500g×12', category: 'Frozen veg', size: { w: 450, d: 300, h: 250 }, weight: 8 },
-  { id: 'SKU-1005', name: 'Frozen Fries 2kg×6', category: 'Frozen potato', size: { w: 400, d: 300, h: 300 }, weight: 12 },
-  { id: 'SKU-1006', name: 'Frozen Fish Fillet 1kg×10', category: 'Frozen seafood', size: { w: 550, d: 350, h: 200 }, weight: 10 },
-  { id: 'SKU-1007', name: 'Frozen Pizza 350g×16', category: 'Frozen bakery', size: { w: 350, d: 350, h: 150 }, weight: 6 },
-  { id: 'SKU-1008', name: 'Frozen Dessert 1kg×8', category: 'Frozen dessert', size: { w: 300, d: 250, h: 200 }, weight: 5 },
+  { id: 'SKU-1001', name: 'Frozen Dim Sum Box', category: 'Frozen dim sum', size: { w: 200, d: 120, h: 100 }, weight: 0.18 },
+  { id: 'SKU-1002', name: 'Frozen Bun Tray', category: 'Frozen dim sum', size: { w: 180, d: 150, h: 120 }, weight: 0.2 },
+  { id: 'SKU-1003', name: 'Frozen Meat Pack', category: 'Frozen meat', size: { w: 250, d: 180, h: 150 }, weight: 0.28 },
+  { id: 'SKU-1004', name: 'Mixed Veg Pouch', category: 'Frozen veg', size: { w: 160, d: 100, h: 80 }, weight: 0.12 },
+  { id: 'SKU-1005', name: 'Frozen Fries Pack', category: 'Frozen potato', size: { w: 220, d: 140, h: 110 }, weight: 0.2 },
+  { id: 'SKU-1006', name: 'Fish Fillet Tray', category: 'Frozen seafood', size: { w: 150, d: 120, h: 100 }, weight: 0.15 },
+  { id: 'SKU-1007', name: 'Pizza Carton', category: 'Frozen bakery', size: { w: 200, d: 160, h: 90 }, weight: 0.17 },
+  { id: 'SKU-1008', name: 'Dessert Cup Tray', category: 'Frozen dessert', size: { w: 120, d: 100, h: 70 }, weight: 0.1 },
 ]
 
 export const ORDERS: Order[] = [
@@ -31,10 +35,10 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T08:10:00+08:00',
     dueAt: '2026-10-07T11:30:00+08:00',
     items: [
-      { skuId: 'SKU-1001', qty: 6 },
-      { skuId: 'SKU-1003', qty: 4 },
-      { skuId: 'SKU-1005', qty: 8 },
-      { skuId: 'SKU-1007', qty: 10 },
+      { skuId: 'SKU-1001', qty: 3 },
+      { skuId: 'SKU-1003', qty: 2 },
+      { skuId: 'SKU-1005', qty: 2 },
+      { skuId: 'SKU-1008', qty: 4 },
     ],
     assignedAgvId: 'AGV-01',
   },
@@ -46,9 +50,10 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T08:20:00+08:00',
     dueAt: '2026-10-07T12:00:00+08:00',
     items: [
-      { skuId: 'SKU-1002', qty: 12 },
-      { skuId: 'SKU-1004', qty: 10 },
-      { skuId: 'SKU-1008', qty: 14 },
+      { skuId: 'SKU-1002', qty: 3 },
+      { skuId: 'SKU-1004', qty: 5 },
+      { skuId: 'SKU-1006', qty: 4 },
+      { skuId: 'SKU-1007', qty: 2 },
     ],
   },
   {
@@ -59,9 +64,10 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T08:35:00+08:00',
     dueAt: '2026-10-07T12:30:00+08:00',
     items: [
-      { skuId: 'SKU-1003', qty: 6 },
-      { skuId: 'SKU-1006', qty: 8 },
-      { skuId: 'SKU-1001', qty: 6 },
+      { skuId: 'SKU-1001', qty: 3 },
+      { skuId: 'SKU-1003', qty: 2 },
+      { skuId: 'SKU-1006', qty: 3 },
+      { skuId: 'SKU-1008', qty: 3 },
     ],
   },
   {
@@ -72,9 +78,9 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T09:00:00+08:00',
     dueAt: '2026-10-07T15:00:00+08:00',
     items: [
-      { skuId: 'SKU-1007', qty: 20 },
-      { skuId: 'SKU-1008', qty: 12 },
       { skuId: 'SKU-1004', qty: 8 },
+      { skuId: 'SKU-1006', qty: 6 },
+      { skuId: 'SKU-1008', qty: 8 },
     ],
   },
   {
@@ -85,8 +91,9 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T07:40:00+08:00',
     dueAt: '2026-10-07T11:00:00+08:00',
     items: [
-      { skuId: 'SKU-1005', qty: 14 },
-      { skuId: 'SKU-1002', qty: 10 },
+      { skuId: 'SKU-1005', qty: 3 },
+      { skuId: 'SKU-1002', qty: 3 },
+      { skuId: 'SKU-1008', qty: 4 },
     ],
     assignedAgvId: 'AGV-02',
   },
@@ -98,9 +105,9 @@ export const ORDERS: Order[] = [
     createdAt: '2026-10-07T07:00:00+08:00',
     dueAt: '2026-10-07T10:30:00+08:00',
     items: [
-      { skuId: 'SKU-1006', qty: 10 },
-      { skuId: 'SKU-1003', qty: 5 },
-      { skuId: 'SKU-1008', qty: 10 },
+      { skuId: 'SKU-1002', qty: 4 },
+      { skuId: 'SKU-1007', qty: 4 },
+      { skuId: 'SKU-1008', qty: 4 },
     ],
     assignedAgvId: 'AGV-03',
   },
@@ -144,13 +151,15 @@ export const ZONES: Zone[] = [
   { id: 'Z-CHARGE', name: 'Charging Bay', kind: 'charging', temperatureC: 15, fillRate: 0.0, capacityCages: 6, cages: [] },
 ]
 
+const binVol = CAGE_BIN.w * CAGE_BIN.d * CAGE_BIN.h
+
 export const CAGES: Cage[] = [
-  { id: 'CAGE-01', state: 'loading', zoneId: 'Z-COLD-A', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0.42 * CAGE_BIN.w * CAGE_BIN.d * CAGE_BIN.h, loadWeight: 186, centerOfGravity: { x: 560, y: 370, z: 480 }, orderId: 'ORD-24001' },
-  { id: 'CAGE-02', state: 'empty', zoneId: 'Z-COLD-B', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0, loadWeight: 0 },
-  { id: 'CAGE-03', state: 'in-transit', zoneId: 'Z-DISPATCH', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0.66 * CAGE_BIN.w * CAGE_BIN.d * CAGE_BIN.h, loadWeight: 274, centerOfGravity: { x: 540, y: 360, z: 690 }, orderId: 'ORD-24005' },
-  { id: 'CAGE-04', state: 'staged', zoneId: 'Z-COLD-A', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0.31 * CAGE_BIN.w * CAGE_BIN.d * CAGE_BIN.h, loadWeight: 132, centerOfGravity: { x: 585, y: 390, z: 360 } },
-  { id: 'CAGE-05', state: 'empty', zoneId: 'Z-STAGE', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0, loadWeight: 0 },
-  { id: 'CAGE-06', state: 'sealed', zoneId: 'Z-DISPATCH', dims: CAGE_BIN, maxWeight: 500, loadVolume: 0.55 * CAGE_BIN.w * CAGE_BIN.d * CAGE_BIN.h, loadWeight: 210, centerOfGravity: { x: 550, y: 365, z: 600 } },
+  { id: 'CAGE-01', state: 'loading', zoneId: 'Z-COLD-A', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0.4 * binVol, loadWeight: 1.8, centerOfGravity: { x: 260, y: 95, z: 160 }, orderId: 'ORD-24001' },
+  { id: 'CAGE-02', state: 'empty', zoneId: 'Z-COLD-B', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0, loadWeight: 0 },
+  { id: 'CAGE-03', state: 'in-transit', zoneId: 'Z-DISPATCH', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0.6 * binVol, loadWeight: 2.9, centerOfGravity: { x: 255, y: 100, z: 220 }, orderId: 'ORD-24005' },
+  { id: 'CAGE-04', state: 'staged', zoneId: 'Z-COLD-A', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0.3 * binVol, loadWeight: 1.3, centerOfGravity: { x: 268, y: 92, z: 130 } },
+  { id: 'CAGE-05', state: 'empty', zoneId: 'Z-STAGE', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0, loadWeight: 0 },
+  { id: 'CAGE-06', state: 'sealed', zoneId: 'Z-DISPATCH', dims: CAGE_BIN, maxWeight: CAGE_BIN.maxWeight, loadVolume: 0.55 * binVol, loadWeight: 2.4, centerOfGravity: { x: 270, y: 98, z: 200 } },
 ]
 
 function step(id: string, label: string, status: MissionStep['status']): MissionStep {

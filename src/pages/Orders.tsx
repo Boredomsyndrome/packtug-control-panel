@@ -24,12 +24,12 @@ export function Orders() {
   const [branch, setBranch] = useState('Fairwood · Central')
   const [priority, setPriority] = useState<OrderPriority>('normal')
   const [dueAt, setDueAt] = useState('2026-10-07T14:00')
-  const [items, setItems] = useState<OrderItem[]>([{ skuId: skus[0].id, qty: 4 }])
+  const [items, setItems] = useState<OrderItem[]>(skus[0] ? [{ skuId: skus[0].id, qty: 4 }] : [])
 
   const idleAgvs = useMemo(() => agvs.filter((a) => a.status === 'idle' && a.battery > 25), [agvs])
 
   function addRow() {
-    setItems((prev) => [...prev, { skuId: skus[0].id, qty: 2 }])
+    setItems((prev) => [...prev, { skuId: skus[0]?.id ?? '', qty: 2 }])
   }
   function updateRow(i: number, patch: Partial<OrderItem>) {
     setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)))
@@ -39,6 +39,7 @@ export function Orders() {
   }
 
   async function submit() {
+    if (!items.length || items.some((it) => !it.skuId)) return
     await createOrder({ branch, priority, dueAt: new Date(dueAt).toISOString(), items })
     setShowForm(false)
     setItems([{ skuId: skus[0].id, qty: 4 }])
@@ -50,7 +51,7 @@ export function Orders() {
         title="Orders"
         desc="Outbound orders per branch. Packing plans drive the pick & place sequence."
         actions={
-          <button className="btn primary" onClick={() => setShowForm((s) => !s)}>
+          <button className="btn primary" onClick={() => setShowForm((s) => !s)} disabled={skus.length === 0}>
             {showForm ? 'Close' : '+ New order'}
           </button>
         }

@@ -160,7 +160,7 @@ export function OrderDetail() {
 
       {plan && plan.cages[0] && (
         <Card title="Packed cage preview" hint={`Cage 1 of ${plan.cages.length} · drag-free`}>
-          <Cage3DView cage={plan.cages[0]} />
+          <Cage3DView cage={plan.cages[0]} bin={plan.bin} />
           <div className="row" style={{ marginTop: 12 }}>
             <button className="btn sm" onClick={() => navigate(`/packing/${order.id}`)}>
               Open packing console

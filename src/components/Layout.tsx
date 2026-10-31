@@ -7,6 +7,7 @@ import type { Role } from '../types'
 const NAV = [
   { to: '/', label: 'Dashboard', ico: '▚', end: true },
   { to: '/orders', label: 'Orders', ico: '☰' },
+  { to: '/goods', label: 'Goods', ico: '▦' },
   { to: '/packing', label: '3D Packing', ico: '▣' },
   { to: '/missions', label: 'Missions', ico: '➤' },
   { to: '/fleet', label: 'Fleet', ico: '⬢' },

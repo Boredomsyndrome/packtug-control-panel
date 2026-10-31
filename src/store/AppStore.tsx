@@ -19,6 +19,7 @@ import type {
   PackingPlan,
   Role,
   Sku,
+  SkuInput,
   ThroughputPoint,
   Zone,
 } from '../types'
@@ -54,6 +55,8 @@ interface AppActions {
   logout: () => void
   setRole: (role: Role) => void
   createOrder: (input: { branch: string; priority: OrderPriority; dueAt: string; items: OrderItem[] }) => Promise<void>
+  addSku: (input: SkuInput) => Sku
+  removeSku: (id: string) => void
   runPacking: (orderId: string) => Promise<PackingPlan | undefined>
   dispatchOrder: (orderId: string, agvId: string) => Promise<void>
   controlMission: (missionId: string, action: 'pause' | 'resume' | 'abort') => Promise<void>
@@ -100,8 +103,8 @@ function buildPickSteps(order: Order, skuMap: Record<string, Sku>): MissionStep[
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [skus] = useState<Sku[]>(SKUS)
-  const skuMap = useMemo(() => Object.fromEntries(SKUS.map((s) => [s.id, s])), [skus])
+  const [skus, setSkus] = useState<Sku[]>(SKUS)
+  const skuMap = useMemo(() => Object.fromEntries(skus.map((s) => [s.id, s])), [skus])
 
   const [orders, setOrders] = useState<Order[]>(ORDERS)
   const [cages, setCages] = useState<Cage[]>(CAGES)
@@ -148,6 +151,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const order = await api.createOrder(input)
       setOrders((prev) => [order, ...prev])
       pushActivity(`Order ${order.id} created for ${order.branch}`, 'success')
+    },
+    [pushActivity],
+  )
+
+  const addSku = useCallback<AppActions['addSku']>(
+    (input) => {
+      const nums = skus
+        .map((s) => Number(s.id.replace(/\D/g, '')))
+        .filter((n) => Number.isFinite(n) && n > 0)
+      const id = `SKU-${(nums.length ? Math.max(...nums) : 1000) + 1}`
+      const sku: Sku = { id, name: input.name, category: input.category, size: input.size, weight: input.weight }
+      setSkus((prev) => [...prev, sku])
+      pushActivity(`Goods ${id} added · ${sku.name} (${sku.size.w}×${sku.size.d}×${sku.size.h} mm, ${sku.weight} kg)`, 'success')
+      return sku
+    },
+    [skus, pushActivity],
+  )
+
+  const removeSku = useCallback<AppActions['removeSku']>(
+    (id) => {
+      setSkus((prev) => prev.filter((s) => s.id !== id))
+      pushActivity(`Goods ${id} removed`, 'warn')
     },
     [pushActivity],
   )
@@ -314,6 +339,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     logout,
     setRole,
     createOrder,
+    addSku,
+    removeSku,
     runPacking,
     dispatchOrder,
     controlMission,

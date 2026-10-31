@@ -30,3 +30,10 @@ export function duration(sec?: number): string {
 export function volumeLitres(mm3: number): string {
   return `${(mm3 / 1e6).toFixed(0)} L`
 }
+
+/** Stable hue (0-360) for a SKU id — shared by the 3D view and tables. */
+export function hueForSku(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360
+  return h
+}

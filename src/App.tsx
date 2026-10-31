@@ -5,6 +5,7 @@ import { Login } from './pages/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Orders } from './pages/Orders'
 import { OrderDetail } from './pages/OrderDetail'
+import { Goods } from './pages/Goods'
 import { Packing } from './pages/Packing'
 import { Missions } from './pages/Missions'
 import { Fleet } from './pages/Fleet'
@@ -21,6 +22,7 @@ function Shell() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/orders/:id" element={<OrderDetail />} />
+        <Route path="/goods" element={<Goods />} />
         <Route path="/packing" element={<Packing />} />
         <Route path="/packing/:orderId" element={<Packing />} />
         <Route path="/missions" element={<Missions />} />

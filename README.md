@@ -6,7 +6,9 @@ system**: robots are pure HTTP clients that call it — no rosbridge, no
 websockets, no listening ports, no hotspot on the robots.
 
 > **Setting up? Start at [`SETUP.md`](SETUP.md)** — ordered zero→fleet-driving
-> guide. `ROBOT_SETUP.md` = exhaustive robot-side reference; this README =
+> guide. Bringing a router to school? [`SCHOOL_SETUP.md`](SCHOOL_SETUP.md) —
+> offline-LAN plan (WAN stays empty, one DHCP reservation, zero school deps).
+> `ROBOT_SETUP.md` = exhaustive robot-side reference; this README =
 > architecture, API and verification.
 
 ```

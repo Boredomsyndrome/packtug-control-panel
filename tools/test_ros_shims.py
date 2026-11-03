@@ -98,6 +98,8 @@ _mod("sensor_msgs.msg", Image=type("Image", (), {}))
 # fake cv2: pass-through geometry, imencode hands back a marker payload
 cv2 = _mod("cv2", COLOR_RGB2BGR=0, COLOR_RGBA2BGR=1, COLOR_BGRA2BGR=2,
            COLOR_GRAY2BGR=3, IMWRITE_JPEG_QUALITY=4,
+           COLOR_YUV2BGR_YUYV=10, COLOR_YUV2BGR_UYVY=11, COLOR_YUV2BGR_Y422=12,
+           COLOR_YUV2BGR_NV12=13, COLOR_YUV2BGR_NV21=14, COLOR_YUV2BGR_I420=15,
            cvtColor=lambda img, code: img,
            resize=lambda img, size: img,
            imencode=lambda ext, img, params=None:
@@ -160,6 +162,29 @@ if HAVE_NUMPY:
     check("padded Image msg decodes to a JPEG frame via subscription callback",
           isinstance(jpeg, bytes) and jpeg.startswith(b"\xff\xd8")
           and jpeg.endswith(b"\xff\xd9"), f"({len(jpeg) if jpeg else 0} bytes)")
+
+    # packed YUYV = usb_cam's raw default; used to be dropped as unsupported
+    ystep = w * 2
+    ymsg = types.SimpleNamespace(encoding="yuyv422", height=h, width=w,
+                                 step=ystep, data=bytes(bytearray(h * ystep)))
+    topic_cb(ymsg)
+    jy = cam.read()
+    check("yuyv422 packed msg decodes (usb_cam raw default)",
+          isinstance(jy, bytes) and jy.startswith(b"\xff\xd8"))
+
+    # planar NV12
+    nmsg = types.SimpleNamespace(encoding="nv12", height=h, width=w, step=w,
+                                 data=bytes(bytearray(h * w * 3 // 2)))
+    topic_cb(nmsg)
+    jn = cam.read()
+    check("nv12 planar msg decodes", isinstance(jn, bytes)
+          and jn.startswith(b"\xff\xd8"))
+
+    # unknown encoding: warn-and-drop, never raise, never feed a frame
+    umsg = types.SimpleNamespace(encoding="bgra16", height=h, width=w,
+                                 step=0, data=b"")
+    topic_cb(umsg)
+    check("unknown encoding returns None without raising", cam.read() is None)
 else:
     print("SKIP  decode test (numpy not installed)")
 

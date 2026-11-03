@@ -765,6 +765,17 @@ class RosCamSource:
         self._cv2 = cv2
         log.info("camera: ros subscription(s) %s", topics)
 
+    # encoding -> (bytes per pixel, OpenCV conversion to BGR; None = already BGR)
+    _PACKED = {"rgb8": (3, "COLOR_RGB2BGR"), "bgr8": (3, None),
+               "rgba8": (4, "COLOR_RGBA2BGR"), "bgra8": (4, "COLOR_BGRA2BGR"),
+               "mono8": (1, "COLOR_GRAY2BGR"),
+               # packed 4:2:2 — usb_cam's raw default (the old black-video bug)
+               "yuyv422": (2, "COLOR_YUV2BGR_YUYV"),
+               "uyvy": (2, "COLOR_YUV2BGR_UYVY"),
+               "yuv422": (2, "COLOR_YUV2BGR_Y422")}
+    _PLANAR = {"nv12": "COLOR_YUV2BGR_NV12", "nv21": "COLOR_YUV2BGR_NV21",
+               "i420": "COLOR_YUV2BGR_I420", "yuv420": "COLOR_YUV2BGR_I420"}
+
     def read(self):
         got = self.last
         if not got:
@@ -772,32 +783,39 @@ class RosCamSource:
             return None
         _, msg = got
         self.last = None
-        enc = msg.encoding
-        ch = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1}.get(enc)
-        if ch is None:
-            if enc not in self.warned_enc:
-                self.warned_enc.add(enc)
-                log.warning("camera: unsupported encoding %r (topic dropped)", enc)
-            return None
-        # respect msg.step (rows can be padded — width*ch slicing miscolours
-        # those streams); fall back to tight layout if step looks wrong
-        h, w, need = msg.height, msg.width, msg.width * ch
-        buf = self._np.frombuffer(msg.data, dtype=self._np.uint8)
+        np = self._np
+        enc, h, w = msg.encoding, msg.height, msg.width
+        step = int(msg.step or 0)
         try:
-            if msg.step and msg.step >= need:
-                img = buf[:h * msg.step].reshape(h, msg.step)[:, :need].reshape(h, w, ch)
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            if enc in self._PACKED:
+                ch, conv = self._PACKED[enc]
+                need = w * ch
+                # respect msg.step (rows can be padded — width*ch slicing
+                # miscolours those streams); fall back to tight layout
+                if step >= need:
+                    img = buf[:h * step].reshape(h, step)[:, :need].reshape(h, w, ch)
+                else:
+                    img = buf[:h * need].reshape(h, w, ch)
+            elif enc in self._PLANAR:
+                conv = self._PLANAR[enc]
+                if step and step != w:      # padded planar: bail, log it once
+                    raise ValueError(f"padded planar step={step}")
+                img = buf[:h * w * 3 // 2].reshape(h * 3 // 2, w)
             else:
-                img = buf[:h * need].reshape(h, w, ch)
-        except (ValueError, IndexError):
+                if enc not in self.warned_enc:
+                    self.warned_enc.add(enc)
+                    log.warning("camera: unsupported encoding %r (topic dropped)",
+                                enc)
+                return None
+            if conv:
+                img = self._cv2.cvtColor(img, getattr(self._cv2, conv))
+        except Exception as e:
+            key = enc + ":decode"
+            if key not in self.warned_enc:
+                self.warned_enc.add(key)
+                log.warning("camera decode failed for encoding %r: %s", enc, e)
             return None
-        if enc == "rgb8":
-            img = self._cv2.cvtColor(img, self._cv2.COLOR_RGB2BGR)
-        elif enc == "rgba8":
-            img = self._cv2.cvtColor(img, self._cv2.COLOR_RGBA2BGR)
-        elif enc == "bgra8":
-            img = self._cv2.cvtColor(img, self._cv2.COLOR_BGRA2BGR)
-        elif enc == "mono8":
-            img = self._cv2.cvtColor(img, self._cv2.COLOR_GRAY2BGR)
         h, w = img.shape[:2]
         if w > CAM_WIDTH:
             img = self._cv2.resize(img, (CAM_WIDTH, int(h * CAM_WIDTH / w)))

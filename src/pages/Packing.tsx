@@ -102,7 +102,7 @@ export function Packing() {
       ) : (
         <>
           <div className="grid cols-4">
-            <KpiCard label="Cages required" value={plan?.cages.length ?? '—'} foot={`bin ${plan?.bin.w ?? 1150}×${plan?.bin.d ?? 750}×${plan?.bin.h ?? 1650} mm`} tone="violet" />
+            <KpiCard label="Cages required" value={plan?.cages.length ?? '—'} foot={`bin ${plan?.bin.w ?? 550}×${plan?.bin.d ?? 250}×${plan?.bin.h ?? 400} mm`} tone="violet" />
             <KpiCard label="Overall utilisation" value={plan ? pct(plan.totalUtil) : '—'} foot="filled volume / cage volume" tone="green" />
             <KpiCard label="Cartons" value={plan?.itemCount ?? '—'} foot={`total weight ${kg(totalWeight)}`} tone="cyan" />
             <KpiCard

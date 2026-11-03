@@ -11,7 +11,7 @@ interface Face {
 }
 
 const LIGHT_DIR: Vec3 = { x: 0.35, y: -0.55, z: 0.76 }
-const DEFAULT_BIN: Size3 = { w: 550, d: 200, h: 400 }
+const DEFAULT_BIN: Size3 = { w: 550, d: 250, h: 400 }
 
 const DROP_MS = 720
 const APPROACH_Y = 260

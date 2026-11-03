@@ -9,11 +9,11 @@ import type {
   Zone,
 } from '../types'
 
-// Plan A cage — reach-matched to Ned2 (side placement, standard gripper):
-// internal 550 (W) x 200 (D) x 400 (H) mm, floor level with the arm base plane.
-export const CAGE_BIN = { w: 550, d: 200, h: 400, maxWeight: 20 }
+// Final cage — reach-matched to Ned2 (side placement, standard gripper):
+// internal 550 (W) x 250 (D) x 400 (H) mm, floor level with the arm base plane.
+export const CAGE_BIN = { w: 550, d: 250, h: 400, maxWeight: 20 }
 
-// Demo goods sized for the Ned2: every carton fits the 550x200x400 cage and
+// Demo goods sized for the Ned2: every carton fits the 550x250x400 cage and
 // weighs <= 0.3 kg (Ned2 payload).
 export const SKUS: Sku[] = [
   { id: 'SKU-1001', name: 'Frozen Dim Sum Box', category: 'Frozen dim sum', size: { w: 200, d: 120, h: 100 }, weight: 0.18 },

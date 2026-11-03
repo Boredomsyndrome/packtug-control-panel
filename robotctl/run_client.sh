@@ -17,4 +17,4 @@ fi
 # (Sourcing is env-only — nothing is installed.)
 [ -f /opt/ros/humble/setup.bash ] && . /opt/ros/humble/setup.bash 2>/dev/null || true
 [ -f "$HOME/wheeltec_robot/install/setup.bash" ] && . "$HOME/wheeltec_robot/install/setup.bash" 2>/dev/null || true
-exec python3 "$DIR/robotctl/client.py"
+exec python3 -u "$DIR/robotctl/client.py"

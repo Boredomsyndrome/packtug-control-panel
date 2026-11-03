@@ -54,7 +54,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "2.1-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.0.0-stdlib")
 
 SERVER = os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000").rstrip("/")
 ROBOT_ID = os.getenv("WEBCTL_ROBOT_ID", "")
@@ -323,7 +323,7 @@ class Client:
         self.trips = 0
         self.publishes = 0
         self.state = "starting"
-        self.sink = self._make_sink()
+        self.sink = None               # built in run(): logs precede any slow init
         self.ws = None                 # StdWs when connected (net thread owns)
         self.ws_is_live = False
 
@@ -507,7 +507,12 @@ class Client:
             time.sleep(1.0)
 
     # ---------- camera ----------
-    def cam_loop(self, source):
+    def cam_loop(self, source=None):
+        if source is None:                 # lazy: resolved off the main thread
+            log.info("camera: resolving source (mode=%s)...", CAM_MODE)
+            source = make_cam()
+            if source is None:
+                return
         period = 1.0 / max(1.0, CAM_FPS)
         next_t = time.monotonic()
         while running:
@@ -551,17 +556,18 @@ class Client:
         return Sink(SINK)
 
     def run(self):
-        logging.basicConfig(level=logging.INFO,
-                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-        cam_src = make_cam() if CAM_MODE != "off" else None
         log.info("robotctl %s client '%s' -> %s (transport=%s watchdog=%.2fs cam=%s)",
                  VERSION, ROBOT_ID, SERVER, TRANSPORT, WATCHDOG, CAM_MODE)
+        log.info("initialising velocity sink (dry_run=%s; first rclpy start "
+                 "can take a few seconds)...", DRY_RUN)
+        self.sink = self._make_sink()
         threads = [threading.Thread(target=self.net_loop, daemon=True, name="net"),
                    threading.Thread(target=self.publish_loop, daemon=True, name="publish"),
                    threading.Thread(target=self.telemetry_loop, daemon=True, name="telemetry")]
-        if cam_src is not None:
-            threads.append(threading.Thread(target=self.cam_loop, args=(cam_src,),
-                                            daemon=True, name="cam"))
+        if CAM_MODE != "off":
+            # camera resolves INSIDE its thread — a slow/hanging device probe
+            # must never delay the control link or this log stream.
+            threads.append(threading.Thread(target=self.cam_loop, daemon=True, name="cam"))
         for t in threads:
             t.start()
         while running:
@@ -596,6 +602,8 @@ class RosSink:
     rclpy ships in the WHEELTEC ROS2 image — nothing is installed for it."""
 
     def __init__(self):
+        log.info("rclpy: initialising node 'webctl_robot_client' "
+                 "(DDS discovery on first boot can take a few seconds)...")
         import rclpy
         from geometry_msgs.msg import Twist
         from std_msgs.msg import Float32
@@ -801,10 +809,14 @@ def make_cam():
             try:
                 import rclpy  # noqa: F401
                 topics = [CAM_ROS_TOPIC] if CAM_ROS_TOPIC else ROS_CAM_CANDIDATES
+                log.info("camera: trying ROS image topic(s) %s", ", ".join(topics))
                 return RosCamSource(topics)
             except Exception:
                 pass
         try:
+            log.info("camera: trying cv2 device %s "
+                     "(probe can hang on CSI cams — set WEBCTL_CAM_MODE=ros "
+                     "or off if it stalls here)", CAM_DEVICE or 0)
             return Cv2Source(CAM_DEVICE)          # no cv2/no device -> passes on
         except Exception:
             pass
@@ -821,4 +833,13 @@ if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"robotctl {VERSION} (stdlib-only: ws + http fallback)")
         sys.exit(0)
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("WEBCTL_LOG_LEVEL", "INFO").upper(),
+                      logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True)
+    # stdout banner too: if nothing else ever prints, python never even got
+    # here (bad interpreter/env) — distinguishes wrapper vs client silence.
+    print(f"robotctl {VERSION} starting "
+          f"(python {sys.version.split()[0]}, id={ROBOT_ID or '(unset -> exits)'}"
+          f", server={SERVER})", flush=True)
     Client().run()

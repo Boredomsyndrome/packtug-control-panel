@@ -99,8 +99,25 @@ cp ~/wheeltec-webctl/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.e
 chmod 600 ~/.config/wheeltec-robotctl.env
 nano ~/.config/wheeltec-robotctl.env       # SERVER + this robot's ID/TOKEN
 tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
-# log line wanted: websocket up -> ws://<server>/ws/robotctl/<id>
 ```
+
+Within ~1 s you should see a whole boot story (every step logs BEFORE it
+runs, so a stall names itself):
+
+```
+robotctl: using /home/wheeltec/.config/wheeltec-robotctl.env
+robotctl 3.0.0-stdlib starting (python 3.8.x, id=s2000-1)
+... INFO robotctl: robotctl 3.0.0-stdlib client 's2000-1' -> http://... (transport=auto ...)
+... INFO robotctl: initialising velocity sink (dry_run=False; first rclpy start ...
+... INFO robotctl: rclpy: initialising node 'webctl_robot_client' (DDS discovery ...
+... INFO robotctl: websocket up -> ws://192.168.50.50:8000/ws/robotctl/s2000-1
+... INFO robotctl: camera: resolving source (mode=auto)... (then ros/cv2 attempts)
+```
+
+Stuck at a line? It says what to do: last ROS line = base driver/DDS not
+up yet; last cv2 line = camera probe slow (that device isn't plug-and-play
+on Jetson) → `WEBCTL_CAM_MODE=ros` (with the camera launch running) or
+`=off`; chip-side details in §9. `WEBCTL_LOG_LEVEL=DEBUG` for wire chatter.
 
 `~/.config/wheeltec-robotctl.env` per robot: `WEBCTL_ROBOT_ID` +
 `WEBCTL_ROBOT_TOKEN` must match one `WEBCTL_ROBOTS` entry on the server,
@@ -180,6 +197,13 @@ Open `http://<laptop>:8000` in a browser:
 
 ## 9. Troubleshooting
 
+- **only `robotctl: using ...` printed, nothing after** → python itself
+  never started: `python3 robotctl/client.py --version` from the shell
+  (should print `robotctl 3.0.0-stdlib`). If it does print, rerun the
+  wrapper — from 3.0.0 the client logs its boot banner before any slow
+  init, so silence now means the SHELL or INTERPRETER died (check
+  `echo $?`, and that the env file has no Windows line endings:
+  `sed -i 's/\r$//' ~/.config/wheeltec-robotctl.env`).
 - **chip red / robot OFFLINE** → the client log (`tmux attach -t robotctl`
   or `/tmp/robotctl.log` with autostart): `Connection refused` (server down
   / wrong IP), `401`/handshake refused (token mismatch vs `WEBCTL_ROBOTS`),

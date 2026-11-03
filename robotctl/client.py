@@ -608,14 +608,17 @@ class RosSink:
         from geometry_msgs.msg import Twist
         from std_msgs.msg import Float32
         from rclpy.executors import SingleThreadedExecutor
-        from rclpy.qos import QoSDurabilityPolicy, QoSProfile
+        from rclpy.qos import QoSProfile
 
         self._Twist = Twist
         rclpy.init()
         self.node = rclpy.create_node("webctl_robot_client")
         self.pub = self.node.create_publisher(Twist, CMD_VEL_TOPIC, 10)
         self.battery_v = None
-        qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.RELIABLE)
+        # depth-1, reliable+volatile defaults — matches the wheeltec drivers;
+        # deliberately NO policy enums here (member names drift across ROS2
+        # distros, and RELIABLE was never a *durability* policy anyway)
+        qos = QoSProfile(depth=1)
         for topic in BATTERY_TOPICS:
             try:
                 self.node.create_subscription(
@@ -750,6 +753,12 @@ class RosCamSource:
                 log.warning("camera topic %s: %s", t, e)
         if not got:
             raise WSError("no subscribable camera topic")
+        # THIS was the silent-frame-killer: ROS callbacks only run while some
+        # executor spins this node — sink has its own; the cam node needs one.
+        from rclpy.executors import SingleThreadedExecutor
+        ex = SingleThreadedExecutor()
+        ex.add_node(self.node)
+        threading.Thread(target=ex.spin, daemon=True, name="rclpy-cam-spin").start()
         import numpy
         self._np = numpy
         import cv2
@@ -770,10 +779,16 @@ class RosCamSource:
                 self.warned_enc.add(enc)
                 log.warning("camera: unsupported encoding %r (topic dropped)", enc)
             return None
-        img = self._np.frombuffer(msg.data, dtype=self._np.uint8)
-        img = img[:msg.height * msg.width * ch].reshape(msg.height, msg.width, ch) \
-            if msg.height * msg.width * ch <= img.size else None
-        if img is None:
+        # respect msg.step (rows can be padded — width*ch slicing miscolours
+        # those streams); fall back to tight layout if step looks wrong
+        h, w, need = msg.height, msg.width, msg.width * ch
+        buf = self._np.frombuffer(msg.data, dtype=self._np.uint8)
+        try:
+            if msg.step and msg.step >= need:
+                img = buf[:h * msg.step].reshape(h, msg.step)[:, :need].reshape(h, w, ch)
+            else:
+                img = buf[:h * need].reshape(h, w, ch)
+        except (ValueError, IndexError):
             return None
         if enc == "rgb8":
             img = self._cv2.cvtColor(img, self._cv2.COLOR_RGB2BGR)

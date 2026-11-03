@@ -3,10 +3,39 @@
 The server binds `0.0.0.0:8090` on potatoserver (`192.168.1.142`, USB-eth).
 The robot currently lives on a different LAN segment (`192.168.0.x`) and
 NAT/firewalls mean it can reach the *internet* but not potatoserver
-directly. Two clean ways in — pick one (Tailscale recommended, zero router
-config, works even on 4G/school networks):
+directly. Three ways in — **A0 (already installed, start here)**; A is a
+modern alternative; B is for browser access without a VPN client:
 
-## Option A — Tailscale VPN (recommended, ~5 min per machine)
+## Option A0 — the EXISTING IPsec VPN (already live on this box)
+
+strongSwan + xl2tpd are running (`~/vpn/vpn.sh`, hwdsl2-style):
+
+| transport | robot gets | reach server at |
+|---|---|---|
+| L2TP/IPsec (UDP 500/4500/1701) | pool `192.168.42.10-250` | **`192.168.42.1`** |
+| IKEv2 EAP (UDP 500/4500) | pool `192.168.43.10-250` | **`192.168.43.1`** |
+
+Both addresses are already in `.env` `ALLOWED_HOSTS` (verified 200 + full
+E2E). So the robot recipe is:
+
+1. Manage users with `~/vpn/add_vpn_user.sh '<user>' '<pass>'`
+   (IKEv2/L2TP creds live in the IPsec secrets files; PSK too).
+2. On the Jetson create an **L2TP/IPsec** (simplest via
+   `nm-connection-editor`) or IKEv2 profile: gateway = potatoserver's
+   **public** address (DuckDNS IP), PSK + user/pass from step 1.
+3. Robot env: `WEBCTL_SERVER=http://192.168.42.1:8090`
+   (or `192.168.43.1` on IKEv2).
+4. Router must forward **UDP 500, 4500, 1701 + ESP(proto 50)** to
+   `192.168.1.142` — note the old setup history used `192.168.1.141`;
+   if the port-forward still points there, repoint it (the box's DHCP
+   address moved to .142).
+5. While debugging, watch from this box: `journalctl -u xl2tpd -f` and
+   `sudo ipsec statusall` — an established SA appears as `ipsec0`/`ppp0`
+   with the tunnel IPs; nothing shows while no client is connected
+   (that is normal — `192.168.42.1` is a *tunnel-side* address, not a
+   domain or an idle interface).
+
+## Option A — Tailscale VPN (alternative, ~5 min per machine)
 
 ```bash
 # ON POTATOSERVER (root)

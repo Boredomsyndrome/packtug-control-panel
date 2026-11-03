@@ -7,5 +7,9 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    proxy: {
+      // arm_server.py (FastAPI) on the same Mac
+      '/api': 'http://127.0.0.1:8020',
+    },
   },
 })

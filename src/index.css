@@ -433,6 +433,22 @@ textarea:focus {
 option {
   background: #0b121a;
 }
+input[type='range'] {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+input[type='range']:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+input[type='checkbox'] {
+  width: auto;
+  accent-color: var(--accent);
+}
 
 /* ---------- misc ---------- */
 .tag {
@@ -508,11 +524,25 @@ option {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
   padding: 10px 14px;
   border-radius: var(--radius-sm);
   background: rgba(251, 191, 36, 0.08);
   border: 1px solid rgba(251, 191, 36, 0.25);
   color: var(--amber);
+  font-size: 12.5px;
+}
+
+.error-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--red);
   font-size: 12.5px;
 }
 

@@ -13,6 +13,7 @@ const NAV = [
   { to: '/fleet', label: 'Fleet', ico: '⬢' },
   { to: '/zones', label: 'Zones', ico: '▤' },
   { to: '/commands', label: 'Commands', ico: '⌘' },
+  { to: '/arm', label: 'Arm Control', ico: '⚙' },
   { to: '/integration', label: 'Integration', ico: '⇄' },
 ]
 
@@ -68,7 +69,7 @@ export function Layout() {
         <header className="topbar">
           <h1>Operator Control Panel</h1>
           <Badge tone="amber" dot>
-            MOCK MODE · hardware offline
+            AGV DATA · mock
           </Badge>
           <div className="spacer" />
           <span className="faint mono" style={{ fontSize: 12 }}>

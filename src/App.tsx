@@ -11,6 +11,7 @@ import { Missions } from './pages/Missions'
 import { Fleet } from './pages/Fleet'
 import { Zones } from './pages/Zones'
 import { Commands } from './pages/Commands'
+import { Arm } from './pages/Arm'
 import { Integration } from './pages/Integration'
 
 function Shell() {
@@ -29,6 +30,7 @@ function Shell() {
         <Route path="/fleet" element={<Fleet />} />
         <Route path="/zones" element={<Zones />} />
         <Route path="/commands" element={<Commands />} />
+        <Route path="/arm" element={<Arm />} />
         <Route path="/integration" element={<Integration />} />
         <Route path="*" element={<Dashboard />} />
       </Route>

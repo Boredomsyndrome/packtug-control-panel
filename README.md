@@ -17,6 +17,7 @@ This repository is the **front-end prototype**. It runs entirely on mock data so
 | Backend (Django REST + PostgreSQL) | **Reserved** — not connected |
 | ROS 2 bridge (Jetson ↔ backend) | **Reserved** — offline |
 | WHEELTEC S200 telemetry (pose, battery) | **Disabled** — awaiting the modelled test map + hardware |
+| Niryo Ned2 arm control | **Live** via `server/arm_server.py` (1–20% speed, ≤60° per command) |
 
 The panel shows explicit **MOCK MODE** / **hardware offline** indicators so mock state is never mistaken for live data.
 
@@ -31,6 +32,7 @@ The panel shows explicit **MOCK MODE** / **hardware offline** indicators so mock
 - **Fleet & Cages** — S200 platform records and roll-cage fill level, weight and centre of gravity. A warehouse-map placeholder is shown until the scenario map is modelled.
 - **Zones** — cold store / staging / dispatch / charging zones with temperature and capacity, plus a "re-optimise" action.
 - **Commands** — high-level operator commands: *load order X onto AGV Y* and *re-optimise packing of zone Z*.
+- **Arm Control** — live Ned2 joint terminal: connect by WiFi/ethernet, drag joint sliders, nudge in 1/2/5/10° steps, apply absolute targets, adjust the speed cap (1–20%), open/close the gripper, release motors for manual posing, auto-calibrate, save/recall/delete pose presets, and build/run pose sequences.
 - **Integration** — live view of the reserved REST/WS/ROS 2 interface surface.
 - **Login** — lightweight role-based access (operator / supervisor / maintenance).
 
@@ -64,6 +66,60 @@ npm run typecheck  # type-check only
 ```
 
 ---
+
+## Arm control terminal (Niryo Ned2)
+
+The `/arm` page talks to `server/arm_server.py`, a small FastAPI bridge that
+wraps PyNiryo 1.1.2 in the `ned` conda env. It also serves the built panel, so
+no separate Vite server is needed for the demo.
+
+```bash
+cd control-panel
+conda run --no-capture-output -n ned python server/arm_server.py --port 8020
+# UI only, no arm attached:
+conda run --no-capture-output -n ned python server/arm_server.py --mock
+```
+
+Open `http://127.0.0.1:8020/arm`. Connection addresses: WiFi hotspot
+`10.10.10.10`, direct Ethernet `169.254.200.200`.
+
+Safety: the bridge caps the arm at **1–20% speed** (default 5%), accepts at most
+**60° per command**, and executes moves in **15° segments**. This kit has **no
+hardware E-stop**, so keep the workspace clear and a hand on the power switch.
+Dragging a joint slider commits when you release it. **Manual pose** releases the
+motors — hold the arm before enabling it, then press **Lock position** to
+re-engage.
+
+Joint limits follow the robot's runtime MoveIt limits, including the narrower
+**J5 −100…+55°** range, with a 0.5° safety margin. Existing saved poses outside
+those limits are clamped when loaded, so a hand-posed value like 55.5° no longer
+produces a robot `KO` / HTTP 502.
+
+If the arm reports `need_calibration`, tick the confirmation and press
+**Initialize / auto-calibrate** in the Connection card (slow full-range sweep,
+~30 s), or run `../arm/ned_calibrate.py --go`. The gripper buttons appear once
+the tool scan detects a gripper; use **Rescan tool** after changing tools.
+
+**Pose presets** save the current six joint angles to
+`server/arm_poses.json` (gitignored) under a name. Recall moves the arm back
+with the current speed cap, in 15° segments, and allows up to 180° per joint.
+Saving while motors are released captures the hand-posed position.
+
+**Sequences** chain saved poses A→B→C with a dwell time and are stored in
+`server/arm_sequences.json` (gitignored). They run in the browser: each pose is
+applied in order, and **Stop sequence** takes effect after the current blocking
+pose finishes. Closing the Arm page also stops the sequence after the current
+pose.
+
+An optional **Transit** is applied before every step; choose a saved raised
+pose or the built-in **Home / fold**. This avoids sweeping low across the table
+between far-apart corners. A direct joint-space sweep with the arm extended can
+make the robot return a `KO`, which the bridge reports as HTTP 502 (the terminal
+log now shows the failing segment and joint angles, and pose recalls prefix the
+error with the pose name).
+
+`.env` is set to `VITE_MOCK=false` so the arm page uses the bridge; other
+pages remain on mock AGV data.
 
 ## Project structure
 

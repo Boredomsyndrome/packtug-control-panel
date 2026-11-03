@@ -1,0 +1,1060 @@
+import { useEffect, useRef, useState } from 'react'
+import { api, type ArmPosePreset, type ArmSequence, type ArmStatus } from '../services/api'
+import { Badge, Card, PageHeader } from '../components/ui'
+import { clock } from '../lib/format'
+
+const JOINTS = [
+  { id: 'J1', name: 'base' },
+  { id: 'J2', name: 'shoulder' },
+  { id: 'J3', name: 'elbow' },
+  { id: 'J4', name: 'wrist 1' },
+  { id: 'J5', name: 'wrist 2' },
+  { id: 'J6', name: 'wrist 3' },
+]
+
+const HOSTS = [
+  { label: 'WiFi hotspot', ip: '10.10.10.10' },
+  { label: 'Ethernet', ip: '169.254.200.200' },
+]
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+type LogEntry = { id: string; t: string; text: string; level: 'info' | 'success' | 'warn' | 'error' }
+
+export function Arm() {
+  const [status, setStatus] = useState<ArmStatus | null>(null)
+  const [targets, setTargets] = useState(['0', '0', '0', '0', '0', '0'])
+  const [step, setStep] = useState(2)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [log, setLog] = useState<LogEntry[]>([])
+  const [host, setHost] = useState(() => localStorage.getItem('packtug.armHost') ?? '10.10.10.10')
+  const [confirmCalibration, setConfirmCalibration] = useState(false)
+  const [confirmRelease, setConfirmRelease] = useState(false)
+  const [poses, setPoses] = useState<ArmPosePreset[]>([])
+  const [poseName, setPoseName] = useState('')
+  const [sequences, setSequences] = useState<ArmSequence[]>([])
+  const [sequenceName, setSequenceName] = useState('')
+  const [dwellSec, setDwellSec] = useState(1)
+  const [transitPose, setTransitPose] = useState('')
+  const [draftSteps, setDraftSteps] = useState<string[]>([])
+  const [stepToAdd, setStepToAdd] = useState('')
+  const [sequenceRun, setSequenceRun] = useState<
+    { name: string; step: number; total: number; phase: 'transit' | 'pose' } | null
+  >(null)
+  const [sequenceStopping, setSequenceStopping] = useState(false)
+  const stopSequenceRef = useRef(false)
+
+  useEffect(() => {
+    let alive = true
+    let seeded = false
+
+    async function poll() {
+      try {
+        const s = await api.getArmStatus()
+        if (!alive) return
+        setStatus(s)
+        setError(s.error)
+        if (!seeded && s.connected && s.joints_deg) {
+          seeded = true
+          setTargets(s.joints_deg.map((v) => v.toFixed(1)))
+        }
+      } catch (err) {
+        if (alive) setError(err instanceof Error ? err.message : String(err))
+      }
+    }
+
+    void poll()
+    const timer = window.setInterval(poll, 1000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    api
+      .listArmPoses()
+      .then((list) => {
+        if (alive) setPoses(list)
+      })
+      .catch(() => {
+        // Pose list is optional; the main status error covers a dead bridge.
+      })
+    api
+      .listArmSequences()
+      .then((list) => {
+        if (alive) setSequences(list)
+      })
+      .catch(() => {
+        // Sequence list is optional too.
+      })
+    return () => {
+      alive = false
+      stopSequenceRef.current = true
+    }
+  }, [])
+
+  function addLog(text: string, level: LogEntry['level']) {
+    setLog((entries) =>
+      [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, t: new Date().toISOString(), text, level }, ...entries].slice(0, 40),
+    )
+  }
+
+  function applySnapshot(s: ArmStatus) {
+    setStatus(s)
+    setError(s.error)
+    if (s.joints_deg) setTargets(s.joints_deg.map((v) => v.toFixed(1)))
+  }
+
+  async function run(label: string, action: () => Promise<ArmStatus>) {
+    setPending(true)
+    setError(null)
+    try {
+      const s = await action()
+      applySnapshot(s)
+      addLog(label, s.connected ? 'info' : 'warn')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`${label} — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const canMove =
+    !!status?.connected && !status.calibration_needed && !status.learning_mode && !status.busy && !pending
+  const hasGripper = !!status?.tool?.includes('GRIPPER')
+  const canUseGripper =
+    !!status?.connected && !status.learning_mode && !status.busy && !pending && hasGripper
+  const addablePose = poses.some((p) => p.name === stepToAdd) ? stepToAdd : (poses[0]?.name ?? '')
+  const speedOptions = Array.from(new Set([5, 10, 15, 20, status?.max_velocity ?? 5])).sort(
+    (a, b) => a - b,
+  )
+
+  function connect() {
+    const ip = host.trim()
+    if (!ip) return
+    localStorage.setItem('packtug.armHost', ip)
+    void run(`Connect ${ip}`, () => api.connectArm(ip))
+  }
+
+  function disconnect() {
+    void run('Disconnect', () => api.disconnectArm())
+  }
+
+  function jog(index: number, direction: number) {
+    const delta = direction * step
+    void run(`${JOINTS[index].id} ${delta > 0 ? '+' : ''}${delta}°`, () => api.jogArmJoint(index + 1, delta))
+  }
+
+  function syncTargets() {
+    if (!status?.joints_deg) return
+    setTargets(status.joints_deg.map((v) => v.toFixed(1)))
+    addLog('Targets synced to current joints', 'info')
+  }
+
+  function applyTargets() {
+    const nums = targets.map(Number)
+    if (nums.some((v) => !Number.isFinite(v))) {
+      setError('All six targets must be numbers.')
+      return
+    }
+    void run('Move joints', () => api.moveArmJoints(nums))
+  }
+
+  function enableMotors() {
+    void run('Enable motors', () => api.enableArmMotors())
+  }
+
+  async function calibrate() {
+    if (!confirmCalibration) return
+    await run('Initialize / auto-calibrate', () => api.calibrateArm())
+    setConfirmCalibration(false)
+  }
+
+  async function releaseMotors() {
+    if (!confirmRelease) return
+    await run('Manual pose (motors released)', () => api.setArmLearning(true))
+    setConfirmRelease(false)
+  }
+
+  function commitJoint(index: number, value: number) {
+    if (!canMove || !Number.isFinite(value)) return
+    const current = status?.joints_deg?.[index]
+    if (current !== undefined && Math.abs(value - current) < 0.05) return
+    void run(`${JOINTS[index].id} → ${value.toFixed(1)}°`, () => api.moveArmJoint(index + 1, value))
+  }
+
+  function openGripper() {
+    void run('Gripper open', () => api.openArmGripper())
+  }
+
+  function closeGripper() {
+    void run('Gripper close', () => api.closeArmGripper())
+  }
+
+  function scanTool() {
+    void run('Scan tool', () => api.scanArmTool())
+  }
+
+  function homeArm() {
+    void run('Home / fold', () => api.homeArm())
+  }
+
+  function setSpeed(percent: number) {
+    void run(`Speed ${percent}%`, () => api.setArmVelocity(percent))
+  }
+
+  async function savePose() {
+    const name = poseName.trim()
+    if (!name) {
+      setError('Pose name is required.')
+      return
+    }
+    setPending(true)
+    setError(null)
+    try {
+      const pose = await api.saveArmPose(name)
+      setPoses(await api.listArmPoses())
+      setPoseName('')
+      addLog(`Pose saved: ${pose.name}`, 'info')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Save pose — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function deletePose(name: string) {
+    setPending(true)
+    setError(null)
+    try {
+      await api.deleteArmPose(name)
+      setPoses(await api.listArmPoses())
+      setDraftSteps((steps) => steps.filter((step) => step !== name))
+      addLog(`Pose deleted: ${name}`, 'warn')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Delete pose — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function applyPose(name: string) {
+    void run(`Recall pose: ${name}`, () => api.applyArmPose(name))
+  }
+
+  function addDraftStep() {
+    if (!addablePose) return
+    setDraftSteps((steps) => [...steps, addablePose])
+  }
+
+  function removeDraftStep(index: number) {
+    setDraftSteps((steps) => steps.filter((_, i) => i !== index))
+  }
+
+  function moveDraftStep(index: number, direction: -1 | 1) {
+    setDraftSteps((steps) => {
+      const next = [...steps]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return steps
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  async function saveSequence() {
+    const name = sequenceName.trim()
+    if (!name) {
+      setError('Sequence name is required.')
+      return
+    }
+    if (!draftSteps.length) {
+      setError('Add at least one pose step.')
+      return
+    }
+    setPending(true)
+    setError(null)
+    try {
+      const sequence = await api.saveArmSequence(name, draftSteps, dwellSec, transitPose || null)
+      setSequences(await api.listArmSequences())
+      addLog(`Sequence saved: ${sequence.name} (${sequence.poses.length} steps)`, 'info')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Save sequence — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function deleteSequence(name: string) {
+    setPending(true)
+    setError(null)
+    try {
+      await api.deleteArmSequence(name)
+      setSequences(await api.listArmSequences())
+      addLog(`Sequence deleted: ${name}`, 'warn')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Delete sequence — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function loadSequence(sequence: ArmSequence) {
+    setSequenceName(sequence.name)
+    setDraftSteps([...sequence.poses])
+    setDwellSec(sequence.dwell_sec)
+    setTransitPose(sequence.transit ?? '')
+    addLog(`Sequence loaded: ${sequence.name}`, 'info')
+  }
+
+  async function waitWithStop(ms: number) {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      if (stopSequenceRef.current) return
+      await sleep(Math.min(100, Math.max(0, end - Date.now())))
+    }
+  }
+
+  async function runSequence(sequence: ArmSequence) {
+    if (pending || sequenceRun) return
+    if (!canMove) {
+      setError('Connect the arm and clear calibration / learning faults before running a sequence.')
+      return
+    }
+    stopSequenceRef.current = false
+    setSequenceStopping(false)
+    setPending(true)
+    setError(null)
+    setSequenceRun({ name: sequence.name, step: 0, total: sequence.poses.length, phase: 'pose' })
+    addLog(`Sequence start: ${sequence.name} (${sequence.poses.length} steps)`, 'info')
+    let stopped = false
+    try {
+      for (let i = 0; i < sequence.poses.length; i++) {
+        if (stopSequenceRef.current) {
+          stopped = true
+          break
+        }
+        const pose = sequence.poses[i]
+        if (sequence.transit && sequence.transit !== pose) {
+          setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'transit' })
+          addLog(`Transit → ${sequence.transit === '__home__' ? 'Home / fold' : sequence.transit}`, 'info')
+          const transitSnapshot =
+            sequence.transit === '__home__' ? await api.homeArm() : await api.applyArmPose(sequence.transit)
+          applySnapshot(transitSnapshot)
+          if (stopSequenceRef.current) {
+            stopped = true
+            break
+          }
+        }
+        setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'pose' })
+        addLog(`Step ${i + 1}/${sequence.poses.length}: ${pose}`, 'info')
+        const snapshot = await api.applyArmPose(pose)
+        applySnapshot(snapshot)
+        if (stopSequenceRef.current) {
+          stopped = true
+          break
+        }
+        if (i < sequence.poses.length - 1 && sequence.dwell_sec > 0) {
+          await waitWithStop(sequence.dwell_sec * 1000)
+        }
+      }
+      if (stopped || stopSequenceRef.current) {
+        addLog(`Sequence stopped: ${sequence.name}`, 'warn')
+      } else {
+        addLog(`Sequence complete: ${sequence.name}`, 'success')
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Sequence aborted — ${msg}`, 'error')
+    } finally {
+      stopSequenceRef.current = false
+      setSequenceStopping(false)
+      setSequenceRun(null)
+      setPending(false)
+    }
+  }
+
+  function stopSequence() {
+    if (!sequenceRun) return
+    stopSequenceRef.current = true
+    setSequenceStopping(true)
+    addLog(`Stop requested: ${sequenceRun.name} (after the current pose)`, 'warn')
+  }
+
+  const connectionText = !status?.connected
+    ? 'disconnected'
+    : status.calibration_needed
+      ? 'calibration required'
+      : status.learning_mode
+        ? 'motors released'
+        : 'connected'
+
+  return (
+    <>
+      <PageHeader
+        title="Arm Control"
+        desc="Niryo Ned2 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command (15° segments)."
+        actions={
+          <>
+            {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}
+            <Badge
+              tone={!status?.connected ? 'grey' : status.calibration_needed || status.learning_mode ? 'amber' : 'green'}
+              dot
+            >
+              {connectionText}
+            </Badge>
+          </>
+        }
+      />
+
+      <div className="stale-warning">
+        No hardware E-stop on this arm. Keep the workspace clear and a hand on the power switch. A slider release may
+        move a joint up to 60°, and manual posing releases the motors — hold the arm before enabling free motion.
+      </div>
+
+      {status?.calibration_needed && (
+        <div className="error-banner">
+          Calibration is required. Motion is disabled until initialization finishes. Use{' '}
+          <strong>Initialize / auto-calibrate</strong> below (or run{' '}
+          <span className="mono">../arm/ned_calibrate.py --go</span>).
+        </div>
+      )}
+
+      {status?.learning_mode && (
+        <div className="stale-warning">
+          Motors are released (learning mode). Hold the arm before re-engaging.
+          <button className="btn sm" onClick={enableMotors} disabled={pending || status.busy}>
+            Enable motors
+          </button>
+        </div>
+      )}
+
+      {sequenceRun && (
+        <div className="stale-warning">
+          <span>
+            Running sequence <b>{sequenceRun.name}</b> — step {sequenceRun.step}/{sequenceRun.total}{' '}
+            ({sequenceRun.phase === 'transit' ? 'transit pose' : 'pose'}). Stop takes effect after the current pose
+            finishes.
+          </span>
+          <button className="btn sm danger" onClick={stopSequence} disabled={sequenceStopping}>
+            {sequenceStopping ? 'Stopping after current move…' : 'Stop sequence'}
+          </button>
+        </div>
+      )}
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="grid cols-2">
+        <Card title="Connection" hint="PyNiryo TCP :40001 · one client at a time">
+          <div className="stack">
+            <div className="field">
+              <label>Ned2 address</label>
+              <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="10.10.10.10" spellCheck={false} />
+            </div>
+            <div className="row">
+              {HOSTS.map((h) => (
+                <button
+                  key={h.ip}
+                  className={`btn sm ${host === h.ip ? 'primary' : ''}`}
+                  onClick={() => setHost(h.ip)}
+                >
+                  {h.label} · <span className="mono">{h.ip}</span>
+                </button>
+              ))}
+            </div>
+            <div className="row">
+              <button className="btn primary" onClick={connect} disabled={pending || !!status?.connected}>
+                {pending ? 'Working…' : 'Connect'}
+              </button>
+              <button className="btn danger" onClick={disconnect} disabled={pending || !status?.connected}>
+                Disconnect
+              </button>
+            </div>
+            <div className="stack" style={{ gap: 6, fontSize: 12.5, paddingTop: 10, borderTop: '1px solid var(--border-soft)' }}>
+              <div className="row between">
+                <span className="muted">Initialization</span>
+                <span className="mono">
+                  {status?.connected ? (status.calibration_needed ? 'required' : 'done') : '—'}
+                </span>
+              </div>
+              <label className="row" style={{ fontSize: 12.5, color: 'var(--text-dim)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={confirmCalibration}
+                  onChange={(e) => setConfirmCalibration(e.target.checked)}
+                  disabled={!status?.connected || pending || status?.busy}
+                  style={{ width: 'auto', accentColor: 'var(--accent)' }}
+                />
+                Workspace clear (≥0.5 m); the arm will sweep its full range
+              </label>
+              <button
+                className="btn danger"
+                onClick={() => void calibrate()}
+                disabled={!status?.connected || !confirmCalibration || pending || status?.busy}
+              >
+                {pending ? 'Working…' : 'Initialize / auto-calibrate'}
+              </button>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                Slow full-range sweep, roughly 30 s. No hardware E-stop.
+              </span>
+            </div>
+            <div className="stack" style={{ gap: 6, fontSize: 12.5 }}>
+              <div className="row between">
+                <span className="muted">Mode</span>
+                <span className="mono">{status?.mock ? 'mock' : 'hardware'}</span>
+              </div>
+              <div className="row between">
+                <span className="muted">Speed limit</span>
+                <select
+                  value={status?.max_velocity ?? 5}
+                  onChange={(e) => setSpeed(Number(e.target.value))}
+                  disabled={pending || status?.busy}
+                  style={{ maxWidth: 100 }}
+                >
+                  {speedOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value}%
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="row between">
+                <span className="muted">Per-command limit</span>
+                <span className="mono">≤{status?.max_request_deg ?? 60}°</span>
+              </div>
+              <div className="row between">
+                <span className="muted">Calibration</span>
+                <span className="mono">
+                  {status?.connected ? (status.calibration_needed ? 'required' : 'ok') : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Cartesian pose" hint="read-only · millimetres and degrees">
+          {status?.pose ? (
+            <div className="stack" style={{ gap: 6, fontSize: 12.5 }}>
+              <div className="row between">
+                <span className="muted">X / Y / Z</span>
+                <span className="mono">
+                  {(status.pose.x * 1000).toFixed(0)} / {(status.pose.y * 1000).toFixed(0)} /{' '}
+                  {(status.pose.z * 1000).toFixed(0)} mm
+                </span>
+              </div>
+              <div className="row between">
+                <span className="muted">Roll / Pitch / Yaw</span>
+                <span className="mono">
+                  {status.pose.roll.toFixed(1)} / {status.pose.pitch.toFixed(1)} / {status.pose.yaw.toFixed(1)}°
+                </span>
+              </div>
+              <div className="row between">
+                <span className="muted">Joints</span>
+                <span className="mono">
+                  {status.joints_deg?.map((v) => v.toFixed(1)).join(' · ') ?? '—'}
+                </span>
+              </div>
+              <div className="row between">
+                <span className="muted">Updated</span>
+                <span className="mono">
+                  {status.updated_at ? new Date(status.updated_at * 1000).toLocaleTimeString('en-GB') : '—'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="empty">Connect to read the arm pose.</div>
+          )}
+        </Card>
+      </div>
+
+      <Card title="Tool & manual pose" hint="gripper and free-motion mode">
+        <div className="grid cols-2">
+          <div className="stack">
+            <div className="row between">
+              <span className="muted">Detected tool</span>
+              <Badge tone={hasGripper ? 'green' : 'amber'}>
+                {status?.tool ? status.tool.replace('_', ' ') : 'none'}
+              </Badge>
+            </div>
+            <div className="row">
+              <button className="btn" onClick={openGripper} disabled={!canUseGripper}>
+                Open
+              </button>
+              <button className="btn primary" onClick={closeGripper} disabled={!canUseGripper}>
+                Close / grasp
+              </button>
+              <button className="btn sm" onClick={scanTool} disabled={!status?.connected || pending || status?.busy}>
+                Rescan tool
+              </button>
+            </div>
+            <div className="row between" style={{ fontSize: 12.5 }}>
+              <span className="muted">Gripper state</span>
+              <span className="mono">{status?.gripper ?? 'unknown'}</span>
+            </div>
+            <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+              Close uses 60% grip torque. Buttons block while the gripper moves.
+            </p>
+          </div>
+
+          <div className="stack">
+            <div className="row between">
+              <span className="muted">Motors</span>
+              <Badge tone={status?.learning_mode ? 'amber' : status?.connected ? 'green' : 'grey'} dot>
+                {status?.learning_mode ? 'released' : 'engaged'}
+              </Badge>
+            </div>
+            <label className="row" style={{ fontSize: 12.5, color: 'var(--text-dim)', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={confirmRelease}
+                onChange={(e) => setConfirmRelease(e.target.checked)}
+                disabled={!status?.connected || pending || !!status?.learning_mode || status?.busy}
+                style={{ width: 'auto', accentColor: 'var(--accent)' }}
+              />
+              I am holding the arm — releasing motors lets it fall
+            </label>
+            <button
+              className="btn danger"
+              onClick={() => void releaseMotors()}
+              disabled={!status?.connected || !confirmRelease || pending || !!status?.learning_mode || status?.busy}
+            >
+              Manual pose (release motors)
+            </button>
+            <button
+              className="btn"
+              onClick={enableMotors}
+              disabled={!status?.learning_mode || pending || status?.busy}
+            >
+              Lock position (enable motors)
+            </button>
+            <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+              Pose the arm by hand, then lock it to hold the new position.
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      <Card
+        title="Pose presets"
+        hint={`saved on the arm bridge · recall moves ≤${status?.max_pose_deg ?? 180}°`}
+      >
+        <div className="stack">
+          <div className="row">
+            <input
+              value={poseName}
+              onChange={(e) => setPoseName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !pending) void savePose()
+              }}
+              placeholder="pose name, e.g. pickup-high"
+              style={{ maxWidth: 300 }}
+              spellCheck={false}
+            />
+            <button
+              className="btn primary"
+              onClick={() => void savePose()}
+              disabled={!status?.connected || !status?.joints_deg || pending || status?.busy || !poseName.trim()}
+            >
+              Save current pose
+            </button>
+            <span className="faint" style={{ fontSize: 12 }}>
+              Same name overwrites; saving during manual pose captures the hand-posed position.
+            </span>
+          </div>
+
+          {poses.length === 0 ? (
+            <div className="empty">No saved poses yet.</div>
+          ) : (
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Joints °</th>
+                  <th style={{ width: 190 }}>Saved</th>
+                  <th style={{ width: 150 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {poses.map((pose) => (
+                  <tr key={pose.name}>
+                    <td className="mono">{pose.name}</td>
+                    <td className="faint mono" style={{ fontSize: 11.5 }}>
+                      {pose.joints_deg.map((v) => v.toFixed(1)).join(' · ')}
+                    </td>
+                    <td className="faint mono" style={{ fontSize: 11.5 }}>
+                      {new Date(pose.updated_at ?? pose.created_at ?? Date.now()).toLocaleString('en-GB')}
+                    </td>
+                    <td>
+                      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                        <button className="btn sm primary" onClick={() => applyPose(pose.name)} disabled={!canMove}>
+                          Go
+                        </button>
+                        <button
+                          className="btn sm danger"
+                          onClick={() => void deletePose(pose.name)}
+                          disabled={pending || status?.busy}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+            Recalling a preset runs at the current speed cap in 15° segments. Keep the workspace clear for the whole
+            move.
+          </p>
+        </div>
+      </Card>
+
+      <Card
+        title="Sequences"
+        hint={`ordered pose playback · ≤${status?.max_pose_deg ?? 180}° per step · runs in this browser`}
+      >
+        <div className="stack">
+          <div className="row">
+            <input
+              value={sequenceName}
+              onChange={(e) => setSequenceName(e.target.value)}
+              placeholder="sequence name, e.g. pick-cycle"
+              style={{ maxWidth: 280 }}
+              spellCheck={false}
+            />
+            <label className="row" style={{ gap: 6 }}>
+              <span className="faint" style={{ fontSize: 12 }}>
+                Dwell (s)
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                step={0.5}
+                value={dwellSec}
+                onChange={(e) => {
+                  const value = Number(e.target.value)
+                  setDwellSec(Number.isFinite(value) ? Math.max(0, Math.min(10, value)) : 0)
+                }}
+                style={{ maxWidth: 90 }}
+              />
+            </label>
+            <label className="row" style={{ gap: 6 }}>
+              <span className="faint" style={{ fontSize: 12 }}>
+                Transit
+              </span>
+              <select
+                value={transitPose}
+                onChange={(e) => setTransitPose(e.target.value)}
+                disabled={pending || status?.busy || !!sequenceRun}
+                style={{ maxWidth: 220 }}
+              >
+                <option value="">(none · direct)</option>
+                <option value="__home__">Home / fold (built-in)</option>
+                {poses.map((pose) => (
+                  <option key={pose.name} value={pose.name}>
+                    {pose.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="btn primary"
+              onClick={() => void saveSequence()}
+              disabled={!draftSteps.length || !sequenceName.trim() || pending || status?.busy}
+            >
+              Save sequence
+            </button>
+            <button
+              className="btn sm"
+              onClick={() => {
+                setSequenceName('')
+                setDraftSteps([])
+                setTransitPose('')
+              }}
+              disabled={pending || status?.busy || !!sequenceRun}
+            >
+              Clear draft
+            </button>
+          </div>
+
+          <div className="row">
+            <select
+              value={addablePose}
+              onChange={(e) => setStepToAdd(e.target.value)}
+              disabled={!poses.length || pending || status?.busy || !!sequenceRun}
+              style={{ maxWidth: 220 }}
+            >
+              {poses.length === 0 ? (
+                <option value="">no poses saved</option>
+              ) : (
+                poses.map((pose) => (
+                  <option key={pose.name} value={pose.name}>
+                    {pose.name}
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              className="btn"
+              onClick={addDraftStep}
+              disabled={!poses.length || pending || status?.busy || !!sequenceRun}
+            >
+              Add step
+            </button>
+            <span className="faint" style={{ fontSize: 12 }}>
+              Build A → B → C with the order buttons, then save.
+            </span>
+          </div>
+
+          {draftSteps.length === 0 ? (
+            <div className="empty">Draft is empty.</div>
+          ) : (
+            <table className="data">
+              <thead>
+                <tr>
+                  <th style={{ width: 60 }}>#</th>
+                  <th>Pose</th>
+                  <th style={{ width: 230 }}>Order</th>
+                </tr>
+              </thead>
+              <tbody>
+                {draftSteps.map((step, index) => (
+                  <tr key={`${step}-${index}`}>
+                    <td className="mono">{index + 1}</td>
+                    <td className="mono">{step}</td>
+                    <td>
+                      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                        <button
+                          className="btn sm"
+                          onClick={() => moveDraftStep(index, -1)}
+                          disabled={index === 0 || pending || status?.busy || !!sequenceRun}
+                        >
+                          Up
+                        </button>
+                        <button
+                          className="btn sm"
+                          onClick={() => moveDraftStep(index, 1)}
+                          disabled={index === draftSteps.length - 1 || pending || status?.busy || !!sequenceRun}
+                        >
+                          Down
+                        </button>
+                        <button
+                          className="btn sm danger"
+                          onClick={() => removeDraftStep(index)}
+                          disabled={pending || status?.busy || !!sequenceRun}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <div className="nav-section" style={{ padding: '10px 0 4px' }}>
+            Saved sequences
+          </div>
+          {sequences.length === 0 ? (
+            <div className="empty">No saved sequences yet.</div>
+          ) : (
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th style={{ width: 80 }}>Steps</th>
+                  <th style={{ width: 90 }}>Dwell</th>
+                  <th style={{ width: 150 }}>Transit</th>
+                  <th style={{ width: 190 }}>Saved</th>
+                  <th style={{ width: 240 }} />
+                </tr>
+              </thead>
+              <tbody>
+                {sequences.map((sequence) => (
+                  <tr key={sequence.name}>
+                    <td className="mono">{sequence.name}</td>
+                    <td className="mono">{sequence.poses.length}</td>
+                    <td className="mono">{sequence.dwell_sec.toFixed(1)}s</td>
+                    <td className="faint mono" style={{ fontSize: 11.5 }}>
+                      {sequence.transit === '__home__' ? 'Home / fold' : (sequence.transit ?? 'direct')}
+                    </td>
+                    <td className="faint mono" style={{ fontSize: 11.5 }}>
+                      {new Date(sequence.updated_at ?? sequence.created_at ?? Date.now()).toLocaleString('en-GB')}
+                    </td>
+                    <td>
+                      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                        <button
+                          className="btn sm primary"
+                          onClick={() => void runSequence(sequence)}
+                          disabled={!canMove || !!sequenceRun}
+                        >
+                          Run
+                        </button>
+                        <button
+                          className="btn sm"
+                          onClick={() => loadSequence(sequence)}
+                          disabled={pending || status?.busy || !!sequenceRun}
+                        >
+                          Load
+                        </button>
+                        <button
+                          className="btn sm danger"
+                          onClick={() => void deleteSequence(sequence.name)}
+                          disabled={pending || status?.busy || !!sequenceRun}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+            The transit pose is applied before every step; use a raised/centre pose to avoid sweeping low across the
+            table. Stop is checked between steps; the current blocking move always finishes.
+          </p>
+        </div>
+      </Card>
+
+      <Card
+        title="Joint control"
+        hint="Drag a slider and release, or nudge/apply targets; each release moves ≤60°"
+        right={
+          <div className="row">
+            <span className="faint" style={{ fontSize: 12 }}>
+              Step
+            </span>
+            {[1, 2, 5, 10].map((s) => (
+              <button key={s} className={`btn sm ${step === s ? 'primary' : ''}`} onClick={() => setStep(s)}>
+                {s}°
+              </button>
+            ))}
+            <button className="btn sm" onClick={syncTargets} disabled={!status?.joints_deg}>
+              Sync targets
+            </button>
+          </div>
+        }
+      >
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Joint</th>
+              <th style={{ width: 90 }}>Current</th>
+              <th style={{ minWidth: 180 }}>Drag</th>
+              <th style={{ width: 120 }}>Target °</th>
+              <th style={{ width: 100 }}>Nudge</th>
+              <th style={{ width: 140 }}>Limits</th>
+            </tr>
+          </thead>
+          <tbody>
+            {JOINTS.map((joint, i) => {
+              const current = status?.joints_deg?.[i]
+              const limits = status?.limits_deg?.[i]
+              return (
+                <tr key={joint.id}>
+                  <td>
+                    <span className="tag">{joint.id}</span> <span className="faint">{joint.name}</span>
+                  </td>
+                  <td className="mono">{current === undefined ? '—' : `${current.toFixed(1)}°`}</td>
+                  <td>
+                    <input
+                      type="range"
+                      min={limits ? limits[0] : -180}
+                      max={limits ? limits[1] : 180}
+                      step={0.5}
+                      value={Number.isFinite(Number(targets[i])) ? Number(targets[i]) : 0}
+                      onChange={(e) => {
+                        const next = [...targets]
+                        next[i] = e.target.value
+                        setTargets(next)
+                      }}
+                      onPointerUp={(e) => commitJoint(i, Number(e.currentTarget.value))}
+                      onKeyUp={(e) => {
+                        if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') {
+                          commitJoint(i, Number(e.currentTarget.value))
+                        }
+                      }}
+                      disabled={!canMove}
+                      aria-label={`${joint.id} target angle`}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={targets[i]}
+                      onChange={(e) => {
+                        const next = [...targets]
+                        next[i] = e.target.value
+                        setTargets(next)
+                      }}
+                      disabled={!canMove}
+                    />
+                  </td>
+                  <td>
+                    <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                      <button className="btn sm" onClick={() => jog(i, -1)} disabled={!canMove}>
+                        −
+                      </button>
+                      <button className="btn sm" onClick={() => jog(i, 1)} disabled={!canMove}>
+                        +
+                      </button>
+                    </div>
+                  </td>
+                  <td className="faint mono" style={{ fontSize: 11.5 }}>
+                    {limits ? `${limits[0].toFixed(1)} … ${limits[1].toFixed(1)}°` : '—'}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="btn primary" onClick={applyTargets} disabled={!canMove}>
+            Apply all targets
+          </button>
+          <button className="btn" onClick={homeArm} disabled={!canMove}>
+            Home / fold
+          </button>
+          <span className="faint" style={{ fontSize: 12 }}>
+            Drag sliders commit on release. The bridge splits moves into 15° segments.
+          </span>
+        </div>
+      </Card>
+
+      <Card title="Arm log" hint="this browser session">
+        {log.length === 0 ? (
+          <div className="empty">No arm commands yet.</div>
+        ) : (
+          log.map((entry) => (
+            <div className="activity" key={entry.id}>
+              <span className="t">{clock(entry.t)}</span>
+              <span className={`lv-${entry.level}`}>●</span>
+              <span>{entry.text}</span>
+            </div>
+          ))
+        )}
+      </Card>
+    </>
+  )
+}

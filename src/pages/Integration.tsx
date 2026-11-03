@@ -60,7 +60,7 @@ export function Integration() {
         </Card>
       </div>
 
-      <Card title="REST endpoints" hint="consumed by this panel — mock until the backend is up">
+      <Card title="REST endpoints" hint="arm endpoints are live via server/arm_server.py; AGV endpoints remain mock">
         <table className="data">
           <thead>
             <tr>
@@ -79,7 +79,11 @@ export function Integration() {
                 <td className="mono">{e.path}</td>
                 <td className="muted">{e.description}</td>
                 <td>
-                  <Badge tone={e.status === 'implemented-mock' ? 'amber' : 'grey'}>
+                  <Badge
+                    tone={
+                      e.status === 'implemented-live' ? 'green' : e.status === 'implemented-mock' ? 'amber' : 'grey'
+                    }
+                  >
                     {e.status}
                   </Badge>
                 </td>
@@ -147,8 +151,8 @@ ros2 topic echo /odom`}</pre>
       </div>
 
       <div className="stale-warning">
-        ⚠ Hardware not delivered yet. This panel runs on mock data; the fleet, cages and missions are simulated at 1 Hz.
-        Flip to live mode with <span className="mono">VITE_MOCK=false</span> once the backend and S200 bridge are available.
+        ⚠ AGV fleet, cages and missions are still simulated at 1 Hz. The Ned2 arm channel is live when the
+        arm bridge is running; open <span className="mono">/arm</span> to connect.
       </div>
     </>
   )

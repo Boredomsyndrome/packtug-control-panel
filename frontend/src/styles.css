@@ -130,3 +130,15 @@ button { font-family: inherit; }
   padding: 2px 9px; border-radius: 9px; letter-spacing: .3px;
 }
 .dim.one { margin-right: 6px; }
+
+/* ---- v3.1 sensor layout: camera over lidar, diagnostics hints ---- */
+.leftcol { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.video { flex: 1 1 auto; min-height: 220px; }
+.lidar { position: relative; background: #000; border: 1px solid var(--line);
+  border-radius: 10px; height: 34vh; min-height: 200px; overflow: hidden; }
+.lidar canvas { width: 100%; height: 100%; display: block; }
+.lidar-tag.stale { color: #d8c06a; }
+.lidhint { position: absolute; left: 10px; right: 10px; bottom: 8px;
+  color: var(--dim); font: 11px/1.45 ui-monospace, Menlo, monospace;
+  background: rgba(0, 0, 0, 0.55); border-radius: 8px; padding: 3px 9px; }
+.hintsmall { max-width: 520px; margin: 4px auto 8px; }

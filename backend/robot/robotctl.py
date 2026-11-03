@@ -109,3 +109,27 @@ def frame(request, robot_id):
         return _err(400, "body is not a JPEG")
     hub.set_frame(jpeg)
     return JsonResponse({"ok": True})
+
+
+@csrf_exempt
+@require_POST
+def scan(request, robot_id):
+    """One packed LaserScan per request (HTTP fallback transport; the ws
+    link carries the same JSON as a {\"type\":\"scan\"} text frame)."""
+    hub, err = _authenticate(request, robot_id)
+    if err:
+        return err
+    if len(request.body) > 65536:
+        return _err(413, "scan too large")
+    try:
+        data = json.loads(request.body or b"{}")
+    except ValueError:
+        return _err(400, "scan must be valid JSON")
+    if not isinstance(data, dict):
+        return _err(400, "scan must be a JSON object")
+    from robot.serializers import ScanSerializer
+    ser = ScanSerializer(data=data)
+    if not ser.is_valid():
+        return _err(400, f"invalid scan: {ser.errors}")
+    hub.set_scan(ser.validated_data)
+    return JsonResponse({"ok": True})

@@ -77,6 +77,18 @@ receives `estop` frames even mid-stream.
 Frames are latest-wins and capped at `MAX_FRAME` (2 MiB) server-side;
 `camera: true` in status means a frame arrived within ~5 s.
 
+### LiDAR — `GET /api/robot/<id>/scan`
+Newest packed `sensor_msgs/LaserScan`, ring uplinked by the robot client at
+~4 Hz: `{"ok":true,"age":0.4,"fresh":true|false,"scan":{"frame":"laser",
+"topic":"/scan","amin":-3.1416,"amax":3.1416,"ainc":0.05236,"rmin":0.15,
+"rmax":12.0,"ranges":[...]}}`. Angles follow the ROS spec (counterclockwise
+from +x); **0.0 = no return** (gaps). `scan.ranges` is downsampled to
+`WEBCTL_SCAN_RAYS` (180) on the robot. The SPA draws it live (polar canvas).
+Related status fields: `scan` (fresh <3 s), `scan_age`, plus robot-side
+diagnostics `robot_cam_ok`, `robot_scan_ok`, `ros_topics`
+(`{"image":[...],"scan":[...]}` — what the ROBOT sees on its ROS graph,
+refreshed 30 s; the "why is it dead" answer without SSH).
+
 ### Validation rules (400 shapes)
 `VelocityCommandSerializer` rejects missing/non-numeric/NaN/Inf/±1e6-range
 fields: response `{"ok": false, "error": "invalid command", "errors": {...}}`.
@@ -99,7 +111,13 @@ Robots make **outbound calls only** (no listening ports, ever).
      5 s before reconnecting (browser reconnect beats robot hiccup)
 4. robot → server (text, ~1 Hz):
    `{"type":"telemetry","battery_v":24.2,"applied_vx":0.0,"applied_wz":0.0,
-     "watchdog_trips":0,"transport":"ws"}`
+     "watchdog_trips":0,"transport":"ws","cam_ok":true,"scan_ok":true,
+     "ros_topics":{"image":["/camera/image_raw"],"scan":["/scan"]}}`
+   (diagnostics fields: what the ROBOT itself sees — its live ROS graph +
+   whether camera/lidar threads received anything in the last 5 s)
+4b. robot → server (text, ~4 Hz): `{"type":"scan","frame":"laser",
+   "topic":"/scan","amin":…,"amax":…,"ainc":…,"rmin":…,"rmax":…,
+   "ranges":[0.0|metres]}` — packed LaserScan, 0.0 = no return
 5. robot → server (binary): latest camera JPEG only (uploader drops stale
    frames; one in flight)
 6. keepalive: robot sends ws **ping** every min(0.8 s, WATCHDOG/3); uvicorn
@@ -116,6 +134,8 @@ the lock owner, `1013` hub lost mid-session.
   time). 401/404/503 mirror the ws close codes.
 * `POST /robotctl/<id>/telemetry` — same JSON body as above
 * `POST /robotctl/<id>/frame` — body = raw `image/jpeg`
+* `POST /robotctl/<id>/scan` — body = the packed-scan JSON (≤64 KB;
+  server hard-validates: ≤4096 finite rays, sane angles, per-robot token)
 
 ### Robot onboard safety (independent of all of the above)
 No command AND no ws pong for `WEBCTL_WATCHDOG` s (default 2.5) → client
@@ -131,7 +151,8 @@ parked does **not** count as a trip.
 |---|---|---|---|
 | publishes | `/cmd_vel` (env `WEBCTL_CMD_VEL_TOPIC`) | `geometry_msgs/msg/Twist` | 10 Hz while driving; linear.x + angular.z; QoS depth-1 reliable/volatile |
 | subscribes | `/PowerVoltage` (+ `WEBCTL_BATTERY_TOPICS`) | `std_msgs/msg/Float32` | volt telemetry |
-| subscribes | `/camera/image_raw` (+ `WEBCTL_CAM_ROS_TOPICS`) | `sensor_msgs/msg/Image` | sensor-data QoS (best-effort); accepts rgb8/bgr8/rgba8/bgra8/mono8, packed yuyv422/uyvy/yuv422, planar nv12/nv21/i420; padded rows via `msg.step` |
+| subscribes | `/camera/image_raw` (+ `WEBCTL_CAM_ROS_CANDIDATES`) | `sensor_msgs/msg/Image` | sensor-data QoS (best-effort); accepts rgb8/bgr8/rgba8/bgra8/mono8, packed yuyv422/uyvy/yuv422, planar nv12/nv21/i420; padded rows via `msg.step`. Zero-rx self-heal: auto-discovers ANY Image topic on the graph after 6 s |
+| subscribes | `/scan` (+ `WEBCTL_SCAN_CANDIDATES`, auto-discovered) | `sensor_msgs/msg/LaserScan` | RPLidar A1 via `ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py` (`/dev/wheeltec_lidar`); downsampled + sanitised robot-side, uplinked ≤4 Hz |
 
 Nothing else on the ROS graph is read or written; launching/stopping the
 vendor base & camera nodes stays your job (`ros2 launch wheeltec_robot …`).

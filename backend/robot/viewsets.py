@@ -12,12 +12,14 @@ BasicAuthMiddleware, so DRF itself is AllowAny (settings.REST_FRAMEWORK).
 The MJPEG relay (/cam/<id>) stays a plain Django streaming view — DRF
 renderers don't fit endless streams.
 """
+import time
+
 from rest_framework import status as http_status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
-from robot.hub import registry
+from robot.hub import SCAN_FRESH, registry
 from robot.serializers import (
     CommandResultSerializer,
     RobotStatusSerializer,
@@ -80,6 +82,20 @@ class RobotViewSet(ViewSet):
             "clamped": clamped != (vx, wz),
         })
         return Response(result.data)
+
+    @action(detail=True, methods=["get"])
+    def scan(self, request, pk=None):
+        """GET /api/robot/<id>/scan — newest LiDAR ring (packed LaserScan).
+        Browser polls this (~2-5 Hz); 0.0 ranges mean 'no return' (gap)."""
+        hub, err = self._hub_or_404(pk)
+        if err:
+            return err
+        scan, ts = hub.scan_now()
+        now = time.time()
+        return Response({"ok": True,
+                         "age": (now - ts) if ts else None,
+                         "fresh": bool(scan) and (now - ts) < SCAN_FRESH,
+                         "scan": scan})
 
     @action(detail=True, methods=["post"])
     def stop(self, request, pk=None):

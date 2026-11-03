@@ -17,6 +17,7 @@ urlpatterns = [
     path("robotctl/<str:robot_id>/cmd", robotctl.cmd_poll, name="robotctl-cmd"),
     path("robotctl/<str:robot_id>/telemetry", robotctl.telemetry, name="robotctl-telemetry"),
     path("robotctl/<str:robot_id>/frame", robotctl.frame, name="robotctl-frame"),
+    path("robotctl/<str:robot_id>/scan", robotctl.scan, name="robotctl-scan"),
     # SPA catch-all (assets themselves are served by WhiteNoise from frontend/dist)
     re_path(r"^(?!api/|cam/|robotctl/).*$", views.index_view, name="index"),
 ]

@@ -420,6 +420,46 @@ try:
     check("ws transport restored", wait_for(
         lambda: robots_map()["alpha"]["transport"] == "ws", 8))
 
+    print("[9b] lidar: synthetic scans uplink (ws + http) and serve via API")
+    scan_ok = wait_for(lambda: (mm := robots_map()) and mm["alpha"]["scan"]
+                       and mm["beta"]["scan"], 8)
+    m2 = robots_map()
+    check("alpha(ws) + beta(http) lidar live, gamma idle has none",
+          scan_ok and m2["gamma"]["scan"] is False, str(m2.get("beta", {}).get("scan_age")))
+    st, _, body = req(f"{API}/alpha/scan")
+    d = json.loads(body)
+    rs = d.get("scan") or {}
+    check("GET /api/robot/alpha/scan: fresh packed ring",
+          st == 200 and d["ok"] and d["fresh"] and rs
+          and 1 <= len(rs["ranges"]) <= 4096
+          and all(isinstance(r, (int, float)) and 0.0 <= r <= 1000.0
+                  for r in rs["ranges"]) and rs["amax"] > rs["amin"],
+          f"{len(rs.get('ranges', []))} rays")
+    st, _, body = req(f"{API}/gamma/scan")
+    d = json.loads(body)
+    check("offline robot: scan endpoint answers ok+not-fresh (no exception)",
+          st == 200 and d["ok"] and d["fresh"] is False and d["scan"] is None)
+    good_scan = {"type": "scan", "frame": "laser", "amin": -3.14, "amax": 3.14,
+                 "ainc": 0.02, "rmin": 0.15, "rmax": 8.0,
+                 "ranges": [0.0, 1.5, 2.25, 3.0, 0.0, 8.0]}
+    st, _, _ = req(BASE + "/robotctl/gamma/scan", data=good_scan, auth=False,
+                   headers=robot_auth("gamma"))
+    st2, _, body2 = req(f"{API}/gamma/scan")
+    d2 = json.loads(body2)
+    check("POST /robotctl/gamma/scan (http ingest) then API shows it fresh",
+          st == 200 and st2 == 200 and d2["fresh"] is True
+          and d2["scan"]["ranges"] == good_scan["ranges"])
+    st, _, _ = req(BASE + "/robotctl/gamma/scan",
+                   data={"amin": 3.0, "amax": -3.0, "ainc": 0.01, "rmin": 0,
+                         "rmax": 8, "ranges": [1.0]},
+                   auth=False, headers=robot_auth("gamma"))
+    check("scan validation: amax<=amin -> 400", st == 400)
+    st, _, _ = req(BASE + "/robotctl/gamma/scan",
+                   data=good_scan, auth=False, headers=robot_auth("beta"))
+    check("scan ingest requires the RIGHT robot token -> 401", st == 401)
+    check("status carries diagnostics fields (ros_topics, robot_cam_ok)",
+          "ros_topics" in m2["alpha"] and "robot_cam_ok" in m2["alpha"])
+
     print("[10] SPA & single-owner guard")
     st, _, body = req(BASE + "/")
     html = body.decode("utf-8", "replace")

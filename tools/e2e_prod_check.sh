@@ -19,6 +19,9 @@ curl -s -u comet:$PASS -X POST http://127.0.0.1:8090/api/robot/s2000-1/stop >/de
 sleep 1
 kill $CPID 2>/dev/null
 echo "--- client ws lines:"; grep -E "websocket|watchdog" /tmp/e2e-client.log | head -3
+echo "--- client lidar lines:"; grep -i "lidar" /tmp/e2e-client.log | head -2
 echo "--- sink (what the robot base received):"; tail -2 /tmp/webctl-e2e.json
+echo "--- lidar scan via API:"; curl -s -u comet:$PASS \
+  http://127.0.0.1:8090/api/robot/s2000-1/scan | head -c 260; echo
 echo "--- fleet status:"; curl -s -u comet:$PASS http://127.0.0.1:8090/api/robot/s2000-1 | head -c 320
 echo

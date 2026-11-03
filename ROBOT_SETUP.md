@@ -166,6 +166,27 @@ endpoint in fallback mode) at `WEBCTL_CAM_FPS`/`WEBCTL_CAM_WIDTH`/
 `WEBCTL_CAM_JPEG_Q`. No camera at all is a fully supported state: driving,
 telemetry and safety are identical; the UI just shows the camera card.
 
+## 6b. LiDAR (v3.1 — the S2000's RPLidar A1)
+
+Start the vendor driver (it is NOT started by the base launch by default):
+
+```bash
+ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py   # /dev/wheeltec_lidar
+ros2 topic echo /scan --once            # sanity: one ring on the graph
+```
+
+The client picks `/scan` up automatically (and discovers LaserScan topics
+under ANY name after ~6 s of silence — same self-heal as the camera).
+It downsamples to 180 rays and pushes ≤4 small JSON scans/s over the same
+socket (frames AND scans ride the dedicated latest-wins uploader, so they
+can never starve the keepalive — the 3.0.2 lesson). Tune with
+`WEBCTL_SCAN_HZ/_RAYS/_MAX_M`, or `WEBCTL_SCAN_MODE=off`. The browser shows
+a live polar plot with a "why is it dead" hint assembled from the robot's
+own graph snapshot — if it says *"no LaserScan topic on the robot"*, the
+driver above is simply not running; if it says *"topics visible but no
+data"*, the driver is running but not publishing (check serial port
+permission / `ls -l /dev/wheeltec_lidar`).
+
 ## 7. Server + first drive
 
 Server (laptop): see README.md §A. Then on the robot:

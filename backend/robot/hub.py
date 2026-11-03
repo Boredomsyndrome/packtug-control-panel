@@ -22,6 +22,7 @@ import time
 
 ONLINE_TIMEOUT = 2.0        # no poll for this long -> robot shown OFFLINE
 FRAME_FRESH = 2.0           # camera frame older than this -> "no signal"
+SCAN_FRESH = 3.0            # lidar scan older than this -> stale (4 Hz uplink)
 _WAKE = 0.2                 # max Condition block before re-checking expiry
 
 
@@ -60,6 +61,12 @@ class RobotHub:
         self.frame = None                 # latest JPEG camera frame
         self.frame_ts = 0.0
         self.frame_seq = 0
+
+        self.scan = None                  # latest packed LaserScan (dict)
+        self.scan_ts = 0.0
+        self.last_cam_ok = False          # robot-side self-flags (telemetry)
+        self.last_scan_ok = False
+        self.ros_topics = {}              # robot's live graph (diagnostics)
 
         self.started = time.time()
 
@@ -200,6 +207,22 @@ class RobotHub:
             w = data.get("watchdog_trips")
             if isinstance(w, int):
                 self.watchdog_trips = w
+            self.last_cam_ok = bool(data.get("cam_ok"))
+            self.last_scan_ok = bool(data.get("scan_ok"))
+            rt = data.get("ros_topics")
+            if isinstance(rt, dict):
+                self.ros_topics = rt
+
+    def set_scan(self, scan):
+        """Store the newest packed LaserScan (pre-validated dict)."""
+        with self.cv:
+            self.scan = scan
+            self.scan_ts = time.time()
+            self.last_poll = time.time()
+
+    def scan_now(self):
+        with self.cv:
+            return self.scan, self.scan_ts
 
     def set_frame(self, jpeg):
         with self.cv:
@@ -250,6 +273,11 @@ class RobotHub:
                 "estop": self.estop,
                 "watchdog_trips": self.watchdog_trips,
                 "camera": self.frame is not None and (now - self.frame_ts) < FRAME_FRESH,
+                "scan": self.scan is not None and (now - self.scan_ts) < SCAN_FRESH,
+                "scan_age": (now - self.scan_ts) if self.scan_ts else None,
+                "robot_cam_ok": self.last_cam_ok,
+                "robot_scan_ok": self.last_scan_ok,
+                "ros_topics": dict(self.ros_topics),
                 "transport": "ws" if self.ws_connected else (
                     "http" if self.last_poll else None),
                 "ws_connected": self.ws_connected,

@@ -27,11 +27,23 @@ Camera (all optional, auto-detected, never blocks driving):
                                              gstreamer pipeline string)
   WEBCTL_CAM_URL=http://127.0.0.1:8080/…    (local web_video_server MJPEG)
   WEBCTL_CAM_WIDTH=960  WEBCTL_CAM_FPS=15  WEBCTL_CAM_JPEG_Q=70
+  If none of the candidate image topics ever delivers, the client DISCOVERS
+  any sensor_msgs/msg/Image topic on the graph and subscribes to it — vendor
+  naming differences (and camera nodes started after the client) self-heal.
+
+LiDAR (auto, never blocks driving):
+  WEBCTL_SCAN_MODE=auto|off                 default auto (synthetic in dry-run)
+  WEBCTL_SCAN_TOPIC / WEBCTL_SCAN_CANDIDATES=/scan,/scan_raw,/base_scan,...
+  WEBCTL_SCAN_HZ=4      upload rate (latest scan wins; small JSON)
+  WEBCTL_SCAN_RAYS=180  downsample of the raw ring (0 = every ray)
+  WEBCTL_SCAN_MAX_M=12  rays beyond this (or inf/nan) -> 0 = "no return"
+  RPLidar A1 on the S2000: ros2 launch turn_on_wheeltec_robot
+  wheeltec_lidar.launch.py  (serial /dev/wheeltec_lidar, publishes /scan)
 
 Other env: WEBCTL_SERVER, WEBCTL_ROBOT_ID/_TOKEN, WEBCTL_TRANSPORT=auto|ws|http,
 WEBCTL_WATCHDOG=2.5, WEBCTL_POLL_WAIT=0.4, WEBCTL_CMD_VEL_TOPIC,
 WEBCTL_BATTERY_TOPICS, WEBCTL_DRY_RUN=1, WEBCTL_SINK=/tmp/x.json,
-WEBCTL_DRY_BATTERY=24.3, WEBCTL_CLIENT_VERSION=2.1-stdlib
+WEBCTL_DRY_BATTERY=24.3, WEBCTL_CLIENT_VERSION=3.1-stdlib
 """
 import base64
 import http.client
@@ -47,6 +59,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,7 +67,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.0.2-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.1.0-stdlib")
 
 SERVER = os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000").rstrip("/")
 ROBOT_ID = os.getenv("WEBCTL_ROBOT_ID", "")
@@ -80,6 +93,15 @@ CAM_JPEG_Q = int(os.getenv("WEBCTL_CAM_JPEG_Q", "70"))
 ROS_CAM_CANDIDATES = [t for t in os.getenv(
     "WEBCTL_CAM_ROS_CANDIDATES",
     "/camera/image_raw,/camera/color/image_raw,/usb_cam/image_raw,/image_raw").split(",") if t]
+
+SCAN_MODE = os.getenv("WEBCTL_SCAN_MODE", "auto").lower()          # auto|off
+SCAN_TOPIC = os.getenv("WEBCTL_SCAN_TOPIC", "")
+SCAN_CANDIDATES = [t for t in os.getenv(
+    "WEBCTL_SCAN_CANDIDATES", "/scan,/scan_raw,/base_scan,/scan_filtered").split(",") if t]
+SCAN_HZ = float(os.getenv("WEBCTL_SCAN_HZ", "4"))
+SCAN_RAYS = int(os.getenv("WEBCTL_SCAN_RAYS", "180"))
+SCAN_MAX_M = float(os.getenv("WEBCTL_SCAN_MAX_M", "12.0"))
+SCAN_DISCOVER_S = float(os.getenv("WEBCTL_SCAN_DISCOVER_S", "6.0"))
 
 CMD_VEL_TOPIC = os.getenv("WEBCTL_CMD_VEL_TOPIC", "/cmd_vel")
 BATTERY_TOPICS = [t.strip() for t in
@@ -331,6 +353,12 @@ class Client:
         self.ws_is_live = False
         self._frame = None             # latest-only pending JPEG
         self._frame_lock = threading.Lock()
+        self._scan = None              # latest-only pending scan dict
+        self._scan_lock = threading.Lock()
+        self._scan_last_tx = 0.0       # monotonic of last scan upload (pacing)
+        self.cam_ts = 0.0              # monotonic stamps for telemetry OK flags
+        self.scan_ts = 0.0
+        self._topics_cache = (0.0, {})  # (checked_at, {"image": [...], "scan": [...]})
 
     # ---------- velocity ----------
     def apply(self, vx, wz, estop=False):
@@ -391,7 +419,8 @@ class Client:
                     ws = StdWs(url, timeout=5.0)
                     ws.connect()
                     ws.send(json.dumps({"type": "hello", "id": ROBOT_ID,
-                                        "cam": cam_enabled(), "sw": VERSION}))
+                                        "cam": cam_enabled(), "scan": scan_enabled(),
+                                        "sw": VERSION}))
                     self.ws = ws
                     fails = 0
                     self.state = "ws"
@@ -495,13 +524,43 @@ class Client:
             return DRY_BATTERY
         return getattr(self.sink, "battery_v", None)
 
+    def ros_topics(self):
+        """Live ROS graph snapshot (image + laser topics), cached 30 s.
+        Remote diagnostics: shows up in fleet status so 'camera is black' can
+        be diagnosed from the BROWSER — no SSH round-trip to the robot."""
+        if DRY_RUN:
+            return {}
+        checked, cached = self._topics_cache
+        if time.monotonic() - checked < 30.0:
+            return cached
+        out = {"image": [], "scan": []}
+        try:
+            node = getattr(self.sink, "node", None)
+            if node is not None:
+                for name, types_ in node.get_topic_names_and_types():
+                    for t in types_:
+                        if t.endswith("msg/Image") or t.endswith("msg/CompressedImage"):
+                            out["image"].append(name)
+                        elif t.endswith("msg/LaserScan"):
+                            out["scan"].append(name)
+                out["image"] = sorted(out["image"])[:12]
+                out["scan"] = sorted(out["scan"])[:12]
+        except Exception as e:
+            log.debug("topic probe failed: %s", e)
+        self._topics_cache = (time.monotonic(), out)
+        return out
+
     def telemetry_loop(self):
         while running:
             vx, wz = self.effective()
+            now = time.monotonic()
             body = {"type": "telemetry", "battery_v": self.battery_v(),
                     "applied_vx": vx, "applied_wz": wz,
                     "watchdog_trips": self.trips, "transport":
-                        "ws" if self.ws else "http"}
+                        "ws" if self.ws else "http",
+                    "cam_ok": self.cam_ts and now - self.cam_ts < 5.0,
+                    "scan_ok": self.scan_ts and now - self.scan_ts < 5.0,
+                    "ros_topics": self.ros_topics()}
             try:
                 if self.ws:
                     self.ws.send(json.dumps(body))
@@ -517,27 +576,54 @@ class Client:
     def post_frame(self, jpeg):
         """Camera thread hands the newest JPEG here; anything still waiting
         to go out is replaced (latest-wins)."""
+        self.cam_ts = time.monotonic()
         with self._frame_lock:
             self._frame = jpeg
+
+    def post_scan(self, scan):
+        self.scan_ts = time.monotonic()
+        with self._scan_lock:
+            self._scan = scan
 
     def frame_loop(self):
         """Dedicated uploader: at most ONE frame in flight, stale frames
         dropped. A blocking ws.send on congested WiFi used to hold the
-        shared socket ~1s and starve ping/pong -> watchdog false trip."""
+        shared socket ~1s and starve ping/pong -> watchdog false trip.
+        Scans ride the same thread (small JSON, paced to SCAN_HZ) so only
+        this thread ever writes bulk-ish payloads to the socket."""
+        scan_gap = 1.0 / max(0.5, SCAN_HZ)
         while running:
             with self._frame_lock:
                 jpeg, self._frame = self._frame, None
-            if not jpeg:
+            with self._scan_lock:
+                scan, self._scan = self._scan, None
+            if scan and time.monotonic() - self._scan_last_tx < scan_gap:
+                with self._scan_lock:            # too young: keep as pending
+                    if self._scan is None:
+                        self._scan = scan
+                    scan = None
+            if not jpeg and not scan:
                 time.sleep(0.02)
                 continue
             try:
                 ws = self.ws
-                if ws is not None:
-                    ws.send(jpeg, binary=True)
-                else:
-                    self._http("POST", f"/robotctl/{ROBOT_ID}/frame", body=jpeg,
-                               headers={"Content-Type": "image/jpeg"},
-                               timeout=4.0)
+                if jpeg:
+                    if ws is not None:
+                        ws.send(jpeg, binary=True)
+                    else:
+                        self._http("POST", f"/robotctl/{ROBOT_ID}/frame", body=jpeg,
+                                   headers={"Content-Type": "image/jpeg"},
+                                   timeout=4.0)
+                if scan:
+                    self._scan_last_tx = time.monotonic()
+                    payload = json.dumps(scan)
+                    if ws is not None:
+                        ws.send(payload)         # TEXT frame: type=scan
+                    else:
+                        self._http("POST", f"/robotctl/{ROBOT_ID}/scan",
+                                   body=payload.encode(),
+                                   headers={"Content-Type": "application/json"},
+                                   timeout=4.0)
             except Exception:
                 pass                      # dropped frames are fine; newest next
             # tiny yield so a fast camera can't spin the uploader ahead of
@@ -567,6 +653,23 @@ class Client:
             elif delay > 0:
                 time.sleep(delay)
 
+    def scan_loop(self, source=None):
+        """LiDAR reader thread: resolve source (synthetic when dry-running),
+        pack newest scan, hand to the uploader. Never blocks driving."""
+        if source is None:                     # lazy, off the main thread
+            log.info("lidar: resolving source (mode=%s)...", SCAN_MODE)
+            source = make_scan()
+            if source is None:
+                return
+        while running:
+            try:
+                scan = source.read()
+                if scan:
+                    self.post_scan(scan)       # uploader thread paces the send
+            except Exception as e:
+                log.warning("lidar source error: %s (driving unaffected)", e)
+                time.sleep(1.0)
+
     # ---------- sinks ----------
     def _make_sink(self):
         if not DRY_RUN:
@@ -593,8 +696,13 @@ class Client:
             # camera resolves INSIDE its thread — a slow/hanging device probe
             # must never delay the control link or this log stream.
             threads.append(threading.Thread(target=self.cam_loop, daemon=True, name="cam"))
+        if CAM_MODE != "off" or scan_enabled():
+            # the uploader carries JPEGs AND scans — start it for either
             threads.append(threading.Thread(target=self.frame_loop, daemon=True,
                                             name="frame-uploader"))
+        if scan_enabled():
+            threads.append(threading.Thread(target=self.scan_loop, daemon=True,
+                                            name="lidar"))
         for t in threads:
             t.start()
         while running:
@@ -669,6 +777,58 @@ class RosSink:
 # --------------------------------------------------------- camera sources
 def cam_enabled():
     return CAM_MODE != "off"
+
+
+def scan_enabled():
+    return SCAN_MODE != "off"
+
+
+def discover_topics(node, type_suffix):
+    """Every topic on the live ROS graph whose msg type ends with
+    type_suffix (e.g. 'msg/LaserScan'). Empty on any failure — never raises."""
+    try:
+        return [name for name, types_ in node.get_topic_names_and_types()
+                if any(str(t).endswith(type_suffix) for t in types_)]
+    except Exception as e:
+        log.debug("topic discovery failed: %s", e)
+        return []
+
+
+def pack_scan(msg, topic="", rays=None, max_m=None):
+    """Downsample a sensor_msgs/LaserScan to a compact JSON-safe dict for the
+    uplink. Spec rules honoured (docs.ros.org LaserScan): angles increase
+    counterclockwise from +x; readings outside [range_min, range_max] or
+    inf/nan mean 'no return' -> 0.0 (browser renders the gap)."""
+    rays = SCAN_RAYS if rays is None else rays
+    max_m = SCAN_MAX_M if max_m is None else max_m
+    ranges = list(msg.ranges)
+    n = len(ranges)
+    if n == 0:
+        return None
+    stride = 1 if rays <= 0 else max(1, (n + rays - 1) // rays)
+    rmin, rmax = float(msg.range_min), float(msg.range_max)
+    out = []
+    for i in range(0, n, stride):
+        try:
+            v = float(ranges[i])
+        except (TypeError, ValueError):
+            out.append(0.0)
+            continue
+        if (v != v) or v <= 0.0 or v == float("inf") or v == float("-inf") \
+                or v < rmin or v > min(rmax, max_m):
+            out.append(0.0)               # invalid/out-of-window per spec
+        else:
+            out.append(round(v, 3))
+    try:
+        frame = str(getattr(getattr(msg, "header", None), "frame_id", "") or "")
+    except Exception:
+        frame = ""
+    return {"type": "scan", "frame": frame[:64], "topic": topic[:64],
+            "amin": round(float(msg.angle_min), 4),
+            "amax": round(float(msg.angle_max), 4),
+            "ainc": round(float(msg.angle_increment) * stride, 5),
+            "rmin": round(rmin, 3), "rmax": round(min(rmax, max_m), 3),
+            "ranges": out}
 
 
 class MjpegSource:
@@ -764,20 +924,19 @@ class RosCamSource:
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import Image
         self._Image = Image
+        self._qos = qos_profile_sensor_data
         self.node = rclpy.create_node("webctl_cam") if rclpy.ok() else None
         if self.node is None:
             raise WSError("rclpy not initialised")
         self.last = None
         self.warned_enc = set()
+        self.subscribed = set()
+        self.rx_total = 0
+        self.next_discover = time.monotonic() + SCAN_DISCOVER_S
+        self.discovered_once = False
         got = False
         for t in topics:
-            try:
-                self.node.create_subscription(
-                    Image, t, lambda m, tt=t: setattr(self, "last", (tt, m)),
-                    qos_profile_sensor_data)
-                got = True
-            except Exception as e:
-                log.warning("camera topic %s: %s", t, e)
+            got = self.subscribe(t) or got
         if not got:
             raise WSError("no subscribable camera topic")
         # THIS was the silent-frame-killer: ROS callbacks only run while some
@@ -790,7 +949,53 @@ class RosCamSource:
         self._np = numpy
         import cv2
         self._cv2 = cv2
-        log.info("camera: ros subscription(s) %s", topics)
+        log.info("camera: ros subscription(s) %s", sorted(self.subscribed))
+
+    def subscribe(self, topic):
+        if topic in self.subscribed:
+            return True
+        node = self.node
+        if node is None:
+            return False
+        try:
+            node.create_subscription(
+                self._Image, topic,
+                lambda m, tt=topic: self._rx(m, tt),
+                self._qos)
+            self.subscribed.add(topic)
+            return True
+        except Exception as e:
+            log.warning("camera topic %s: %s", topic, e)
+            return False
+
+    def _rx(self, msg, topic):
+        self.rx_total += 1
+        self.last = (topic, msg)
+
+    def _maybe_discover(self):
+        """If candidate names never delivered, hunt the live graph for ANY
+        sensor_msgs/msg/Image topic (vendor naming differs; camera node may
+        start long after this client). Self-heals without config or restarts."""
+        now = time.monotonic()
+        if self.rx_total or now < self.next_discover:
+            return
+        self.next_discover = now + SCAN_DISCOVER_S
+        found = [t for t in discover_topics(self.node, "msg/Image")
+                 if t not in self.subscribed]
+        added = [t for t in found if self.subscribe(t)]
+        if added:
+            log.info("camera: DISCOVERED live image topic(s) %s — subscribing",
+                     ", ".join(sorted(added)))
+        elif not self.discovered_once and not self.subscribed:
+            self.discovered_once = True
+            log.warning("camera: no Image topic on the ROS graph — is the "
+                        "camera node running? (ros2 topic list | grep image)")
+        elif not found and not self.discovered_once:
+            self.discovered_once = True
+            log.warning("camera: subscribed %s but zero frames received; "
+                        "graph has no other Image topic — check encoding/"
+                        "publisher (ros2 topic info -v <topic>)",
+                        sorted(self.subscribed))
 
     # encoding -> (bytes per pixel, OpenCV conversion to BGR; None = already BGR)
     _PACKED = {"rgb8": (3, "COLOR_RGB2BGR"), "bgr8": (3, None),
@@ -806,6 +1011,7 @@ class RosCamSource:
     def read(self):
         got = self.last
         if not got:
+            self._maybe_discover()
             time.sleep(0.05)
             return None
         _, msg = got
@@ -849,6 +1055,135 @@ class RosCamSource:
         ok, buf = self._cv2.imencode(".jpg", img,
                                      [self._cv2.IMWRITE_JPEG_QUALITY, CAM_JPEG_Q])
         return buf.tobytes() if ok else None
+
+
+class RosScanSource:
+    """LiDAR straight from the ROS2 graph: subscribe to sensor_msgs/LaserScan
+    (RPLidar A1 publishes /scan via wheeltec_lidar.launch.py), pack newest."""
+
+    def __init__(self, topics):
+        import rclpy
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import LaserScan
+        self._LaserScan = LaserScan
+        self._qos = qos_profile_sensor_data
+        self.node = rclpy.create_node("webctl_scan") if rclpy.ok() else None
+        if self.node is None:
+            raise WSError("rclpy not initialised")
+        self.last = None                 # (topic, msg)
+        self.subscribed = set()
+        self.rx_total = 0
+        self.next_discover = time.monotonic() + SCAN_DISCOVER_S
+        self.warned_none = False
+        for t in topics:
+            self.subscribe(t)
+        from rclpy.executors import SingleThreadedExecutor
+        ex = SingleThreadedExecutor()
+        ex.add_node(self.node)
+        threading.Thread(target=ex.spin, daemon=True, name="rclpy-scan-spin").start()
+        log.info("lidar: ros subscription(s) %s", sorted(self.subscribed) or "(none yet)")
+
+    def subscribe(self, topic):
+        if topic in self.subscribed:
+            return True
+        node = self.node
+        if node is None:
+            return False
+        try:
+            node.create_subscription(
+                self._LaserScan, topic,
+                lambda m, tt=topic: self._rx(m, tt), self._qos)
+            self.subscribed.add(topic)
+            return True
+        except Exception as e:
+            log.debug("lidar topic %s: %s", topic, e)
+            return False
+
+    def _rx(self, msg, topic):
+        self.rx_total += 1
+        self.last = (topic, msg)
+
+    def _maybe_discover(self):
+        now = time.monotonic()
+        if self.rx_total or now < self.next_discover:
+            return
+        self.next_discover = now + SCAN_DISCOVER_S
+        found = [t for t in discover_topics(self.node, "msg/LaserScan")
+                 if t not in self.subscribed]
+        added = [t for t in found if self.subscribe(t)]
+        if added:
+            log.info("lidar: DISCOVERED live LaserScan topic(s) %s — subscribing",
+                     ", ".join(sorted(added)))
+        elif not self.warned_none:
+            self.warned_none = True
+            log.warning("lidar: no LaserScan topic on the graph — start it with "
+                        "`ros2 launch turn_on_wheeltec_robot "
+                        "wheeltec_lidar.launch.py` (RPLidar A1 on "
+                        "/dev/wheeltec_lidar); graph: ros2 topic list")
+
+    def read(self):
+        got = self.last
+        if not got:
+            self._maybe_discover()
+            time.sleep(0.05)
+            return None
+        topic, msg = got
+        self.last = None
+        try:
+            return pack_scan(msg, topic=topic)
+        except Exception as e:
+            log.warning("lidar pack failed for %s: %s", topic, e)
+            return None
+
+
+class SyntheticScan:
+    """Dry-run/test LiDAR: virtual rotating wall ring with a door gap, so the
+    whole uplink + UI can be proven without hardware (same pack path)."""
+
+    N = 240
+    _2PI = 6.283185307179586
+
+    def __init__(self):
+        self.phase = 0.0
+        self.next_t = time.monotonic()
+
+    def read(self):
+        # hold ~10 Hz updates; uploader still paces to SCAN_HZ
+        delay = self.next_t - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        self.next_t = time.monotonic() + 0.1
+        self.phase = (self.phase + 0.03) % self._2PI
+        ainc = self._2PI / self.N
+        ranges = []
+        for i in range(self.N):
+            a = -3.141592653589793 + i * ainc
+            gap = abs((a - self.phase + 3.141592653589793) % self._2PI
+                      - 3.141592653589793)
+            ranges.append(0.0 if gap < 0.35 else 4.0 + 0.4 * (i % 7))
+        msg = types.SimpleNamespace(
+            header=types.SimpleNamespace(frame_id="laser_dry"),
+            angle_min=-3.141592653589793, angle_max=3.141592653589793,
+            angle_increment=ainc, range_min=0.15, range_max=8.0,
+            ranges=ranges)
+        return pack_scan(msg, topic="/scan_dry")
+
+
+def make_scan():
+    """Resolve LiDAR source; every failure degrades to no-lidar, never
+    no-driving (mirrors make_cam's contract)."""
+    try:
+        if SCAN_MODE not in ("auto", "ros"):
+            raise WSError(f"unknown WEBCTL_SCAN_MODE {SCAN_MODE!r}")
+        if DRY_RUN:
+            log.info("lidar: dry-run synthetic scan enabled")
+            return SyntheticScan()
+        topics = ([SCAN_TOPIC] if SCAN_TOPIC else SCAN_CANDIDATES)
+        log.info("lidar: trying ROS LaserScan topic(s) %s", ", ".join(topics))
+        return RosScanSource(topics)
+    except Exception as e:
+        log.warning("lidar disabled: %s", e)
+        return None
 
 
 def make_cam():

@@ -127,6 +127,8 @@ creds here):
 | `GET  /robotctl/<id>/cmd?seq=N&wait=0.4` | long-poll the effective cmd `{vx,wz,estop,seq,cmd_timeout}` |
 | `POST /robotctl/<id>/telemetry` | `{battery_v, applied_vx, applied_wz, watchdog_trips}` |
 | `POST /robotctl/<id>/frame` | one JPEG per request (≤ MAX_FRAME) |
+| `POST /robotctl/<id>/scan` | one packed LaserScan JSON (≤4 Hz, ≤64 KB) |
+| `GET  /api/robot/<id>/scan` | newest LiDAR ring + freshness age (SPA polls it) |
 
 ## C. Verify without any robot (always after changes)
 

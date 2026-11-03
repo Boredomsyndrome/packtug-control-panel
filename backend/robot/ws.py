@@ -133,6 +133,13 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
                     hub.set_telemetry(ser.validated_data, transport="ws")
                 else:
                     log.debug("telemetry rejected: %s", ser.errors)
+            elif kind == "scan":
+                from robot.serializers import ScanSerializer
+                ser = ScanSerializer(data=obj)
+                if ser.is_valid():
+                    hub.set_scan(ser.validated_data)
+                else:
+                    log.debug("scan rejected: %s", ser.errors)
             elif kind == "bye":
                 await reader_q.put(("disc", None))
                 return

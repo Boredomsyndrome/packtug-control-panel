@@ -11,6 +11,22 @@ const KEYMAP = {
   KeyD: 'right', ArrowRight: 'right',
 }
 
+// Human hint for "why is the sensor dead", assembled from the robot's own
+// telemetry (robot_*_ok) and its live ROS graph snapshot (ros_topics).
+function sensorHint(status, kind) {
+  if (!status) return ''
+  const topics = status.ros_topics || {}
+  const list = kind === 'scan' ? topics.scan || [] : topics.image || []
+  const ok = kind === 'scan' ? status.robot_scan_ok : status.robot_cam_ok
+  if (ok) return 'robot sees data but none arrived — uplink problem (check client log/WiFi)'
+  if (status.ros_topics && list.length === 0) {
+    return kind === 'scan'
+      ? 'no LaserScan topic on the robot — start it: ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py'
+      : 'no Image topic on the robot graph — launch the camera node, then it self-heals (no client restart needed)'
+  }
+  return `${kind}: topics visible on robot (${list.join(', ')}) but no data — node running? publisher QoS?`
+}
+
 async function post(url, body) {
   const res = await fetch(url, {
     method: 'POST',
@@ -207,6 +223,7 @@ export default function App() {
       </header>
 
       <main className="grid">
+        <div className="leftcol">
         <section className="video">
           {!sel ? (
             <div className="camfail">
@@ -215,9 +232,14 @@ export default function App() {
                 {' '}WEBCTL_ROBOTS on the server — the fleet scales with it.</p>
             </div>
           ) : (
-            <WsCam key={`${sel}-${camKey}`} robotId={sel} />
+            <WsCam key={`${sel}-${camKey}`} robotId={sel} status={status} />
           )}
         </section>
+
+        <section className="lidar">
+          {sel && <ScanView key={sel} robotId={sel} status={status} />}
+        </section>
+        </div>
 
         <section className="drive">
           <div className="dpad" onContextMenu={(e) => e.preventDefault()}>
@@ -278,6 +300,8 @@ export default function App() {
             {status.id} · applied {status.applied.vx.toFixed(2)} m/s {status.applied.wz.toFixed(2)} rad/s ·
             link state {status.applied.vx !== 0 || status.applied.wz !== 0 ? 'driving' : 'idle'} ·
             watchdog trips {status.watchdog_trips} · seq {status.seq} ·
+            cam {status.camera ? 'live' : 'off'} ·
+            lidar {status.scan ? 'live' : 'off'} ·
             clamps ±{maxLin} m/s ±{maxRot} rad/s
           </span>
         ) : <span>connecting…</span>}
@@ -286,7 +310,7 @@ export default function App() {
   )
 }
 
-function WsCam({ robotId }) {
+function WsCam({ robotId, status }) {
   // Primary path: /ws/cam/<id> binary frames (8-byte float64 server ts +
   // JPEG). If no WS server (WSGI-only fallback) we degrade to the legacy
   // /cam/<id> HTTP MJPEG relay, then to an error card.
@@ -330,8 +354,9 @@ function WsCam({ robotId }) {
     return (
       <div className="camfail">
         <p>Camera stream unavailable for {robotId}.</p>
-        <p className="dim">The robot client must have a camera source enabled
-          {' '}(WEBCTL_CAM_MODE=auto|ros|cv2|mjpeg).</p>
+        <p className="dim">Robot client camera state: {String(status?.camera)} ·{' '}
+          robot-side ok: {String(status?.robot_cam_ok)}</p>
+        {status && <p className="dim hintsmall">{sensorHint(status, 'image')}</p>}
         <button onClick={() => setMode('ws')}>Retry stream</button>
       </div>
     )
@@ -352,6 +377,102 @@ function WsCam({ robotId }) {
         ◉ ws {fps} fps{lat != null ? ` · ${Math.max(0, Math.round(lat))} ms` : ' · …'}
       </span>
     </div>
+  )
+}
+
+function ScanView({ robotId, status }) {
+  // LiDAR panel: polls /api/robot/<id>/scan (~3 Hz) and draws the newest
+  // packed LaserScan. ROS convention: +x forward (up on screen), angles
+  // counterclockwise, 0.0 range = no return (left as a gap).
+  const canvasRef = useRef(null)
+  const scanRef = useRef(null)
+  const [meta, setMeta] = useState({ points: 0, age: null, fresh: false, err: false })
+
+  useEffect(() => {
+    let stop = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/robot/${encodeURIComponent(robotId)}/scan`)
+        const d = await res.json()
+        if (stop) return
+        if (d.scan) scanRef.current = d.scan
+        setMeta({ points: d.scan ? d.scan.ranges.length : 0,
+                  age: d.age, fresh: !!d.fresh, err: false })
+      } catch {
+        if (!stop) setMeta((m) => ({ ...m, err: true }))
+      }
+    }
+    tick()
+    const id = setInterval(tick, 300)
+    return () => { stop = true; clearInterval(id) }
+  }, [robotId])
+
+  useEffect(() => {
+    const cv = canvasRef.current
+    if (!cv) return
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1
+      const W = cv.clientWidth, H = cv.clientHeight
+      if (!W || !H) return
+      if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr)
+      }
+      const g = cv.getContext('2d')
+      g.setTransform(dpr, 0, 0, dpr, 0, 0)
+      g.clearRect(0, 0, W, H)
+      const scan = scanRef.current
+      const cx = W / 2, cy = H / 2
+      let rmax = scan ? scan.rmax : 8
+      if (scan) {
+        let m = 0
+        for (const r of scan.ranges) if (r > m) m = r
+        if (m > 0) rmax = Math.min(scan.rmax, Math.max(m * 1.15, 0.5))
+      }
+      const scale = (Math.min(W, H) / 2 / rmax) * 0.92
+      const stepv = rmax <= 2 ? 0.5 : rmax <= 8 ? 1 : rmax <= 20 ? 5 : 20
+      g.strokeStyle = 'rgba(110,160,150,0.18)'
+      g.fillStyle = 'rgba(150,190,180,0.45)'
+      g.font = '10px ui-monospace, Menlo, monospace'
+      for (let r = stepv; r <= rmax + 1e-9; r += stepv) {
+        g.beginPath(); g.arc(cx, cy, r * scale, 0, 2 * Math.PI); g.stroke()
+        g.fillText(`${r}m`, cx + 3, cy - r * scale - 2)
+      }
+      g.beginPath(); g.moveTo(cx - 5, cy); g.lineTo(cx + 5, cy)
+      g.moveTo(cx, cy - 5); g.lineTo(cx, cy + 5); g.stroke()
+      if (scan) {
+        g.fillStyle = meta.fresh ? '#5ff0c0' : '#8d8d6f'
+        const n = scan.ranges.length
+        for (let i = 0; i < n; i++) {
+          const r = scan.ranges[i]
+          if (r <= 0) continue
+          const a = scan.amin + i * scan.ainc
+          const x = cx - r * Math.sin(a) * scale     // +x up, +y left
+          const y = cy - r * Math.cos(a) * scale
+          g.fillRect(x - 1.1, y - 1.1, 2.3, 2.3)
+        }
+        g.fillStyle = '#ffd05f'
+        g.beginPath(); g.moveTo(cx, cy - 7); g.lineTo(cx - 4.5, cy + 4)
+        g.lineTo(cx + 4.5, cy + 4); g.closePath(); g.fill()
+      }
+    }
+    draw()
+    window.addEventListener('resize', draw)
+    return () => window.removeEventListener('resize', draw)
+  }, [meta])
+
+  const ageTxt = meta.age == null ? '—' : `${Math.round(meta.age * 1000)} ms`
+  return (
+    <>
+      <canvas ref={canvasRef} />
+      <span className={`camtag lidar-tag ${meta.fresh ? '' : 'stale'}`}>
+        {meta.err ? 'lidar: server unreachable'
+          : meta.fresh ? `◉ lidar ${meta.points} rays · ${ageTxt}`
+          : `lidar idle · last ${ageTxt}`}
+      </span>
+      {!meta.fresh && status?.online && (
+        <div className="lidhint">{sensorHint(status, 'scan')}</div>
+      )}
+    </>
   )
 }
 

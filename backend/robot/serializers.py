@@ -47,6 +47,11 @@ class RobotStatusSerializer(serializers.Serializer):
     estop = serializers.BooleanField()
     watchdog_trips = serializers.IntegerField()
     camera = serializers.BooleanField()
+    scan = serializers.BooleanField(required=False)
+    scan_age = serializers.FloatField(allow_null=True, required=False)
+    robot_cam_ok = serializers.BooleanField(required=False)
+    robot_scan_ok = serializers.BooleanField(required=False)
+    ros_topics = serializers.DictField(required=False)
     transport = serializers.CharField(allow_null=True, required=False)
     ws_connected = serializers.BooleanField(required=False)
     cmd_timeout = serializers.FloatField()
@@ -66,9 +71,42 @@ class TelemetrySerializer(serializers.Serializer):
                                         min_value=-1e3, max_value=1e3)
     watchdog_trips = serializers.IntegerField(required=False, default=0,
                                               min_value=0, max_value=10**9)
+    cam_ok = serializers.BooleanField(required=False, default=False)
+    scan_ok = serializers.BooleanField(required=False, default=False)
+    ros_topics = serializers.DictField(required=False)
 
     def validate(self, attrs):
         for value in attrs.values():
             if isinstance(value, float) and not math.isfinite(value):
                 raise serializers.ValidationError("values must be finite")
+        return attrs
+
+
+class ScanSerializer(serializers.Serializer):
+    """Uplink body for a packed sensor_msgs/LaserScan (ws text frame or
+    POST /robotctl/<id>/scan). Ranges are already downsampled + sanitised
+    robot-side; we STILL hard-validate here — a robot is untrusted input.
+    0.0 means 'no return' (drawn as a gap)."""
+    frame = serializers.CharField(required=False, allow_blank=True,
+                                  max_length=64, default="laser")
+    topic = serializers.CharField(required=False, allow_blank=True,
+                                  max_length=64, default="")
+    amin = serializers.FloatField(min_value=-20.0, max_value=20.0)
+    amax = serializers.FloatField(min_value=-20.0, max_value=20.0)
+    ainc = serializers.FloatField(min_value=-1.0, max_value=1.0)
+    rmin = serializers.FloatField(min_value=0.0, max_value=100.0)
+    rmax = serializers.FloatField(min_value=0.0, max_value=1000.0)
+    ranges = serializers.ListField(
+        child=serializers.FloatField(min_value=0.0, max_value=1000.0),
+        min_length=1, max_length=4096)
+
+    def validate_ranges(self, value):
+        for v in value:
+            if not math.isfinite(v):
+                raise serializers.ValidationError("ranges must be finite")
+        return value
+
+    def validate(self, attrs):
+        if attrs["amax"] <= attrs["amin"]:
+            raise serializers.ValidationError("amax must exceed amin")
         return attrs

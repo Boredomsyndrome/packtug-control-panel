@@ -47,6 +47,7 @@ class FakeNode:
     def __init__(self, name):
         self.name = name
         self.subs = []          # (topic, callback)
+        self.graph = []         # [(topic, [types])] for get_topic_names_and_types
         NODES.append(self)
 
     def create_publisher(self, msgtype, topic, qos):
@@ -57,6 +58,9 @@ class FakeNode:
     def create_subscription(self, msgtype, topic, cb, qos):
         self.subs.append((topic, cb))
         return object()
+
+    def get_topic_names_and_types(self):
+        return list(self.graph)
 
 
 class SingleThreadedExecutor:
@@ -93,7 +97,8 @@ class _Twist:
 
 _mod("geometry_msgs.msg", Twist=_Twist)
 _mod("std_msgs.msg", Float32=type("Float32", (), {}))
-_mod("sensor_msgs.msg", Image=type("Image", (), {}))
+_mod("sensor_msgs.msg", Image=type("Image", (), {}),
+     LaserScan=type("LaserScan", (), {}))
 
 # fake cv2: pass-through geometry, imencode hands back a marker payload
 cv2 = _mod("cv2", COLOR_RGB2BGR=0, COLOR_RGBA2BGR=1, COLOR_BGRA2BGR=2,
@@ -201,6 +206,77 @@ with c._frame_lock:
     pending, c._frame = c._frame, None
 check("frame uploader is latest-wins (stale frames dropped, not queued)",
       pending == b"new-frame", repr(pending))
+
+# ------------------------------------------------- 4. lidar: pack_scan spec
+def _mk_scan(ranges, amin=-3.14, amax=3.14, ainc=0.02, rmin=0.15, rmax=30.0,
+             header=True):
+    m = types.SimpleNamespace(angle_min=amin, angle_max=amax,
+                              angle_increment=ainc, range_min=rmin,
+                              range_max=rmax, ranges=ranges)
+    if header:
+        m.header = types.SimpleNamespace(frame_id="laser")
+    return m
+
+
+packed = client.pack_scan(_mk_scan([5.0] * 360), topic="/scan")
+check("pack_scan: 360 rays downsampled to <=180 with ainc scaled by stride",
+      packed and len(packed["ranges"]) == 180 and packed["ranges"][0] == 5.0
+      and abs(packed["ainc"] - 0.04) < 1e-9 and packed["frame"] == "laser",
+      f"n={len(packed['ranges']) if packed else 0}")
+
+mixed = client.pack_scan(_mk_scan(
+    [0.0, -1.0, float("inf"), float("nan"), 50.0, 0.1, 5.123456, 0.15]))
+check("pack_scan: inf/nan/neg/over-12m/sub-rmin -> 0 (no return), "
+      "valid rounded to mm",
+      mixed["ranges"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.123, 0.15],
+      str(mixed["ranges"]))
+check("pack_scan: empty ranges -> None",
+      client.pack_scan(_mk_scan([])) is None)
+check("pack_scan: missing header tolerated",
+      client.pack_scan(_mk_scan([1.0], header=False))["frame"] == "")
+
+# ------------------------------------------------- 5. RosScanSource + discovery
+before_nodes = len(NODES)
+scan_src = client.RosScanSource(["/scan"])
+check("scan node subscribes candidates + executor spins",
+      len(NODES) == before_nodes + 1
+      and scan_src.node.subs and scan_src.node.subs[0][0] == "/scan"
+      and SPINS[-1].started.wait(2))
+scan_cb = scan_src.node.subs[0][1]
+scan_cb(_mk_scan([2.5] * 20), "/scan")     # fire like rclpy
+packed = scan_src.read()
+check("received LaserScan -> packed dict via read()",
+      packed and packed["topic"] == "/scan" and packed["ranges"][:2] == [2.5, 2.5])
+
+scan_src.rx_total = 0
+scan_src.next_discover = 0.0
+scan_src.node.graph = [("/rplidar/scan", ["sensor_msgs/msg/LaserScan"]),
+                       ("/some/image", ["sensor_msgs/msg/Image"]),
+                       ("/scan_filtered", ["sensor_msgs/msg/LaserScan"])]
+scan_src._maybe_discover()
+check("scan auto-discovery: live LaserScan topics on graph get subscribed "
+      "(non-LaserScan skipped)",
+      "/rplidar/scan" in scan_src.subscribed
+      and "/some/image" not in scan_src.subscribed)
+
+cam.rx_total = 0
+cam.next_discover = 0.0
+cam.node.graph = [("/vendor/webrtc/image_raw", ["sensor_msgs/msg/Image"])]
+cam._maybe_discover()
+check("camera auto-discovery: unknown vendor Image topic self-heals "
+      "(no config, no restart)",
+      "/vendor/webrtc/image_raw" in cam.subscribed)
+
+# ------------------------------------------------- 6. scan slot latest-wins
+c2 = client.Client.__new__(client.Client)
+c2._scan, c2._scan_lock = None, threading.Lock()
+c2.cam_ts = c2.scan_ts = 0.0
+c2.post_scan({"seq": 1})
+c2.post_scan({"seq": 2})
+with c2._scan_lock:
+    pending, c2._scan = c2._scan, None
+check("scan uploader is latest-wins too", pending == {"seq": 2}, repr(pending))
+check("post_scan stamped scan_ts", c2.scan_ts > 0)
 
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

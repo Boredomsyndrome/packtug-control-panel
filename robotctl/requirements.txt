@@ -1,4 +1,6 @@
-# Robot-side dependency (rclpy itself comes from the ROS2 image on the SBC).
-# The wheeltec Ubuntu images already ship python3-requests; this is only for
-# images that do not.
-requests>=2.31
+# Robot-side dependencies: NONE (by design — the robot has no internet and
+# nothing may be installed on it).
+# robotctl/client.py runs on the Python 3 standard library ALONE.
+# rclpy (ROS2) and cv2 ship inside the WHEELTEC Jetson image and are
+# imported lazily/optionally; the client degrades gracefully without them.
+# (This file is kept only as a signpost; there is nothing to pip install.)

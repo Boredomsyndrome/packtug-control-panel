@@ -47,6 +47,8 @@ class RobotStatusSerializer(serializers.Serializer):
     estop = serializers.BooleanField()
     watchdog_trips = serializers.IntegerField()
     camera = serializers.BooleanField()
+    transport = serializers.CharField(allow_null=True, required=False)
+    ws_connected = serializers.BooleanField(required=False)
     cmd_timeout = serializers.FloatField()
     max_lin = serializers.FloatField()
     max_rot = serializers.FloatField()

@@ -76,9 +76,15 @@ bash tools/prod_smoke_test.sh        # optional: production launcher 8/8
 ### 1.5 Run the server (exactly ONE process)
 
 ```bash
-tmux new -s webctl -d '.venv/bin/python backend/manage.py runserver 0.0.0.0:8000'
+tmux new -s webctl -d 'bash scripts/run_server.sh 0.0.0.0 8000'
 tmux attach -t webctl          # Ctrl-b d to detach;  tmux kill-session -t webctl to stop
 ```
+
+`run_server.sh` boots the ASGI app on uvicorn — that's the WebSocket mode:
+ms-latency command push and the low-latency camera stream. Plain
+`runserver`/gunicorn WSGI still boots as an HTTP-only fallback (robots
+auto-negotiate down to long-poll; camera falls back to the `/cam` MJPEG
+relay) — good for debugging, laggier on video.
 
 The `.server.lock` flock makes any second server answer 503 — that's a
 feature, kill the old one instead of running two.
@@ -129,38 +135,39 @@ ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py   # or your 
 ros2 topic echo /PowerVoltage --once      # a voltage prints => MCU link OK
 ```
 
-Autostart this on boot the same way as §2.5 (the client unit waits for it).
+Autostart this on boot too (ROBOT_SETUP.md §4/§5); the client retries
+forever, so start order never matters.
 
-### 2.5 Install the robot client (once, autostarts forever)
+### 2.5 Run the robot client (once) — ZERO installs on the robot
 
-```bash
-sudo apt install -y python3-requests      # skip if `python3 -c "import requests"` works
-sudo cp ~/wheeltec-webctl/robotctl/wheeltec-robotctl.service /etc/systemd/system/
-sudo cp ~/wheeltec-webctl/robotctl/robotctl.env.example /etc/wheeltec-robotctl.env
-sudo nano /etc/wheeltec-robotctl.env
-```
-
-`/etc/wheeltec-robotctl.env` — the four values that matter:
-
-```ini
-WEBCTL_SERVER=http://10.42.0.1:8000      # laptop from Part 1.4 (hotspot example)
-WEBCTL_ROBOT_ID=s2000-1                  # must match a WEBCTL_ROBOTS entry
-WEBCTL_ROBOT_TOKEN=<tha…ken>            # ...and its token
-WEBCTL_WATCHDOG=1.0                      # no poll this long -> motors zero
-# WEBCTL_CAM_URL=... only if this robot has a camera (ROBOT_SETUP.md §6)
-```
+**The robot has no internet access, so nothing is ever apt/pip-installed on
+it.** `client.py` runs on the Python 3 standard library alone (its
+WebSocket is hand-rolled over raw sockets); `rclpy`/`cv2` come straight
+from the WHEELTEC image. Copying the folder in 2.2 was the entire deploy.
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now wheeltec-robotctl
-journalctl -u wheeltec-robotctl -f       # want: "robotctl client 's2000-1' -> http://..."
+mkdir -p ~/.config
+cp ~/wheeltec-webctl/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+chmod 600 ~/.config/wheeltec-robotctl.env
+nano ~/.config/wheeltec-robotctl.env     # the values that matter:
+#   WEBCTL_SERVER=http://10.42.0.1:8000    laptop from 1.4 (hotspot example)
+#   WEBCTL_ROBOT_ID=s2000-1                must match a WEBCTL_ROBOTS entry
+#   WEBCTL_ROBOT_TOKEN=<tha…ken>         # ...and its token
+#   WEBCTL_WATCHDOG=1.0                    no contact this long -> motors zero
+#   WEBCTL_CAM_MODE=auto                   camera per ROBOT_SETUP.md §6 (optional)
+tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+# want: websocket up -> ws://<server>/ws/robotctl/s2000-1
 ```
+
+`run_client.sh` also sources ROS env (nothing installed). Boot autostart
+without touching the system: desktop autostart entry per ROBOT_SETUP.md §5;
+an optional systemd unit ships in `robotctl/` if you want it anyway.
 
 ---
 
 ## Part 3 — First drive
 
-1. On the robot, confirm the link it-self:
+1. On the robot, confirm the link itself:
 
    ```bash
    curl -su "s2000-1:<tokenA>" "http://<server>:8000/robotctl/s2000-1/cmd?wait=0"
@@ -168,7 +175,8 @@ journalctl -u wheeltec-robotctl -f       # want: "robotctl client 's2000-1' -> h
    ```
 
 2. Open `http://<server>:8000` in a browser (phone on same WiFi works too).
-   The robot's chip turns **green ≤ 2 s**; battery voltage appears.
+   The robot's chip turns **green ≤ 2 s**, transport shows `ws`, battery
+   voltage appears.
 3. Wheels in the air → press ▲ → wheel spins → release → stops within ~0.5 s.
 4. Yank the robot's WiFi / close the tab → chip red, and it already stopped
    on its own within ~1 s via the onboard watchdog.
@@ -185,11 +193,11 @@ green before packing (README §C).
 
 | symptom | fix |
 |---|---|
-| chip stays red / OFFLINE | `journalctl -u wheeltec-robotctl` → connection refused = wrong `WEBCTL_SERVER`/server down; 401 = token mismatch vs `.env` |
+| chip stays red / OFFLINE | client log (`tmux attach -t robotctl`) → connection refused = wrong `WEBCTL_SERVER`/server down; 401 / ws handshake refused = token mismatch vs `.env` |
 | joined WiFi but no IP | router DHCP/captive portal — school WiFi unsupported; use laptop hotspot |
 | drives ~1 s then stops | browser tab unfocused/hidden → heartbeat stopped (safety feature, focus the tab) |
 | UI drives, motors silent | base driver (§2.4) not running, or MCU serial down (`ls -l /dev/wheeltec_controller*`) |
-| camera "unavailable" | that robot has no `WEBCTL_CAM_URL` / web_video_server down — driving unaffected |
+| camera "unavailable" | no source resolved on that robot (`WEBCTL_CAM_MODE`, client log lists ros/cv2/mjpeg attempts) — driving unaffected |
 | 503 "does not own" | two server processes; keep one (`tmux ls`, kill extras) |
 
 ## Reverting / starting over

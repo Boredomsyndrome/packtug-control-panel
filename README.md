@@ -1,9 +1,12 @@
-# wheeltec-webctl — WHEELTEC S2000 fleet browser control (pull-mode v2)
+# wheeltec-webctl — WHEELTEC S2000 fleet browser control (pull-mode v3)
 
 Control **multiple** WHEELTEC brushless robots (ROS2 SBC on board) from one
 web page. **The Django server on your laptop is the ONLY server in the
-system**: robots are pure HTTP clients that call it — no rosbridge, no
-websockets, no listening ports, no hotspot on the robots.
+system**: robots are pure outbound-only clients (WebSocket primary, HTTP
+long-poll fallback) — no rosbridge, no listening ports, no hotspot on the
+robots — and **nothing is ever installed on a robot** (the client is pure
+Python stdlib; the robot may be permanently offline). Designed for one
+robot, scales by registry entries.
 
 > **Setting up? Start at [`SETUP.md`](SETUP.md)** — ordered zero→fleet-driving
 > guide. Bringing a router to school? [`SCHOOL_SETUP.md`](SCHOOL_SETUP.md) —
@@ -20,11 +23,10 @@ websockets, no listening ports, no hotspot on the robots.
    │ GET /cam/<id>   (MJPEG relay)             │   • staleness watchdog    │
    ◀───────────────────────────────────────────┤   • e-stop latch          │
                                                │  camera frame relay       │
- robots — PURE CLIENTS, outbound HTTP only     │  flock: one process owns  │
-   robotctl/client.py on each robot            └───────────▲───────────────┘
-   • GET  /robotctl/<id>/cmd   long-poll  ◀────────────────┘ one conn/robot
-   • POST /robotctl/<id>/telemetry   (battery, applied cmd)
-   • POST /robotctl/<id>/frame       (camera JPEGs, optional)
+ robots — PURE CLIENTS, outbound only          │  flock: one process owns  │
+   robotctl/client.py (Python-STDLIB-ONLY)     └───────────▲───────────────┘
+   • ws  /ws/robotctl/<id>  ◀── cmd push ──────┬───────────┘ one ws/robot
+   • same ws: telemetry JSON + JPEG frames ────┘  (HTTP long-poll fallback)
         │
         ▼ ROS2 (localhost only): /cmd_vel → STM32 → hub motors
 ```
@@ -37,7 +39,7 @@ websockets, no listening ports, no hotspot on the robots.
 | network topology | robot AP ⇒ one robot visible | robot joins shared WiFi ⇒ **whole fleet** |
 | server must reach robot IP | yes (fragile DHCP/AP) | never — robot dials home |
 | multiple robots | one bridge = one robot | N registry entries |
-| command transport | server pushes WS | robot long-polls HTTPS |
+| command transport | server pushes WS | robot ws (HTTP long-poll fallback) |
 
 Safety is now **two-layered**: the server never serves a command older than
 `CMD_TIMEOUT` (0.5 s) or during a latched e-stop, AND each robot client has
@@ -58,10 +60,13 @@ cp .env.example .env      # register the fleet + set passwords (see comments)
 Run (exactly ONE process — the flock refuses second ones for a reason):
 
 ```bash
-tmux new -s webctl -d '.venv/bin/python backend/manage.py runserver 0.0.0.0:8000'
-# production-ish:
-bash tools/prod_smoke_test.sh   # starts gunicorn -w1 --threads 16, curls, kills
+tmux new -s webctl -d 'bash scripts/run_server.sh 0.0.0.0 8000'   # uvicorn ASGI
+# production smoke (curl battery + real ws handshake):
+bash tools/prod_smoke_test.sh
 ```
+`runserver`/`gunicorn webctl.wsgi` still boot an HTTP-only mode (robots then
+auto-fall back to long-poll, camera relay to /cam MJPEG) — but run ONE
+process; the ASGI app is what serves WebSockets.
 
 `.env` keys: `WEBCTL_ROBOTS="alpha:tokA,beta:tokB"` (generate a random token
 per robot), `MAX_LIN/MAX_ROT/CMD_TIMEOUT`, browser `WEBCTL_AUTH_USER/PASS`
@@ -76,17 +81,20 @@ router LAN, reserve the laptop's address in the router (robots need a stable
 ## B. Each robot — once (full procedure: ROBOT_SETUP.md)
 
 ```bash
-# 1. hotspot off, join the server WiFi (persistent, survives reboot)
+# 1. hotspot off, join the server WiFi (persistent; nmcli config, no installs)
 sudo scripts/robot_wifi_join.sh <SSID> <PSK>
-# 2. copy repo, install client autostart
-sudo cp robotctl/wheeltec-robotctl.service /etc/systemd/system/
-sudo cp robotctl/robotctl.env.example /etc/wheeltec-robotctl.env && sudo nano /etc/wheeltec-robotctl.env
-sudo systemctl daemon-reload && sudo systemctl enable --now wheeltec-robotctl
+# 2. copy repo, run the client — ZERO INSTALLS on the robot (no internet!)
+mkdir -p ~/.config && cp robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+chmod 600 ~/.config/wheeltec-robotctl.env && nano ~/.config/wheeltec-robotctl.env
+tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
 ```
 
-The robot needs only: the ROS2 base driver (`turn_on_wheeltec_robot`), this
-client, and optionally `web_video_server` **bound to 127.0.0.1** for the
-camera. No rosbridge, no ports open, nothing to firewall.
+`client.py` runs on the **Python 3 standard library alone** (its WebSocket is
+implemented over raw sockets — nothing to pip install on the offline robot);
+`rclpy` and `cv2` come from the WHEELTEC image itself. The robot needs only:
+the ROS2 base driver (`turn_on_wheeltec_robot`), this client, and NOTHING
+else. No rosbridge, no ports open, nothing to firewall. (An OPTIONAL
+systemd unit for autostart ships in `robotctl/`.)
 
 ## API reference
 
@@ -103,6 +111,17 @@ Browser (Basic Auth when enabled):
 
 Robot (Basic `<id>:<token>`; middleware never gates browser creds here):
 
+Primary (WebSocket, robot dials out; `?token=` = that robot's registry token):
+
+| route | meaning |
+|---|---|
+| `ws /ws/robotctl/<id>?token=…` | server→robot: `{type: welcome\|cmd, vx, wz, estop, seq}` · robot→server: `telemetry` JSON + binary JPEG frames |
+| `ws /ws/cam/<id>` | browser viewer: binary = float64 server ts + JPEG, drop-latest |
+
+Fallback (HTTP — used automatically when the server has no WS, e.g. the
+gunicorn/WSGI mode; Basic `<id>:<token>` — middleware never gates browser
+creds here):
+
 | route | meaning |
 |---|---|
 | `GET  /robotctl/<id>/cmd?seq=N&wait=0.4` | long-poll the effective cmd `{vx,wz,estop,seq,cmd_timeout}` |
@@ -112,16 +131,19 @@ Robot (Basic `<id>:<token>`; middleware never gates browser creds here):
 ## C. Verify without any robot (always after changes)
 
 ```bash
-.venv/bin/python -u tools/integration_test.py
+.venv/bin/python -u tools/integration_test.py     # 48 checks
 ```
 
-Spawns fake MJPEG cam (:9103) + Django (:8100) + duplicate Django (:8111) +
-**two real robot clients in dry-run mode** (sink files record exactly what a
-real base would receive). Asserts: fleet listing/online/offline, telemetry
-uplink, 10 Hz publishing, command routing + per-robot isolation, token auth
-(401/404), clamp + serializer 400s, server staleness zero, e-stop latch +
-unlatch, **client watchdog on a frozen (SIGSTOP'd) server**, camera
-push→relay, SPA, flock single-owner 503. Self-cleaning; safe to re-run.
+Spawns fake MJPEG cam (:9103) + uvicorn ASGI (:8100) + duplicate (:8111) +
+**two real robot clients in dry-run — one on WebSocket, one forced onto the
+HTTP fallback** (sink files record exactly what a real base would receive),
+plus a raw ws protocol probe. Asserts: fleet listing/online/offline, both
+transports + telemetry, ws push latency <150 ms, staleness auto-zero PUSHED,
+ws takeover, camera frames over ws→viewer + legacy /cam relay, 10 Hz
+publishing, per-robot isolation, token auth on http AND ws, clamp +
+serializer 400s, e-stop latch + unlatch, no spurious watchdog trips on an
+idle link, **client watchdog on a frozen (SIGSTOP'd) server** (both
+transports reconnect), SPA, flock single-owner 503 (http + ws).
 Ports are 8100/8111/9103 — this host has live services on 8000/8001/8080;
 never bind/kill those.
 
@@ -130,23 +152,27 @@ never bind/kill those.
 - velocity clamped server-side before a robot can ever see it (`MAX_LIN`, `MAX_ROT`)
 - browser heartbeat ~10 Hz; held command older than `CMD_TIMEOUT` → zero served
 - e-stop latches zero; `/stop` or an explicit new cmd unlatches
-- robot onboard watchdog: no successful poll for `WEBCTL_WATCHDOG` s → zero
+- robot onboard watchdog: no server contact (cmd or keep-alive pong) for
+  `WEBCTL_WATCHDOG` s → zero
 - one server process owns all robot state (flock `.server.lock`); others 503
 - robots expose no ports at all; only the Django port needs network access
 - physical e-stop stays reachable; test with wheels in the air first
 
 ## Troubleshooting
 
-- **robot OFFLINE in UI** → client down or WiFi joined wrong:
-  `journalctl -u wheeltec-robotctl` on the robot; test reachability from it:
+- **robot OFFLINE in UI** → client down or WiFi joined wrong: client log
+  (`tmux attach -t robotctl`, or `/tmp/robotctl.log` with autostart); test
+  reachability from the robot:
   `curl -u <id>:<token> http://<server>:8000/robotctl/<id>/cmd?wait=0`.
 - **401** on polls → token mismatch with `WEBCTL_ROBOTS` entry.
 - **503 "does not own"** → two server processes running; keep one.
 - **robot moves then stops ~1 s later** → browser tab lost focus / heartbeat
   died (by design — that's the watchdog working).
-- **camera "unavailable"** → that robot's `WEBCTL_CAM_URL` unset, or
-  web_video_server down (`journalctl -u wheeltec-camera`); driving is
-  unaffected by camera failure by design.
+- **camera "unavailable"** → no camera source resolved on that robot
+  (`WEBCTL_CAM_MODE`; check the client log for which of ros/cv2/mjpeg was
+  tried); driving is unaffected by camera failure by design.
+- **UI shows transport `http` though the server has ws** → robot client is
+  an old stdlib-less build, or the ws handshake is being refused (token).
 - **motors dead though UI says driving** → base driver not running on the
   robot (client only publishes `/cmd_vel`; `turn_on_wheeltec_robot` forwards
   it to the STM32).

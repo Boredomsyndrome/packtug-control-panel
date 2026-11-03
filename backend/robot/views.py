@@ -19,33 +19,70 @@ def _err(status, msg):
     return JsonResponse({"ok": False, "error": msg}, status=status)
 
 
-def cam_view(request, robot_id):
+async def cam_view(request, robot_id):
+    """ASGI-native MJPEG relay (frames arrive via the robot's websocket).
+
+    A sync generator here breaks under uvicorn: Django ASGI warns that a
+    sync-iterator StreamingHttpResponse is consumed per-part through a
+    thread-serialised bridge and effectively never streams. Under the WSGI
+    fallback Django wraps this async view itself, so one implementation
+    serves both."""
+    import asyncio
+
     hub = registry.robot(robot_id)
     if hub is None:
         return _err(404, "unknown robot")
-    # first frame may take a moment after page open if the robot just started
-    frame, seen = hub.next_frame(0, timeout=2.0)
+    if hub._loop is None:                    # WSGI path: adopt this loop so
+        registry_hubs_loop()                 # hub wakeups reach our events
+
+    ev = asyncio.Event()
+    remove = hub.add_frame_listener(ev)
+    frame, seen = hub.frame_now()
     if frame is None:
-        return _err(503, "no camera frames from this robot (yet) — "
-                         "is its client running with WEBCTL_CAM_URL set?")
+        try:          # first frame may take a moment after the robot starts
+            await asyncio.wait_for(ev.wait(), 2.0)
+        except TimeoutError:
+            remove()
+            return _err(503, "no camera frames from this robot (yet) — "
+                             "is its client running with a camera enabled?")
+        ev.clear()
+        frame, seen = hub.frame_now()
+        if frame is None:
+            remove()
+            return _err(503, "no camera frames")
 
-    def gen(first, first_seq):
-        f, s = first, first_seq
-        while True:
-            yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
-                   b"Content-Length: " + str(len(f)).encode() + b"\r\n\r\n")
-            yield f
-            yield b"\r\n"
-            nxt, s2 = hub.next_frame(s, timeout=5.0)
-            if nxt is None:
-                continue          # stale link: re-send last frame at 5 s timeout
-            f, s = nxt, s2
+    async def gen():
+        try:
+            f, s = frame, seen
+            while True:
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
+                       b"Content-Length: " + str(len(f)).encode() + b"\r\n\r\n")
+                yield f
+                yield b"\r\n"
+                try:
+                    await asyncio.wait_for(ev.wait(), 5.0)
+                except TimeoutError:
+                    pass                     # stale link: re-send last frame
+                ev.clear()
+                cur, seq = hub.frame_now()
+                if cur is not None and seq > s:
+                    f, s = cur, seq
+        finally:
+            remove()
 
-    resp = StreamingHttpResponse(gen(frame, seen),
+    resp = StreamingHttpResponse(gen(),
                                  content_type="multipart/x-mixed-replace; boundary=frame")
     resp["Cache-Control"] = "no-store, no-transform"
     resp["X-Accel-Buffering"] = "no"   # disable proxy buffering (nginx/Caddy)
     return resp
+
+
+def registry_hubs_loop():
+    import asyncio
+    loop = asyncio.get_running_loop()
+    for hub in registry.hubs.values():
+        if hub._loop is None:
+            hub.set_event_loop(loop)
 
 
 def index_view(request):

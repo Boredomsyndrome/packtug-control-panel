@@ -27,7 +27,6 @@ export default function App() {
   const [rot, setRot] = useState(0.5)           // rad/s applied while turning held
   const [estopLatch, setEstopLatch] = useState(false)
   const [camKey, setCamKey] = useState(0)
-  const [camError, setCamError] = useState(false)
 
   const keysRef = useRef({ fwd: false, back: false, left: false, right: false })
   const movingRef = useRef(false)
@@ -159,7 +158,6 @@ export default function App() {
       post(`/api/robot/${encodeURIComponent(sel)}/stop`, {})  // stop the old one
     }
     setSel(id)
-    setCamError(false)
     setCamKey((k) => k + 1)
   }
 
@@ -181,6 +179,7 @@ export default function App() {
       <header className="topbar">
         <h1>WHEELTEC <span>Fleet WebCtl</span></h1>
         <div className="fleet">
+          {robots.length === 1 && <span className="dim one">1 robot ·</span>}
           {robots.map((r) => (
             <button key={r.id}
                     className={`rchip ${r.id === sel ? 'sel' : ''}`}
@@ -209,16 +208,14 @@ export default function App() {
 
       <main className="grid">
         <section className="video">
-          {!sel || camError ? (
+          {!sel ? (
             <div className="camfail">
-              <p>Camera stream unavailable{sel ? ` for ${sel}` : ''}.</p>
-              <p className="dim">That robot's client must run with WEBCTL_CAM_URL
-                {' '}set to its local MJPEG source.</p>
-              {sel && <button onClick={() => { setCamError(false); setCamKey(camKey + 1) }}>Retry stream</button>}
+              <p>No robot selected.</p>
+              <p className="dim">Register more robots by adding entries to
+                {' '}WEBCTL_ROBOTS on the server — the fleet scales with it.</p>
             </div>
           ) : (
-            <img key={`${sel}-${camKey}`} src={`/cam/${encodeURIComponent(sel)}`}
-                 alt={`${sel} camera`} onError={() => setCamError(true)} />
+            <WsCam key={`${sel}-${camKey}`} robotId={sel} />
           )}
         </section>
 
@@ -285,6 +282,75 @@ export default function App() {
           </span>
         ) : <span>connecting…</span>}
       </footer>
+    </div>
+  )
+}
+
+function WsCam({ robotId }) {
+  // Primary path: /ws/cam/<id> binary frames (8-byte float64 server ts +
+  // JPEG). If no WS server (WSGI-only fallback) we degrade to the legacy
+  // /cam/<id> HTTP MJPEG relay, then to an error card.
+  const imgRef = useRef(null)
+  const [mode, setMode] = useState('ws')     // ws -> mjpeg -> down
+  const [fps, setFps] = useState(0)
+  const [lat, setLat] = useState(null)
+
+  useEffect(() => {
+    if (mode !== 'ws') return undefined
+    let ws = null, frames = 0, lastAge = null, closed = false
+    try {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${proto}://${location.host}/ws/cam/${encodeURIComponent(robotId)}`)
+    } catch { setMode('mjpeg'); return undefined }
+    ws.binaryType = 'arraybuffer'
+    ws.onmessage = (e) => {
+      const buf = e.data
+      if (!(buf instanceof ArrayBuffer) || buf.byteLength < 12) return
+      frames += 1
+      const dv = new DataView(buf)
+      lastAge = Date.now() - dv.getFloat64(0, true) * 1000
+      const blob = new Blob([buf.slice(8)], { type: 'image/jpeg' })
+      const next = URL.createObjectURL(blob)
+      const img = imgRef.current
+      if (img) {
+        const prev = img.src
+        img.src = next
+        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      } else {
+        URL.revokeObjectURL(next)
+      }
+    }
+    ws.onerror = () => { /* onclose decides fallback */ }
+    ws.onclose = () => { closed = true; setMode((m) => (m === 'ws' ? 'mjpeg' : m)) }
+    const iv = setInterval(() => { setFps(frames); frames = 0; setLat(lastAge) }, 1000)
+    return () => { clearInterval(iv); if (!closed) { try { ws && ws.close() } catch {} } }
+  }, [robotId, mode])
+
+  if (mode === 'down') {
+    return (
+      <div className="camfail">
+        <p>Camera stream unavailable for {robotId}.</p>
+        <p className="dim">The robot client must have a camera source enabled
+          {' '}(WEBCTL_CAM_MODE=auto|ros|cv2|mjpeg).</p>
+        <button onClick={() => setMode('ws')}>Retry stream</button>
+      </div>
+    )
+  }
+  if (mode === 'mjpeg') {
+    return (
+      <div className="wsview">
+        <img src={`/cam/${encodeURIComponent(robotId)}`} alt={`${robotId} camera`}
+             onError={() => setMode('down')} />
+        <span className="camtag">http mjpeg fallback</span>
+      </div>
+    )
+  }
+  return (
+    <div className="wsview">
+      <img ref={imgRef} alt={`${robotId} camera`} />
+      <span className="camtag">
+        ◉ ws {fps} fps{lat != null ? ` · ${Math.max(0, Math.round(lat))} ms` : ' · …'}
+      </span>
     </div>
   )
 }

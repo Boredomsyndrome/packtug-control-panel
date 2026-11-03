@@ -1,5 +1,9 @@
+# OPTIONAL — the zero-install default is `bash robotctl/run_client.sh`
+# (tmux or desktop autostart, see ROBOT_SETUP.md §5); nothing needs to be
+# installed on the robot. This unit is for when you want boot-time start
+# without touching the desktop, and accept writing 2 files to /etc.
 # /etc/systemd/system/wheeltec-robotctl.service
-# The robot client: pure outbound HTTP (pull-mode). Enable ONLY after the
+# The robot client: pure outbound ws/http (pull-mode). Enable ONLY after the
 # base driver (turn_on_wheeltec_robot) works and the env file is set.
 #
 #   sudo cp robotctl/wheeltec-robotctl.service /etc/systemd/system/

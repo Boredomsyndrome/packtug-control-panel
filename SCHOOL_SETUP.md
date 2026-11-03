@@ -17,7 +17,7 @@ it likes, forever, even after being power-cycled a hundred times.
   │  SSID: WT-FLEET (WPA2-PSK)                                         │
   │   ├─ laptop 192.168.50.50  ← DHCP RESERVATION (the only fixed IP)  │
   │   │                 Django :8000  ◀── browser UIs (phones too)     │
-  │   ├─ robot s2000-1 (any DHCP lease) ── long-polls server ──▶       │
+  │   ├─ robot s2000-1 (any DHCP lease) ── ws to server (http fallback) ─▶ │
   │   └─ robot s2000-2 (any DHCP lease) ── telemetry + frames ─▶       │
   └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -82,7 +82,9 @@ Each robot — join it to `WT-FLEET` and point the client at the reservation
 ```bash
 cd ~/wheeltec-webctl
 sudo bash scripts/robot_wifi_join.sh "WT-FLEET" '<router-psk>'
-sudo nano /etc/wheeltec-robotctl.env
+mkdir -p ~/.config && cp robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+chmod 600 ~/.config/wheeltec-robotctl.env
+nano ~/.config/wheeltec-robotctl.env          # values below
 ```
 
 ```ini
@@ -91,8 +93,10 @@ WEBCTL_ROBOT_ID=s2000-1                       # + its token, as in server .env
 ```
 
 ```bash
-sudo systemctl restart wheeltec-robotctl
-journalctl -u wheeltec-robotctl -n 5          # clean poll loop, no errors
+tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+# want: websocket up -> ws://192.168.50.50:8000/ws/robotctl/s2000-1
+# (zero installs — the robot's internet is never needed; boot autostart:
+#  desktop autostart entry per ROBOT_SETUP.md §5)
 ```
 
 Do this at home **while the router is also powered at home** — the robots save
@@ -100,15 +104,16 @@ the SSID profile, and at school they'll reconnect to it the moment it appears.
 This is the whole magic of bringing the router: the school environment is
 byte-for-byte identical to your home test bench.
 
-Camera robots: keep `WEBCTL_CAM_URL` at 640 px width (ROBOT_SETUP.md §6) —
-1920 px MJPEG over congested school 2.4 GHz gets choppy; 640 stays smooth.
+Camera robots: keep `WEBCTL_CAM_WIDTH=640` (ROBOT_SETUP.md §6) — 1920 px
+video over congested school 2.4 GHz gets choppy; 640 stays smooth.
 
 ## Part C — Pre-flight (night before)
 
 - [ ] Router + **power strip/extra adapter** + laptop charger in the bag
 - [ ] Router test at home: WAN unplugged, laptop joins → gets `192.168.50.50`
 - [ ] Server self-test green: `.venv/bin/python -u tools/integration_test.py`
-- [ ] Each robot: joined `WT-FLEET`, unit `enabled`, batteries charged (25–29 V)
+- [ ] Each robot: joined `WT-FLEET`, client autostarted or run command
+      written down, batteries charged (25–29 V)
 - [ ] Full home dress rehearsal: router + server + all robots → all chips
       green in the UI, drive each 10 s, yank one robot's power → stops
 - [ ] Laptop firewall not blocking: `sudo ufw status` — if `active`:
@@ -126,18 +131,18 @@ Camera robots: keep `WEBCTL_CAM_URL` at 640 px width (ROBOT_SETUP.md §6) —
    ("No internet" icon is EXPECTED and correct — ignore every captive-portal
    popup; on Windows also answer *Yes/private network* to the discoverable
    prompt, its firewall blocks inbound 8000 otherwise).
-3. Start the server: `tmux new -d -s webctl '.venv/bin/python backend/manage.py
-   runserver 0.0.0.0:8000'` (from `~/wheeltec-webctl`, venv active — or reuse
-   `bash tools/prod_smoke_test.sh` pattern).
-4. Power robots (base driver + client autostart, see ROBOT_SETUP.md). Within
-   ~90 s all chips green at `http://192.168.50.50:8000`.
+3. Start the server: `tmux new -d -s webctl 'bash scripts/run_server.sh
+   0.0.0.0 8000'` (from `~/wheeltec-webctl`) — uvicorn ASGI, WebSockets on.
+4. Power robots (base driver autostart per ROBOT_SETUP.md; client per Part B
+   — else `tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'`).
+   Within ~90 s all chips green + transport `ws` at `http://192.168.50.50:8000`.
 5. E-stops reachable, wheels up for first spin, go.
 
 ## Part E — School-only failure modes
 
 | symptom | cause → fix |
 |---|---|
-| chip red, robot online in `journalctl` | laptop's IP isn't `:50` anymore — `ip -4 addr show`; rejoin `WT-FLEET`; check the reservation MAC matches `cat /sys/class/net/wlan0/address` |
+| chip red, robot has IP (client log clean) | laptop's IP isn't `:50` anymore — `ip -4 addr show`; rejoin `WT-FLEET`; check the reservation MAC matches `cat /sys/class/net/wlan0/address` |
 | robot gets `192.168.50.x` but can't reach laptop | client isolation ON, or joined the router's **guest** SSID → Part A.4 |
 | robot joined school WiFi instead | it has a saved school profile with better priority — `nmcli -f NAME,TYPE connection show --active` on the robot; delete school profile or raise WT-FLEET priority (script already sets 100) |
 | everything green, camera choppy/sluggish | 2.4 GHz congestion — move channel (1/6/11), drop cam width to 640, stand router nearer robots than laptop; control itself is ~400 B/poll and survives almost anything |

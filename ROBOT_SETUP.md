@@ -3,10 +3,14 @@
 Target: S200/S2000 brushless kit with onboard SBC (Jetson / Raspberry Pi /
 LubanCat) running the WHEELTEC ROS2 (Ubuntu 22.04 / Humble) image.
 
-**v2 architecture: the robot is a PURE CLIENT.** It turns its factory
-hotspot OFF, joins the WiFi that the control laptop lives on, and only makes
-outbound HTTP calls to the Django server. No rosbridge, no listening ports,
-no per-robot IP juggling — and any number of robots share one server.
+**v3 architecture: the robot is a PURE CLIENT with ZERO INSTALLS.** The
+robot has no internet access and nothing gets installed on it: `client.py`
+runs on the Python 3 standard library alone (its WebSocket is hand-rolled
+over `socket`); `rclpy` / `cv2` are used from the WHEELTEC image as-is.
+The robot turns its factory hotspot OFF, joins the WiFi the control laptop
+lives on, and only dials OUT to the Django server (WebSocket primary, HTTP
+long-poll automatic fallback). No rosbridge, no listening ports, no
+per-robot IP juggling — and the fleet scales by adding registry entries.
 
 ```
  [S2000 chassis]──UART──[SBC: ROS2 + robotctl client]
@@ -83,56 +87,67 @@ ros2 topic echo /PowerVoltage --once     # battery voltage → MCU link OK
 Autostart it on boot with `wheeltec-ros.service` (§6 style, ExecStart =
 the source + launch line above) — the robot client unit waits for it.
 
-## 5. Install the robot client (once)
+## 5. Run the robot client (zero installs — the robot has no internet)
+
+The client is ONE python file needing only the stdlib; the repo folder is
+all that gets copied (step 3). Config lives in the user's home, nothing
+system-wide is required:
 
 ```bash
-sudo apt install -y python3-requests       # only if the image lacks it
-sudo cp ~/wheeltec-webctl/robotctl/wheeltec-robotctl.service /etc/systemd/system/
-sudo cp ~/wheeltec-webctl/robotctl/robotctl.env.example /etc/wheeltec-robotctl.env
-sudo nano /etc/wheeltec-robotctl.env       # WEBCTL_SERVER + this robot's ID/TOKEN
-sudo systemctl daemon-reload
-sudo systemctl enable --now wheeltec-robotctl
-journalctl -u wheeltec-robotctl -f         # "robotctl client '<id>' -> http://..."
+mkdir -p ~/.config
+cp ~/wheeltec-webctl/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+chmod 600 ~/.config/wheeltec-robotctl.env
+nano ~/.config/wheeltec-robotctl.env       # SERVER + this robot's ID/TOKEN
+tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+# log line wanted: websocket up -> ws://<server>/ws/robotctl/<id>
 ```
 
-`/etc/wheeltec-robotctl.env` per robot: `WEBCTL_ROBOT_ID` +
-`WEBCTL_ROBOT_TOKEN` must match one `WEBCTL_ROBOTS` entry on the server, and
-`WEBCTL_SERVER` = `http://<laptop-ip-on-that-wifi>:8000`
-(hotspot mode → `http://10.42.0.1:8000`).
+`~/.config/wheeltec-robotctl.env` per robot: `WEBCTL_ROBOT_ID` +
+`WEBCTL_ROBOT_TOKEN` must match one `WEBCTL_ROBOTS` entry on the server,
+and `WEBCTL_SERVER` = `http://<laptop-ip-on-that-wifi>:8000`
+(hotspot mode → `http://10.42.0.1:8000`, router mode → its DHCP reservation).
 
-**No rosbridge. No ROS ports exposed. Nothing to port-forward or firewall.**
-
-## 6. Camera (optional, per robot)
-
-The client relays whatever local MJPEG source you give it, so `web_video_server`
-stays **loopback-only** (it is then a local pipe, not a server on the network):
-
-`/etc/systemd/system/wheeltec-camera.service`:
+**Autostart without installing anything** (uses the touchscreen desktop):
+create `~/.config/autostart/wheeltec-robotctl.desktop`:
 
 ```ini
-[Unit]
-Description=web_video_server bound to localhost only
-After=wheeltec-ros.service
-
-[Service]
-Type=simple
-User=wheeltec
-ExecStartPre=/bin/sleep 20
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && [ -f ~/wheeltec_robot/install/setup.bash ] && source ~/wheeltec_robot/install/setup.bash; exec ros2 run web_video_server web_video_server --ros-args -p address:=127.0.0.1 -p port:=8080'
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+[Desktop Entry]
+Type=Application
+Name=wheeltec robotctl
+Exec=bash -lc 'exec bash ~/wheeltec-webctl/robotctl/run_client.sh >> /tmp/robotctl.log 2>&1'
+X-GNOME-Autostart-enabled=true
 ```
 
-Then in `/etc/wheeltec-robotctl.env` set (topic name from `ros2 topic list`):
+(Prefer systemd? An OPTIONAL unit with an env-file is in
+`robotctl/wheeltec-robotctl.service` — still zero packages, but it does
+write to /etc. The base driver §4 should autostart similarly — the client
+retries forever, order doesn't matter.)
 
-```
-WEBCTL_CAM_URL=http://127.0.0.1:8080/stream?topic=/camera/image_raw
-```
+**No rosbridge. No ROS ports exposed. Nothing installed. Nothing to
+port-forward or firewall.** The transport auto-negotiates: WebSocket when
+the server speaks ASGI (`scripts/run_server.sh`), HTTP long-poll otherwise
+(`/api` and `/robotctl` are identical either way).
 
-Camera failure never affects driving — the client drops frames, keeps polling.
+## 6. Camera (optional, per robot — and all sources come from the image)
+
+`WEBCTL_CAM_MODE=auto` tries, in order, and never blocks driving:
+
+1. **ros** — subscribe to the kit's own `sensor_msgs/Image` topic (the
+   WHEELTEC camera API: `ros2 launch turn_on_wheeltec_robot
+   wheeltec_camera.launch.py`, then `ros2 topic list | grep image`),
+   JPEG-encoded with the image's cv2/numpy. Set `WEBCTL_CAM_ROS_TOPIC` if
+   the topic isn't one of the usual four.
+2. **cv2** — direct `cv2.VideoCapture(WEBCTL_CAM_DEVICE)` for a USB cam at
+   `/dev/video0`; for a CSI cam pass its gstreamer
+   (`nvarguscamerasrc ! …`) pipeline string as `WEBCTL_CAM_DEVICE`.
+3. **mjpeg** — only if `web_video_server` **already ships** in this image
+   (`ros2 pkg list | grep web_video_server`; we never apt-install it) —
+   point `WEBCTL_CAM_URL` at `http://127.0.0.1:8080/stream`.
+
+Frames go up the same robot websocket as telemetry (or the HTTP frame
+endpoint in fallback mode) at `WEBCTL_CAM_FPS`/`WEBCTL_CAM_WIDTH`/
+`WEBCTL_CAM_JPEG_Q`. No camera at all is a fully supported state: driving,
+telemetry and safety are identical; the UI just shows the camera card.
 
 ## 7. Server + first drive
 
@@ -165,32 +180,36 @@ Open `http://<laptop>:8000` in a browser:
 
 ## 9. Troubleshooting
 
-- **chip red / robot OFFLINE** → `journalctl -u wheeltec-robotctl` on the
-  robot: `Connection refused` (server down / wrong IP), `401` (token
-  mismatch vs `WEBCTL_ROBOTS`), TLS/DNS issues (use a plain IP + http on LAN).
+- **chip red / robot OFFLINE** → the client log (`tmux attach -t robotctl`
+  or `/tmp/robotctl.log` with autostart): `Connection refused` (server down
+  / wrong IP), `401`/handshake refused (token mismatch vs `WEBCTL_ROBOTS`),
+  DNS issues (use a plain IP + http on LAN). The log says which transport
+  is live; `ws down ... — using HTTP fallback` means the server has no ASGI
+  running (still fully drivable, just higher video latency).
 - **robot joined but no IP** → router DHCP full / captive portal: school WiFi
   with captive portals is NOT supported (as before); laptop hotspot is.
 - **hotspot came back after reboot** → an AP profile still has
   `connection.autoconnect yes`: rerun `scripts/robot_wifi_join.sh`.
 - **moves then stops after ~1 s while holding a button** → your browser tab
   isn't focused/visible; heartbeat stopped — intended behavior.
-- **camera unavailable, driving fine** → §6 not installed on that robot or
-  wrong topic; check `journalctl -u wheeltec-camera`.
+- **camera unavailable, driving fine** → no source resolved per §6; the
+  client log lists what it tried (ros topic names / cv2 device / mjpeg).
 - **motors dead though UI says driving** → base driver (step 4) not running
   or MCU serial down: `ls -l /dev/wheeltec_controller*`.
 
 ## 10. Factory recovery / reverting
 
-v2 robot-side footprint = one systemd unit, one env file, one NetworkManager
-profile change, optional camera unit. Revert per robot:
+v3 robot-side footprint = one copied folder, one env file in `~/.config`,
+one autostart entry (optional), one NetworkManager profile change. Revert:
 
 ```bash
-sudo systemctl disable --now wheeltec-robotctl wheeltec-camera
-sudo rm /etc/systemd/system/wheeltec-robotctl.service /etc/systemd/system/wheeltec-camera.service
-sudo systemctl daemon-reload
-sudo rm /etc/wheeltec-robotctl.env
+tmux kill-session -t robotctl                      # stop the client
+rm -f ~/.config/autostart/wheeltec-robotctl.desktop ~/.config/wheeltec-robotctl.env
 nmcli connection modify "<AP name>" connection.autoconnect yes   # hotspot back
 nmcli connection delete "<your wifi profile>"                     # optional
+# (only if you used the optional systemd unit:)
+sudo systemctl disable --now wheeltec-robotctl 2>/dev/null || true
+sudo rm -f /etc/systemd/system/wheeltec-robotctl.service /etc/wheeltec-robotctl.env
 ```
 
 Nothing was ever installed on the STM32; factory `teleop_twist_keyboard`

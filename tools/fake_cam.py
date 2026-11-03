@@ -6,6 +6,7 @@ Usage: fake_cam.py [port]   (default 9093)
 import http.server
 import socketserver
 import sys
+import threading
 
 # smallest 1x1 JPEG
 JPEG = bytes.fromhex(
@@ -31,15 +32,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
+        import time
         try:
-            import time
             while True:
                 self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
                 self.wfile.write(JPEG)
                 self.wfile.write(b"\r\n")
+                self.wfile.flush()
                 time.sleep(0.2)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # client left; threading server keeps serving everyone else
 
     def log_message(self, *a):
         pass
@@ -47,7 +49,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9093
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+    class CamServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    with CamServer(("127.0.0.1", port), Handler) as httpd:
         print(f"fake cam on http://127.0.0.1:{port}/stream")
         httpd.serve_forever()

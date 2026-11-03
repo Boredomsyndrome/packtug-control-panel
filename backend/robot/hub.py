@@ -26,7 +26,14 @@ _WAKE = 0.2                 # max Condition block before re-checking expiry
 
 
 class RobotHub:
-    """Command mailbox + telemetry + camera relay for ONE robot."""
+    """Command mailbox + telemetry + camera relay for ONE robot.
+
+    Two transports share this one state machine:
+      * HTTP  (threadpool views: long-poll GET / POST telemetry|frame)
+      * WS    (async consumers in robot/ws.py: cmd pushed, telemetry+frames in)
+    Thread/loop bridge: the ASGI event loop registers asyncio Events here;
+    the (thread-based) mutators wake them via call_soon_threadsafe.
+    """
 
     def __init__(self, robot_id, max_lin, max_rot, cmd_timeout):
         self.robot_id = robot_id
@@ -40,18 +47,48 @@ class RobotHub:
         self.cmd_ts = 0.0
         self.estop = False
 
-        self.last_poll = 0.0              # last cmdline long-poll completion
+        self.last_poll = 0.0              # last robot contact (poll, POST or ws)
         self.battery_v = None
         self.battery_ts = 0.0
         self.applied = (0.0, 0.0)         # what the robot says it applied
         self.watchdog_trips = 0
         self.last_telemetry = None        # raw dict of last telemetry POST
+        self.transport = None             # "ws" | "http" | None
+        self.ws_connected = False
+        self.ws_epoch = 0                 # bumped per robot ws accept (takeover)
 
         self.frame = None                 # latest JPEG camera frame
         self.frame_ts = 0.0
         self.frame_seq = 0
 
         self.started = time.time()
+
+        # --- asyncio bridge (set by asgi lifespan; empty under runserver) ---
+        self._loop = None
+        self._cmd_events = set()          # asyncio.Event: cmd/estop changed
+        self._frame_events = set()        # asyncio.Event: new camera frame
+
+    def set_event_loop(self, loop):
+        self._loop = loop
+
+    def add_cmd_listener(self, ev):
+        self._cmd_events.add(ev)
+        return lambda: self._cmd_events.discard(ev)
+
+    def add_frame_listener(self, ev):
+        self._frame_events.add(ev)
+        return lambda: self._frame_events.discard(ev)
+
+    def _wake(self, events):
+        loop = self._loop
+        if loop is None or not events:
+            return
+        for ev in list(events):
+            try:
+                loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:
+                pass                      # loop closed: listener already gone
+
 
     # ---------- browser-side actions ----------
 
@@ -65,6 +102,7 @@ class RobotHub:
             self.estop = False
             self.seq += 1
             self.cv.notify_all()
+        self._wake(self._cmd_events)
         return vx, wz
 
     def stop(self):
@@ -75,6 +113,7 @@ class RobotHub:
             self.estop = False
             self.seq += 1
             self.cv.notify_all()
+        self._wake(self._cmd_events)
 
     def emergency_stop(self):
         """Zero and latch: serve zero until /stop or an explicit new cmd."""
@@ -84,6 +123,7 @@ class RobotHub:
             self.estop = True
             self.seq += 1
             self.cv.notify_all()
+        self._wake(self._cmd_events)
 
     # ---------- robot-facing actions ----------
 
@@ -104,17 +144,51 @@ class RobotHub:
                 if remaining <= 0:
                     break
                 self.cv.wait(min(_WAKE, remaining))
-            vx, wz = (0.0, 0.0) if self.estop else self.cmd
-            return {
-                "vx": vx, "wz": wz,
-                "estop": self.estop,
-                "seq": self.seq,
-                "cmd_timeout": self.cmd_timeout,
-            }
+            snap = self._snapshot_locked()
+        self._wake(self._cmd_events)   # expiry inside may have bumped seq
+        return snap
 
-    def set_telemetry(self, data):
+    def effective(self):
+        """Effective command right now (expiry applied) — shared by the WS
+        cmd pump and status(); NEVER returns a cmd older than cmd_timeout."""
+        with self.cv:
+            self._expire_locked()
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self):
+        vx, wz = (0.0, 0.0) if self.estop else self.cmd
+        return {
+            "vx": vx, "wz": wz,
+            "estop": self.estop,
+            "seq": self.seq,
+            "cmd_timeout": self.cmd_timeout,
+        }
+
+    def contact(self, transport):
         with self.cv:
             self.last_poll = time.time()
+            self.transport = transport
+
+    def set_ws_connected(self, on, epoch=None):
+        with self.cv:
+            self.ws_connected = on
+            self.transport = "ws" if on else (self.transport if not on else None)
+            if on:
+                self.last_poll = time.time()
+                self.ws_epoch = epoch if epoch is not None else self.ws_epoch + 1
+                return self.ws_epoch
+            return None
+
+    def take_ws_slot(self):
+        with self.cv:
+            self.ws_epoch += 1
+            return self.ws_epoch
+
+    def set_telemetry(self, data, transport="http"):
+        with self.cv:
+            self.last_poll = time.time()
+            if not self.ws_connected:
+                self.transport = transport
             self.last_telemetry = data
             v = data.get("battery_v")
             if isinstance(v, (int, float)):
@@ -133,6 +207,13 @@ class RobotHub:
             self.frame_ts = time.time()
             self.frame_seq += 1
             self.cv.notify_all()
+            frame_seq = self.frame_seq
+        self._wake(self._frame_events)
+        return frame_seq
+
+    def frame_now(self):
+        with self.cv:
+            return self.frame, self.frame_seq
 
     def next_frame(self, seen_seq, timeout=1.0):
         """Block until a camera frame newer than `seen_seq` arrives."""
@@ -169,6 +250,9 @@ class RobotHub:
                 "estop": self.estop,
                 "watchdog_trips": self.watchdog_trips,
                 "camera": self.frame is not None and (now - self.frame_ts) < FRAME_FRESH,
+                "transport": "ws" if self.ws_connected else (
+                    "http" if self.last_poll else None),
+                "ws_connected": self.ws_connected,
                 "cmd_timeout": self.cmd_timeout,
                 "max_lin": self.max_lin,
                 "max_rot": self.max_rot,

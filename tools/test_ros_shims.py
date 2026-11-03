@@ -188,5 +188,19 @@ if HAVE_NUMPY:
 else:
     print("SKIP  decode test (numpy not installed)")
 
+# ------------------------------------------------- 3. keepalive + frame drop
+check("watchdog margin sane: ping interval < watchdog/2",
+      0 < client.WS_PING_S * 2 < client.WATCHDOG,
+      f"(ping {client.WS_PING_S}s, watchdog {client.WATCHDOG}s)")
+
+c = client.Client.__new__(client.Client)          # skip __init__ (no net)
+c._frame, c._frame_lock = None, threading.Lock()
+c.post_frame(b"old-frame")
+c.post_frame(b"new-frame")
+with c._frame_lock:
+    pending, c._frame = c._frame, None
+check("frame uploader is latest-wins (stale frames dropped, not queued)",
+      pending == b"new-frame", repr(pending))
+
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

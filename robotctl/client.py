@@ -29,7 +29,7 @@ Camera (all optional, auto-detected, never blocks driving):
   WEBCTL_CAM_WIDTH=960  WEBCTL_CAM_FPS=15  WEBCTL_CAM_JPEG_Q=70
 
 Other env: WEBCTL_SERVER, WEBCTL_ROBOT_ID/_TOKEN, WEBCTL_TRANSPORT=auto|ws|http,
-WEBCTL_WATCHDOG=1.0, WEBCTL_POLL_WAIT=0.4, WEBCTL_CMD_VEL_TOPIC,
+WEBCTL_WATCHDOG=2.5, WEBCTL_POLL_WAIT=0.4, WEBCTL_CMD_VEL_TOPIC,
 WEBCTL_BATTERY_TOPICS, WEBCTL_DRY_RUN=1, WEBCTL_SINK=/tmp/x.json,
 WEBCTL_DRY_BATTERY=24.3, WEBCTL_CLIENT_VERSION=2.1-stdlib
 """
@@ -54,18 +54,21 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.0.0-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.0.2-stdlib")
 
 SERVER = os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000").rstrip("/")
 ROBOT_ID = os.getenv("WEBCTL_ROBOT_ID", "")
 ROBOT_TOKEN = os.getenv("WEBCTL_ROBOT_TOKEN", "")
 TRANSPORT = os.getenv("WEBCTL_TRANSPORT", "auto").lower()      # auto|ws|http
 POLL_WAIT = float(os.getenv("WEBCTL_POLL_WAIT", "0.4"))
-WATCHDOG = float(os.getenv("WEBCTL_WATCHDOG", "1.0"))   # noqa: E305
+# v3.0.2: 1.0s was trigger-happy — on congested WiFi one big frame write can
+# hold the socket ~1s and starve pong, tripping the watchdog while healthy.
+# 2.5s still stops a dead link far inside human reaction time.
+WATCHDOG = float(os.getenv("WEBCTL_WATCHDOG", "2.5"))   # noqa: E305
 # server traffic only flows when commands CHANGE; the ping keeps "contact"
 # alive, so it MUST stay well under WATCHDOG (pong updates last_ok)
-WS_PING_S = min(float(os.getenv("WEBCTL_WS_PING_INTERVAL", "0.4")),
-                WATCHDOG / 2.0)
+WS_PING_S = min(float(os.getenv("WEBCTL_WS_PING_INTERVAL", "0.8")),
+                WATCHDOG / 3.0)
 
 CAM_MODE = os.getenv("WEBCTL_CAM_MODE", "mjpeg" if os.getenv("WEBCTL_CAM_URL") else "auto")
 CAM_URL = os.getenv("WEBCTL_CAM_URL", "")
@@ -326,6 +329,8 @@ class Client:
         self.sink = None               # built in run(): logs precede any slow init
         self.ws = None                 # StdWs when connected (net thread owns)
         self.ws_is_live = False
+        self._frame = None             # latest-only pending JPEG
+        self._frame_lock = threading.Lock()
 
     # ---------- velocity ----------
     def apply(self, vx, wz, estop=False):
@@ -398,14 +403,16 @@ class Client:
                         log.warning("ws connect failed (%d): %s%s", fails, e,
                                     " — using HTTP fallback" if TRANSPORT == "auto" else "")
             if self.ws is not None:
+                # unconditional keepalive: busy cmd bursts starve a
+                # timeout-only ping (v3.0.2)
+                if WS_PING_S and now - last_ping > WS_PING_S:
+                    last_ping = now
+                    try:
+                        self.ws.ping(b"p")
+                    except Exception:
+                        pass
                 op, payload = self.ws.recv(0.3)
                 if op == "timeout":
-                    if WS_PING_S and time.monotonic() - last_ping > WS_PING_S:
-                        last_ping = time.monotonic()
-                        try:
-                            self.ws.ping(b"p")
-                        except Exception:
-                            pass
                     continue
                 if op == "close":
                     log.warning("websocket dropped -> %s",
@@ -507,6 +514,36 @@ class Client:
             time.sleep(1.0)
 
     # ---------- camera ----------
+    def post_frame(self, jpeg):
+        """Camera thread hands the newest JPEG here; anything still waiting
+        to go out is replaced (latest-wins)."""
+        with self._frame_lock:
+            self._frame = jpeg
+
+    def frame_loop(self):
+        """Dedicated uploader: at most ONE frame in flight, stale frames
+        dropped. A blocking ws.send on congested WiFi used to hold the
+        shared socket ~1s and starve ping/pong -> watchdog false trip."""
+        while running:
+            with self._frame_lock:
+                jpeg, self._frame = self._frame, None
+            if not jpeg:
+                time.sleep(0.02)
+                continue
+            try:
+                ws = self.ws
+                if ws is not None:
+                    ws.send(jpeg, binary=True)
+                else:
+                    self._http("POST", f"/robotctl/{ROBOT_ID}/frame", body=jpeg,
+                               headers={"Content-Type": "image/jpeg"},
+                               timeout=4.0)
+            except Exception:
+                pass                      # dropped frames are fine; newest next
+            # tiny yield so a fast camera can't spin the uploader ahead of
+            # everything else on the socket
+            time.sleep(0.01)
+
     def cam_loop(self, source=None):
         if source is None:                 # lazy: resolved off the main thread
             log.info("camera: resolving source (mode=%s)...", CAM_MODE)
@@ -519,19 +556,7 @@ class Client:
             try:
                 jpeg = source.read()
                 if jpeg:
-                    ws = self.ws
-                    if ws is not None:
-                        try:
-                            ws.send(jpeg, binary=True)
-                        except Exception:
-                            pass                      # dropped frames are fine
-                    else:
-                        try:
-                            self._http("POST", f"/robotctl/{ROBOT_ID}/frame",
-                                       body=jpeg, headers={"Content-Type": "image/jpeg"},
-                                       timeout=4.0)
-                        except Exception:
-                            pass
+                    self.post_frame(jpeg)  # uploader thread does the sending
             except Exception as e:
                 log.warning("camera source error: %s (continuing, driving is unaffected)", e)
                 time.sleep(1.0)
@@ -568,6 +593,8 @@ class Client:
             # camera resolves INSIDE its thread — a slow/hanging device probe
             # must never delay the control link or this log stream.
             threads.append(threading.Thread(target=self.cam_loop, daemon=True, name="cam"))
+            threads.append(threading.Thread(target=self.frame_loop, daemon=True,
+                                            name="frame-uploader"))
         for t in threads:
             t.start()
         while running:

@@ -245,8 +245,17 @@ still works to confirm the chassis is stock.
 
 ## Optional: drive over the internet later (home)
 
-The same pull-mode works anywhere the robot has outbound HTTPS: run the
-server behind HTTPS + Basic Auth (Caddy + DuckDNS like the rest of the
-stack) and set `WEBCTL_SERVER=https://comet13579.duckdns.org/...`. Robots
-dial out; still zero exposed robot ports. Keep clamps and watchdogs — and
-expect 100–300 ms latency on cellular: crawl speed only.
+LIVE since 2026-11-03: the server runs on potatoserver; connect the robot
+with Tailscale (recommended — `docs/ACCESS.md` option A) and set in
+`~/.config/wheeltec-robotctl.env`:
+
+```
+WEBCTL_SERVER=http://<potato-tailscale-100.x.y.z>:8090
+```
+
+or the HTTPS edge once Caddy :8443 exists (ACCESS.md option B):
+`WEBCTL_SERVER=https://comet13579.duckdns.org:8443`. Remember the
+`ALLOWED_HOSTS` + server-restart step after any IP change. Robots still
+dial out; still zero exposed robot ports. Keep clamps and watchdogs —
+and expect 100–300 ms latency on cellular: crawl speed only.
+Endpoints and robot-side wire protocol: `docs/API.md`.

@@ -197,13 +197,17 @@ Open `http://<laptop>:8000` in a browser:
 
 ## 9. Troubleshooting
 
-- **only `robotctl: using ...` printed, nothing after** → python itself
-  never started: `python3 robotctl/client.py --version` from the shell
-  (should print `robotctl 3.0.0-stdlib`). If it does print, rerun the
-  wrapper — from 3.0.0 the client logs its boot banner before any slow
-  init, so silence now means the SHELL or INTERPRETER died (check
-  `echo $?`, and that the env file has no Windows line endings:
-  `sed -i 's/\r$//' ~/.config/wheeltec-robotctl.env`).
+- **only `robotctl: using ...` printed, nothing after** → the wrapper died
+  before exec-ing python. Fixed in the current `run_client.sh` (it used
+  `set -eu` around sourcing ROS setup files — colcon scripts touch unset
+  `$COLCON_PREFIX_PATH`, killing the shell with the error hidden). Still
+  seeing it? You have an OLD wrapper: `bash run_client.sh; echo $?` →
+  instant `1` = that bug. Redeploy the tarball. The current wrapper prints
+  `robotctl: exec ...` right before python starts and strips `\r` from
+  env files edited on Windows (USB copies!). Quick sanity without wrapper:
+  `python3 robotctl/client.py --version` → `robotctl 3.0.0-stdlib`
+  (bare client.py *without* the env sourced rightly exits
+  `WEBCTL_ROBOT_ID is required` — that error is normal there, use the wrapper).
 - **chip red / robot OFFLINE** → the client log (`tmux attach -t robotctl`
   or `/tmp/robotctl.log` with autostart): `Connection refused` (server down
   / wrong IP), `401`/handshake refused (token mismatch vs `WEBCTL_ROBOTS`),

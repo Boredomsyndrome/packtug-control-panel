@@ -152,7 +152,7 @@ parked does **not** count as a trip.
 | publishes | `/cmd_vel` (env `WEBCTL_CMD_VEL_TOPIC`) | `geometry_msgs/msg/Twist` | 10 Hz while driving; linear.x + angular.z; QoS depth-1 reliable/volatile |
 | subscribes | `/PowerVoltage` (+ `WEBCTL_BATTERY_TOPICS`) | `std_msgs/msg/Float32` | volt telemetry |
 | subscribes | `/camera/image_raw` (+ `WEBCTL_CAM_ROS_CANDIDATES`) | `sensor_msgs/msg/Image` | sensor-data QoS (best-effort); accepts rgb8/bgr8/rgba8/bgra8/mono8, packed yuyv422/uyvy/yuv422, planar nv12/nv21/i420; padded rows via `msg.step`. Zero-rx self-heal: auto-discovers ANY Image topic on the graph after 6 s |
-| subscribes | `/scan` (+ `WEBCTL_SCAN_CANDIDATES`, auto-discovered) | `sensor_msgs/msg/LaserScan` | RPLidar A1 via `ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py` (`/dev/wheeltec_lidar`); downsampled + sanitised robot-side, uplinked ≤4 Hz |
+| subscribes | `/scan` (+ `WEBCTL_SCAN_CANDIDATES`, auto-discovered) | `sensor_msgs/msg/LaserScan` | LSLidar M10P on `/dev/wheeltec_lidar` (CH343 UART); vendor launch `ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py`; downsampled + sanitised robot-side, uplinked ≤4 Hz |
 
 Nothing else on the ROS graph is read or written; launching/stopping the
 vendor base & camera nodes stays your job (`ros2 launch wheeltec_robot …`).

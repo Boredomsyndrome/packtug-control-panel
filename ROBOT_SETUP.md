@@ -166,12 +166,12 @@ endpoint in fallback mode) at `WEBCTL_CAM_FPS`/`WEBCTL_CAM_WIDTH`/
 `WEBCTL_CAM_JPEG_Q`. No camera at all is a fully supported state: driving,
 telemetry and safety are identical; the UI just shows the camera card.
 
-## 6b. LiDAR (v3.1 — the S2000's RPLidar A1)
+## 6b. LiDAR (v3.1 — this unit has an **LSLidar M10P**, UART)
 
 Start the vendor driver (it is NOT started by the base launch by default):
 
 ```bash
-ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py   # /dev/wheeltec_lidar
+ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py   # = Lsm10_m10p_uart, /dev/wheeltec_lidar
 ros2 topic echo /scan --once            # sanity: one ring on the graph
 ```
 
@@ -186,6 +186,17 @@ own graph snapshot — if it says *"no LaserScan topic on the robot"*, the
 driver above is simply not running; if it says *"topics visible but no
 data"*, the driver is running but not publishing (check serial port
 permission / `ls -l /dev/wheeltec_lidar`).
+
+## 6c. This exact unit — verified hardware facts (live SSH audit 2026-11-04)
+
+| item | fact |
+| --- | --- |
+| computer | **Jetson Orin Nano Dev Kit** (L4T R35.3.1, Ubuntu 22.04, Python 3.10, aarch64) — NOT a Pi |
+| ROS | `/opt/ros/humble` + vendor ws `~/wheeltec_ros2` (colcon-built; `turn_on_wheeltec_robot`, `lslidar_driver`, `usb_cam-ros2`, `web_video_server-ros2`, nav2, slam…) |
+| serials | 3× CH343: `/dev/wheeltec_controller` = MCU base @115200 (launch `base_serial.launch.py`, publishes `/PowerVoltage` `/odom`), `/dev/wheeltec_lidar` = **LSLidar M10P** (±120° FOV), `/dev/wheeltec_mic` |
+| tmux | NOT installed — use nohup (`deploy/stack_up.sh` handles all of it; crontab `@reboot` keeps the stack up: base + lidar + webctl client, idempotent) |
+| camera | **no USB webcam attached; CSI IMX219 node in DT but unbound** — nvargus says "No cameras available". Needs the CSI overlay (`sudo /opt/nvidia/jetson-io/jetson-io.py` → select imx219 → reboot) AND the camera physically cabled. Until then the client just reports `camera: false` (harmless); plug any UVC webcam in + `ros2 launch usb_cam` and auto-discovery lights it up with zero config |
+| VPN | robot is the hwdsl2 client: tunnel iface `ppp0` = 192.168.42.11 → server at 192.168.42.1:8090 (`~/robotctl/robotctl.env`) |
 
 ## 7. Server + first drive
 

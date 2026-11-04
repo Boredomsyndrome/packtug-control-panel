@@ -41,6 +41,20 @@ for try in 1 2; do
   [ "$try" -eq 1 ] && LOG "lidar first attempt failed (port busy?), retrying..."
 done
 
+# ASTRA S depth camera: upstream ros2_astra_camera overlay ws (~/ws_astra).
+# OpenNI protocol — does NOT appear as /dev/video. Start-if-absent and left
+# running across re-runs: USB re-enumeration on every bounce is slow/fragile.
+if [ -f "$HOME/ws_astra/install/setup.bash" ]; then
+  if ! pgrep -f '[a]stra_camera_node' >/dev/null; then
+    nohup bash -lc "source /opt/ros/humble/setup.bash && source $HOME/ws_astra/install/setup.bash && ros2 launch astra_camera astra.launch.xml >/tmp/astra.log 2>&1" >/dev/null 2>&1 &
+    LOG "astra: launching (log /tmp/astra.log)"; sleep 4
+  else
+    LOG "astra: already running"
+  fi
+else
+  LOG "astra: ~/ws_astra missing — skipped (git clone orbbec/ros2_astra_camera + colcon build)"
+fi
+
 sleep 2
 nohup bash -lc "set -a; . ~/robotctl/robotctl.env; set +a; \
   source /opt/ros/humble/setup.bash && \

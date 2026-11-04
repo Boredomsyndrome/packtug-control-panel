@@ -350,5 +350,5 @@ registry = RobotRegistry(
     max_lin=settings.MAX_LIN,
     max_rot=settings.MAX_ROT,
     cmd_timeout=settings.CMD_TIMEOUT,
-    lock_path=str(settings.PROJECT_ROOT / ".server.lock"),
+    lock_path=os.environ.get("WEBCTL_LOCK") or str(settings.PROJECT_ROOT / ".server.lock"),
 )

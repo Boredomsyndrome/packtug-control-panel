@@ -10,7 +10,7 @@ plus a raw protocol probe on robot 'gamma' (empty-token dev robot).
 
 Verifies:
   - fleet listing, online detection, transports (ws/http), battery uplink
-  - browser Basic Auth vs per-robot ws tokens: two credential systems, no mix
+  - per-robot ws tokens (the only credential; browser plane open v3.2)
   - command PUSH latency over ws (<150 ms), staleness auto-zero pushed
   - probe ws protocol: welcome, cmd push, telemetry validation, takeover
   - camera: robot frame -> viewer ws (ts prefix) AND legacy /cam/<id> relay
@@ -25,6 +25,7 @@ then shuts everything down. Safe to run repeatedly.
 Usage:  .venv/bin/python -u tools/integration_test.py
 """
 import base64
+import errno as _errno
 import fcntl
 import json
 import os
@@ -54,9 +55,10 @@ ENV = {
     **{k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"},
     "WEBCTL_ROBOTS": ROBOTS,
     "MAX_LIN": "0.5", "MAX_ROT": "0.7", "CMD_TIMEOUT": "0.5",
-    "WEBCTL_AUTH_USER": BROWSER[0], "WEBCTL_AUTH_PASS": BROWSER[1],
     "DJANGO_SECRET_KEY": "itest", "DJANGO_DEBUG": "true",
     "ALLOWED_HOSTS": "127.0.0.1,localhost",
+    # own lock so the suite coexists with the live prod server
+    "WEBCTL_LOCK": os.path.join(ROOT, ".server.test.lock"),
 }
 
 procs = {}
@@ -217,8 +219,9 @@ def cleanup():
 
 
 def preflight_lock():
-    """Fail loudly if another server still owns .server.lock (leaked run)."""
-    path = os.path.join(ROOT, ".server.lock")
+    """Fail loudly if another TEST server still owns our lock (leaked run).
+    Prod holds .server.lock; the suite uses WEBCTL_LOCK — see ENV."""
+    path = ENV.get("WEBCTL_LOCK", os.path.join(ROOT, ".server.lock"))
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -261,8 +264,8 @@ try:
     time.sleep(2.5)
 
     print("[1] fleet, transports, telemetry uplink (ws + http)")
-    check("browser Basic Auth enforced (401 without creds)",
-          req(BASE + "/api/robot", auth=False)[0] == 401)
+    check("browser site open without credentials (v3.2 no-auth)",
+          req(BASE + "/api/robot", auth=False)[0] == 200)
     online_ok = wait_for(lambda: (m := robots_map()) and len(m) == 3
                          and m["alpha"]["online"] and m["beta"]["online"], 8)
     m = robots_map()

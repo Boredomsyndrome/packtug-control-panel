@@ -16,7 +16,7 @@ robot, scales by registry entries.
 
 ```
  browser (any device on the LAN)                LAPTOP = the only server
-   │ Basic Auth, WASD/hold-to-move             ┌───────────────────────────┐
+   │ no password, WASD/hold-to-move            ┌───────────────────────────┐
    │ POST /api/robot/<id>/cmd   (10 Hz)        │ Django :8000              │
    ├──────────────────────────────────────────▶│  per-robot hub:           │
    │ GET /api/robot  (fleet status, 1 Hz)      │   • clamp MAX_LIN/MAX_ROT │
@@ -69,8 +69,9 @@ auto-fall back to long-poll, camera relay to /cam MJPEG) — but run ONE
 process; the ASGI app is what serves WebSockets.
 
 `.env` keys: `WEBCTL_ROBOTS="alpha:tokA,beta:tokB"` (generate a random token
-per robot), `MAX_LIN/MAX_ROT/CMD_TIMEOUT`, browser `WEBCTL_AUTH_USER/PASS`
-(required before anything crosses a untrusted network).
+per robot) and `MAX_LIN/MAX_ROT/CMD_TIMEOUT`. Since v3.2 there is **no
+browser password** — access control is the network (VPN / trusted LAN);
+per-robot tokens are the only credentials in the system.
 
 Network for the LAN: any WiFi both laptop and robots join works. Simplest
 without router: turn ON the laptop's WiFi hotspot — GNOME uses 10.42.0.0/24,
@@ -98,7 +99,7 @@ systemd unit for autostart ships in `robotctl/`.)
 
 ## API reference
 
-Browser (Basic Auth when enabled):
+Browser (no auth — v3.2; the network is the trust boundary):
 
 | route | meaning |
 |---|---|
@@ -109,7 +110,7 @@ Browser (Basic Auth when enabled):
 | `POST /api/robot/<id>/estop` | latch zero until next explicit cmd |
 | `GET  /cam/<id>` | MJPEG relay of the frames that robot pushes up |
 
-Robot (Basic `<id>:<token>`; middleware never gates browser creds here):
+Robot (Basic `<id>:<token>`; per-robot registry token — the only credential):
 
 Primary (WebSocket, robot dials out; `?token=` = that robot's registry token):
 
@@ -119,8 +120,7 @@ Primary (WebSocket, robot dials out; `?token=` = that robot's registry token):
 | `ws /ws/cam/<id>` | browser viewer: binary = float64 server ts + JPEG, drop-latest |
 
 Fallback (HTTP — used automatically when the server has no WS, e.g. the
-gunicorn/WSGI mode; Basic `<id>:<token>` — middleware never gates browser
-creds here):
+gunicorn/WSGI mode; Basic `<id>:<token>` as above):
 
 | route | meaning |
 |---|---|

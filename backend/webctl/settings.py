@@ -45,7 +45,8 @@ INSTALLED_APPS = [
     "robot",
 ]
 
-# JSON-only API, no DRF auth (site-wide Basic Auth middleware handles it),
+# JSON-only API, no DRF auth (robot plane enforces per-robot tokens per
+# request; browser plane is network-trusted by design since v3.2),
 # no browsable HTML API (robot control endpoint should not render forms).
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
@@ -58,7 +59,6 @@ REST_FRAMEWORK = {
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "robot.middleware.BasicAuthMiddleware",   # no-op unless WEBCTL_AUTH_USER set
     "django.middleware.common.CommonMiddleware",
 ]
 
@@ -88,6 +88,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # Serve the built React app (frontend/dist) directly: /assets/* etc.
 WHITENOISE_ROOT = PROJECT_ROOT / "frontend" / "dist"
 
-# HTTP Basic auth (optional, enable via env before any internet exposure)
-WEBCTL_AUTH_USER = os.getenv("WEBCTL_AUTH_USER", "")
-WEBCTL_AUTH_PASS = os.getenv("WEBCTL_AUTH_PASS", "")
+# Browser password REMOVED 2026-11-04 (v3.2): access control is the network
+# (VPN/LAN trust). Robot plane still authenticates per-robot tokens in
+# WEBCTL_ROBOTS — unaffected.

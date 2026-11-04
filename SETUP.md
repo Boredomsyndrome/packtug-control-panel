@@ -55,8 +55,7 @@ CMD_TIMEOUT=0.5        # held cmd older than this -> zero served
 DJANGO_SECRET_KEY=<th…>
 DJANGO_DEBUG=false
 ALLOWED_HOSTS=*
-WEBCTL_AUTH_USER=      # set BOTH before any non-LAN/internet exposure
-WEBCTL_AUTH_PASS=
+# v3.2: browser password removed — network trust (VPN/LAN) only.
 ```
 
 Keep the token list handy — each robot gets exactly one `id:token` pair.

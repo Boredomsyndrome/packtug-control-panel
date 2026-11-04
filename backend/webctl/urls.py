@@ -10,10 +10,10 @@ router.register("api/robot", RobotViewSet, basename="robot")
 # DRF lookup pattern ([^/.]+) matches them all.
 
 urlpatterns = [
-    # browser-facing (Basic Auth middleware)
+    # browser-facing (open since v3.2 — network trust; robot plane keeps tokens)
     path("cam/<str:robot_id>", views.cam_view, name="cam"),
     *router.urls,   # /api/robot, /api/robot/<id>, /api/robot/<id>/cmd|stop|estop
-    # robot-facing (per-robot token auth inside the views; middleware skips these)
+    # robot-facing (per-robot token auth inside the views — the server's only credential)
     path("robotctl/<str:robot_id>/cmd", robotctl.cmd_poll, name="robotctl-cmd"),
     path("robotctl/<str:robot_id>/telemetry", robotctl.telemetry, name="robotctl-telemetry"),
     path("robotctl/<str:robot_id>/frame", robotctl.frame, name="robotctl-frame"),

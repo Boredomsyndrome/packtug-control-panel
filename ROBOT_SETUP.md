@@ -194,7 +194,7 @@ permission / `ls -l /dev/wheeltec_lidar`).
 | computer | **Jetson Orin Nano Dev Kit** (L4T R35.3.1, Ubuntu 22.04, Python 3.10, aarch64) — NOT a Pi |
 | ROS | `/opt/ros/humble` + vendor ws `~/wheeltec_ros2` (colcon-built; `turn_on_wheeltec_robot`, `lslidar_driver`, `usb_cam-ros2`, `web_video_server-ros2`, nav2, slam…) |
 | serials | 3× CH343: `/dev/wheeltec_controller` = MCU base @115200 (launch `base_serial.launch.py`, publishes `/PowerVoltage` `/odom`), `/dev/wheeltec_lidar` = **LSLidar M10P** (±120° FOV), `/dev/wheeltec_mic` |
-| tmux | NOT installed — use nohup (`deploy/stack_up.sh` handles all of it; crontab `@reboot` keeps the stack up: base + lidar + webctl client, idempotent) |
+| tmux | NOT installed — use nohup (`deploy/stack_up.sh` handles all of it; crontab `@reboot` keeps the stack up: base + lidar + webctl client, idempotent). Vendor `lslidar_driver_node` also **crashes at runtime** (observed -6 heap-abort and -11 SIGSEGV while streaming) → `deploy/watchdog_lidar.sh` on `*/2 * * * *` cron revives it; the webctl client self-heals once `/scan` returns |
 | camera | **no USB webcam attached; CSI IMX219 node in DT but unbound** — nvargus says "No cameras available". Needs the CSI overlay (`sudo /opt/nvidia/jetson-io/jetson-io.py` → select imx219 → reboot) AND the camera physically cabled. Until then the client just reports `camera: false` (harmless); plug any UVC webcam in + `ros2 launch usb_cam` and auto-discovery lights it up with zero config |
 | VPN | robot is the hwdsl2 client: tunnel iface `ppp0` = 192.168.42.11 → server at 192.168.42.1:8090 (`~/robotctl/robotctl.env`) |
 

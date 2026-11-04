@@ -17,7 +17,7 @@ Two **separate** credential systems that never mix:
 
 | Who | Credential | Sent as |
 |---|---|---|
-| Browser / operator | `WEBCTL_AUTH_USER/_PASS` | HTTP Basic; ws via `?browser_auth=<b64(user:pass)>` |
+| Browser / operator | *(none — v3.2)* | no login; access control = network (VPN/LAN) |
 | Robot | its `id:token` from `WEBCTL_ROBOTS` | HTTP Basic (username = id); ws via `?token=` |
 
 Robot ids: `[A-Za-z0-9_-]{1,32}`. Empty token = dev-open (never do that in
@@ -70,7 +70,7 @@ receives `estop` frames even mid-stream.
 ### Camera (two renderings of the same hub frame buffer)
 * `GET /cam/<id>` — legacy MJPEG `multipart/x-mixed-replace` stream
   (handy with `mpv`/browser tab).
-* `ws://…/ws/cam/<id>?browser_auth=<b64>` — live viewer socket the React
+* `ws://…/ws/cam/<id>` — live viewer socket the React
   SPA uses. Each binary message = `struct '<d'` server-send-timestamp (s)
   + JPEG bytes; client subtracts its clock for latency display.
 

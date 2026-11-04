@@ -5,9 +5,9 @@
     POST /robotctl/<id>/frame                raw JPEG body (camera relay)
 
 Auth: HTTP Basic with username = robot id, password = that robot's token
-(WEBCTL_ROBOTS registry). This is separate from the browser Basic Auth, and
-BasicAuthMiddleware deliberately skips /robotctl/ so the two credential
-systems never mix. All responses are zero-safe: a robot that just applies
+(WEBCTL_ROBOTS registry) — the ONLY credential system in the server; the
+browser plane has been open by design since v3.2 (network trust).
+All responses are zero-safe: a robot that just applies
 whatever `cmd` returns can never receive a stale or out-of-range velocity.
 """
 import base64

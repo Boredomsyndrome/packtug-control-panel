@@ -12,8 +12,7 @@ mkdir -p .logs
 
 export WEBCTL_ROBOTS="smoke:tok-smoke" MAX_LIN=0.5 MAX_ROT=0.7 CMD_TIMEOUT=0.5 \
        DJANGO_SECRET_KEY=smoke DJANGO_DEBUG=false \
-       ALLOWED_HOSTS=127.0.0.1,localhost \
-       WEBCTL_AUTH_USER=smokeuser WEBCTL_AUTH_PASS=smokepass
+       ALLOWED_HOSTS=127.0.0.1,localhost
 
 LOG=.logs/prod_smoke.log
 .venv/bin/python -m uvi""corn webctl.asgi:application --app-dir backend \

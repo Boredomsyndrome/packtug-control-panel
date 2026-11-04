@@ -37,7 +37,7 @@ LiDAR (auto, never blocks driving):
   WEBCTL_SCAN_HZ=4      upload rate (latest scan wins; small JSON)
   WEBCTL_SCAN_RAYS=180  downsample of the raw ring (0 = every ray)
   WEBCTL_SCAN_MAX_M=12  rays beyond this (or inf/nan) -> 0 = "no return"
-  RPLidar A1 on the S2000: ros2 launch turn_on_wheeltec_robot
+  LSLidar M10P on the S2000: ros2 launch turn_on_wheeltec_robot
   wheeltec_lidar.launch.py  (serial /dev/wheeltec_lidar, publishes /scan)
 
 Other env: WEBCTL_SERVER, WEBCTL_ROBOT_ID/_TOKEN, WEBCTL_TRANSPORT=auto|ws|http,
@@ -1059,7 +1059,7 @@ class RosCamSource:
 
 class RosScanSource:
     """LiDAR straight from the ROS2 graph: subscribe to sensor_msgs/LaserScan
-    (RPLidar A1 publishes /scan via wheeltec_lidar.launch.py), pack newest."""
+    (LSLidar M10P publishes /scan via wheeltec_lidar.launch.py), pack newest."""
 
     def __init__(self, topics):
         import rclpy
@@ -1118,7 +1118,7 @@ class RosScanSource:
             self.warned_none = True
             log.warning("lidar: no LaserScan topic on the graph — start it with "
                         "`ros2 launch turn_on_wheeltec_robot "
-                        "wheeltec_lidar.launch.py` (RPLidar A1 on "
+                        "wheeltec_lidar.launch.py` (LSLidar M10P on ",
                         "/dev/wheeltec_lidar); graph: ros2 topic list")
 
     def read(self):

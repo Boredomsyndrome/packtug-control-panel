@@ -3,7 +3,7 @@
 The robot client PUSHES each camera JPEG to /robotctl/<id>/frame (it is a
 pure client — we never connect to it). The browser gets a live
 multipart/x-mixed-replace relay of the newest frame at /cam/<id>. Serving
-same-origin also keeps the stream behind the same Basic Auth + HTTPS as the
+same-origin also keeps the stream on the same network boundary as the
 rest of the app.
 """
 from pathlib import Path

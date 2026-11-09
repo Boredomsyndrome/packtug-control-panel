@@ -24,7 +24,7 @@ function sensorHint(status, kind) {
       ? 'no LaserScan topic on the robot — start it: ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py'
       : 'no Image topic on the robot graph — launch the camera node, then it self-heals (no client restart needed)'
   }
-  return `${kind}: topics visible on robot (${list.join(', ')}) but no data — node running? publisher QoS?`
+  return `${kind}: topics visible on robot graph (${list.join(', ')}) but no data — node running? publisher QoS?`
 }
 
 async function post(url, body) {
@@ -115,8 +115,13 @@ export default function App() {
 
   // keyboard driving (attached once; reads refs so it survives robot switches)
   useEffect(() => {
+    const typing = (e) => {
+      const t = e.target
+      return t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')
+    }
     const down = (e) => {
       if (e.repeat) return
+      if (typing(e)) return          // autonomy-panel text fields drive nothing
       if (e.code === 'Space') { e.preventDefault(); doEstop(); return }
       if (e.code === 'KeyE' && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault(); hardStop(); return
@@ -241,6 +246,7 @@ export default function App() {
         </section>
         </div>
 
+        <div className="rightcol">
         <section className="drive">
           <div className="dpad" onContextMenu={(e) => e.preventDefault()}>
             <DriveBtn label="▲" dir="fwd" press={press} disabled={!connected} />
@@ -292,6 +298,13 @@ export default function App() {
             own link dies (onboard watchdog). Page blur/hide always sends stop.
           </p>
         </section>
+
+        {sel && (
+          <section className="navpanel">
+            <NavPanel key={sel} robotId={sel} status={status} connected={connected} />
+          </section>
+        )}
+        </div>
       </main>
 
       <footer className="foot">
@@ -474,6 +487,310 @@ function ScanView({ robotId, status }) {
       )}
     </>
   )
+}
+
+// ---- v3.3 autonomy panel (docs/NAV.md) --------------------------------------
+// Polls GET /api/robot/<id>/nav {mode, nav, waypoints, maps}; every button is
+// one validated POST action. Nothing here moves the robot except START ROUTE
+// (server-side the /cmd route also gets a 409 so teleop can't fight Nav2).
+const NAV_LABEL = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', route: 'ROUTE ▶' }
+
+function NavPanel({ robotId, status, connected }) {
+  const [data, setData] = useState(null)   // GET /nav body
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [mapName, setMapName] = useState('room1')
+  const [wpName, setWpName] = useState('')
+  const [showMap, setShowMap] = useState('')
+  const [route, setRoute] = useState([])
+
+  const navUrl = `/api/robot/${encodeURIComponent(robotId)}/nav`
+  const mode = data?.mode || 'off'
+  const navs = data?.nav || {}
+  const wps = data?.waypoints || {}
+  const maps = data?.maps || []
+
+  useEffect(() => {
+    let stop = false
+    const tick = async () => {
+      try {
+        const res = await fetch(navUrl)
+        const d = await res.json()
+        if (!stop && d.ok) { setData(d); setErr('') }
+      } catch { /* hub blip: keep last view */ }
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => { stop = true; clearInterval(id) }
+  }, [navUrl])
+
+  // keep the preview selection pointing at a real map
+  useEffect(() => {
+    if (!maps.length) { if (showMap) setShowMap(''); return }
+    if (!maps.some((m) => m.name === showMap)) setShowMap(maps[0].name)
+  }, [maps, showMap])
+
+  const act = async (body) => {
+    setBusy(true); setErr('')
+    try {
+      const d = await post(navUrl, body)
+      if (!d.ok) setErr(d.error || (d.errors && JSON.stringify(d.errors)) || 'rejected')
+    } catch { setErr('network') } finally { setBusy(false) }
+  }
+
+  const live = connected && !busy
+  const wpList = Object.entries(wps)
+  const navActive = mode === 'mapping' || mode === 'localizing' || mode === 'route'
+
+  return (
+    <>
+      <div className="navhead">
+        <b>🧭 Autonomy</b>
+        <span className={`navmode ${mode}`}>{NAV_LABEL[mode] || mode}</span>
+        {navs.pose && <span className="dim navpose">
+          x {navs.pose[0].toFixed(2)} · y {navs.pose[1].toFixed(2)}
+        </span>}
+        {navs.route_total > 0 && <span className="dim">{navs.route_done}/{navs.route_total} pts</span>}
+      </div>
+      {navs.error && <div className="naverr">robot: {navs.error}</div>}
+      {err && <div className="naverr">⚠ {err}</div>}
+
+      <div className="navmap">
+        {maps.length ? (
+          <div className="row">
+            <select value={showMap} onChange={(e) => setShowMap(e.target.value)}>
+              {maps.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name} · {Math.round(m.bytes / 1024)} KB
+                </option>
+              ))}
+            </select>
+            <button className="minibtn" disabled={!live} title="delete this map"
+                    onClick={() => act({ action: 'delete_map', map: showMap })}>✕</button>
+          </div>
+        ) : <span className="dim">no saved maps yet — press 🗺, teleop around the room, then 💾</span>}
+        {showMap && (
+          <MapCanvas robotId={robotId} map={showMap} wps={wps} pose={navs.pose}
+                     route={route}
+                     onPick={(n) => setRoute((r) => (r.includes(n) ? r : [...r, n]))} />
+        )}
+      </div>
+
+      <div className="row">
+        <button className={`navbtn ${mode === 'mapping' ? 'on' : ''}`}
+                disabled={!live || mode === 'route'}
+                onClick={() => act({ action: 'map_on' })}>🗺 Map</button>
+        <button className="navbtn" disabled={!live || mode !== 'mapping'}
+                onClick={() => act({ action: 'map_off' })}>map ⏹</button>
+        <button className="navbtn" disabled={!live || mode === 'route'}
+                onClick={() => act({ action: 'nav_off' })}>nav ⏻</button>
+      </div>
+      <div className="row">
+        <input value={mapName} maxLength={32} placeholder="map name"
+               disabled={!live || mode === 'route'}
+               onChange={(e) => setMapName(e.target.value.replace(/[^A-Za-z0-9_-]/g, ''))} />
+        <button className="navbtn" disabled={!live || mode === 'route'}
+                title="stop SLAM, save it as the named map"
+                onClick={() => act({ action: 'map_save', name: mapName || 'room1' })}>💾 save</button>
+        <button className="navbtn" disabled={!live || !maps.length || mode === 'route'}
+                title="start Nav2 localization on the selected map"
+                onClick={() => act({ action: 'nav_on', map: showMap || maps[0].name })}>🎯 nav</button>
+      </div>
+      <div className="row">
+        <input value={wpName} maxLength={32} placeholder="point name (auto if blank)"
+               disabled={!live || !navActive}
+               onChange={(e) => setWpName(e.target.value.replace(/[^A-Za-z0-9_-]/g, ''))} />
+        <button className="navbtn save" disabled={!live || !navActive}
+                title="store the robot's current pose in the map"
+                onClick={async () => {
+                  const n = wpName.trim()
+                  await act({ action: 'record', ...(n ? { name: n } : {}) })
+                  setWpName('')
+                }}>📍 save point here</button>
+      </div>
+
+      <div className="navwps">
+        {wpList.length === 0 &&
+          <span className="dim">no points yet — park the robot somewhere and hit 📍</span>}
+        {wpList.map(([n, w]) => (
+          <div key={n} className="wprow">
+            <button className="wpadd" disabled={!live}
+                    title={route.includes(n) ? 'in route' : 'add to route'}
+                    onClick={() => setRoute((r) => (r.includes(n) ? r : [...r, n]))}>
+              {route.includes(n) ? `#${route.indexOf(n) + 1}` : '+'}
+            </button>
+            <span className="wpname">{n}</span>
+            <span className="dim wpxy">{w.x.toFixed(2)}, {w.y.toFixed(2)} · {w.yaw.toFixed(1)} rad</span>
+            <button className="minibtn" disabled={!live || mode !== 'localizing'}
+                    title="re-localize here (no motion)"
+                    onClick={() => act({ action: 'align', waypoints: [n] })}>⌖</button>
+            <button className="minibtn" disabled={!live} title="delete point"
+                    onClick={() => {
+                      act({ action: 'delete_waypoint', waypoints: [n] })
+                      setRoute((r) => r.filter((x) => x !== n))
+                    }}>✕</button>
+          </div>
+        ))}
+      </div>
+
+      {route.length > 0 && (
+        <div className="navroute">
+          {route.map((n, i) => (
+            <button key={n} className="wpchip" title="remove from route"
+                    onClick={() => setRoute((r) => r.filter((x) => x !== n))}>
+              {i + 1}·{n}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="row">
+        <button className="routebtn"
+                disabled={!live || mode !== 'localizing' || route.length === 0}
+                onClick={() => act({ action: 'route', waypoints: route })}>
+          ▶ START ROUTE
+        </button>
+        {mode === 'route' ? (
+          <button className="cancelbtn" onClick={() => act({ action: 'nav_cancel' })}>⏹ cancel</button>
+        ) : route.length > 0 && (
+          <button className="minibtn" onClick={() => setRoute([])}>clear</button>
+        )}
+      </div>
+      <p className="hint">🗺 teleop freely while SLAM builds the map → 💾 saves it → 🎯
+        localizes → 📍 saves points → queue points → START ROUTE. Nothing drives
+        until you press it; E-STOP and the link watchdog always win.</p>
+    </>
+  )
+}
+
+function MapCanvas({ robotId, map, wps, pose, route, onPick }) {
+  // Draws the saved .pgm (dark-theme LUT) + waypoints + live pose. Fetched
+  // once per (robot, map); overlays redraw with each 1 Hz nav poll.
+  const base = `/api/robot/${encodeURIComponent(robotId)}/maps/${encodeURIComponent(map)}`
+  const cvRef = useRef(null)
+  const imgRef = useRef(null)     // {img, W, H, ox, oy, res}
+  const [ok, setOk] = useState(0)
+
+  useEffect(() => {
+    let stop = false
+    imgRef.current = null
+    ;(async () => {
+      try {
+        const [pgmRes, yamlRes] = await Promise.all([
+          fetch(`${base}.pgm`), fetch(`${base}.yaml`)])
+        if (!pgmRes.ok || stop) return
+        const buf = new Uint8Array(await pgmRes.arrayBuffer())
+        const yaml = yamlRes.ok ? await yamlRes.text() : ''
+        const m = parsePgm(buf)
+        if (!m || stop) return
+        const resM = /resolution:\s*([0-9.eE+-]+)/.exec(yaml)
+        const oM = /origin:\s*\[\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)/.exec(yaml)
+        // occupancy semantics: 0 = wall, 254 = free, 205 = unknown; the dark
+        // theme inverts so walls read bright on the panel.
+        const data = new Uint8ClampedArray(m.W * m.H * 4)
+        for (let i = 0; i < m.W * m.H; i++) {
+          const v = m.data[i]
+          let r, g, b
+          if (v <= 100) { r = 0xd8; g = 0xe6; b = 0xff }
+          else if (v >= 250) { r = 0x14; g = 0x19; b = 0x23 }
+          else if (v >= 170 && v <= 235) { r = 0x20; g = 0x27; b = 0x34 }
+          else { const t = (v - 100) / 150; r = 0x14 + t * 12; g = 0x19 + t * 14; b = 0x23 + t * 19 }
+          data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b; data[i * 4 + 3] = 255
+        }
+        imgRef.current = {
+          img: new ImageData(data, m.W, m.H), W: m.W, H: m.H,
+          ox: oM ? parseFloat(oM[1]) : 0, oy: oM ? parseFloat(oM[2]) : 0,
+          res: resM ? parseFloat(resM[1]) : 0.05,
+        }
+        setOk((n) => n + 1)
+      } catch { /* keep last frame; stale maps age out on their own */ }
+    })()
+    return () => { stop = true }
+  }, [base])
+
+  useEffect(() => {
+    const cv = cvRef.current, it = imgRef.current
+    if (!cv || !it) return undefined
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1
+      const W = cv.clientWidth, H = cv.clientHeight
+      if (!W || !H) return
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr)
+      const g = cv.getContext('2d')
+      g.setTransform(dpr, 0, 0, dpr, 0, 0)
+      g.fillStyle = '#0d1017'; g.fillRect(0, 0, W, H)
+      const s = Math.min(W / it.W, H / it.H)
+      const dx = (W - it.W * s) / 2, dy = (H - it.H * s) / 2
+      const off = document.createElement('canvas')
+      off.width = it.W; off.height = it.H
+      off.getContext('2d').putImageData(it.img, 0, 0)
+      g.imageSmoothingEnabled = false
+      g.drawImage(off, dx, dy, it.W * s, it.H * s)
+      const wx = (x) => dx + ((x - it.ox) / it.res) * s
+      const wy = (y) => dy + (it.H - (y - it.oy) / it.res) * s   // pgm row 0 = north
+      for (const [n, w] of Object.entries(wps)) {
+        g.beginPath(); g.arc(wx(w.x), wy(w.y), 4.5, 0, Math.PI * 2)
+        g.fillStyle = route.includes(n) ? '#ffd05f' : '#4cc2ff'
+        g.fill()
+        g.strokeStyle = '#0b0e14'; g.lineWidth = 1.5; g.stroke()
+        g.fillStyle = '#cfe3ff'; g.font = '11px ui-monospace, Menlo, monospace'
+        g.fillText(n, wx(w.x) + 7, wy(w.y) - 5)
+      }
+      if (pose) {
+        g.save(); g.translate(wx(pose[0]), wy(pose[1])); g.rotate(-(pose[2] || 0))
+        g.beginPath(); g.moveTo(9, 0); g.lineTo(-6, -5.5); g.lineTo(-6, 5.5)
+        g.closePath(); g.fillStyle = '#3ddc84'; g.fill(); g.restore()
+      }
+    }
+    draw()
+    window.addEventListener('resize', draw)
+    return () => window.removeEventListener('resize', draw)
+  }, [ok, wps, pose, route])
+
+  const click = (e) => {
+    const it = imgRef.current, cv = cvRef.current
+    if (!it || !cv) return
+    const rect = cv.getBoundingClientRect()
+    const s = Math.min(rect.width / it.W, rect.height / it.H)
+    const dx = (rect.width - it.W * s) / 2, dy = (rect.height - it.H * s) / 2
+    const px = e.clientX - rect.left, py = e.clientY - rect.top
+    let best = null, bd = 18 * 18
+    for (const [n, w] of Object.entries(wps)) {
+      const ddx = dx + ((w.x - it.ox) / it.res) * s - px
+      const ddy = dy + (it.H - (w.y - it.oy) / it.res) * s - py
+      const d = ddx * ddx + ddy * ddy
+      if (d < bd) { bd = d; best = n }
+    }
+    if (best) onPick(best)
+  }
+
+  return <canvas ref={cvRef} className="navcanvas" onClick={click}
+                 title="click a point to add it to the route" />
+}
+
+function parsePgm(u8) {
+  // Minimal P5 (binary PGM) reader: magic, optional comments, W H maxval,
+  // one whitespace byte, then W*H gray bytes (map_server/slam_toolbox style).
+  let i = 0
+  const tok = () => {
+    while (i < u8.length) {
+      const c = u8[i]
+      if (c === 0x23) { while (i < u8.length && u8[i++] !== 0x0a) {} ; continue }
+      if (c <= 0x20) { i++; continue }
+      let s = ''
+      while (i < u8.length && u8[i] > 0x20) s += String.fromCharCode(u8[i++])
+      return s
+    }
+    return null
+  }
+  if (tok() !== 'P5') return null
+  const W = parseInt(tok(), 10)
+  const H = parseInt(tok(), 10)
+  const maxv = parseInt(tok(), 10)
+  if (!W || !H || !(maxv > 0) || maxv > 255) return null
+  i++   // exactly one whitespace byte after maxval per the PGM spec
+  if (u8.length < i + W * H) return null
+  return { W, H, data: u8.subarray(i, i + W * H) }
 }
 
 function DriveBtn({ label, dir, press, disabled }) {

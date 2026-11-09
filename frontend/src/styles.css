@@ -142,3 +142,50 @@ button { font-family: inherit; }
   color: var(--dim); font: 11px/1.45 ui-monospace, Menlo, monospace;
   background: rgba(0, 0, 0, 0.55); border-radius: 8px; padding: 3px 9px; }
 .hintsmall { max-width: 520px; margin: 4px auto 8px; }
+
+/* ---- v3.3 autonomy panel ---- */
+.rightcol { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.navpanel { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px; flex: 0 1 auto; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px; }
+.navhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.navmode { font-size: 11px; font-weight: 700; padding: 2px 9px;
+  border-radius: 999px; background: #232a38; color: var(--dim); }
+.navmode.mapping { background: #4a3a12; color: #ffd05f; }
+.navmode.localizing { background: #0e3a4f; color: var(--accent); }
+.navmode.route { background: #14432a; color: var(--ok); animation: navpul 1.2s infinite; }
+@keyframes navpul { 50% { opacity: 0.55; } }
+.navpose { font-size: 11px; }
+.naverr { background: #40161c; color: #ffb3b3; border-radius: 6px;
+  padding: 4px 9px; font-size: 12px; }
+.navmap { display: flex; flex-direction: column; gap: 6px; }
+.navmap select { flex: 1; min-width: 0; background: #12161f; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
+.navcanvas { width: 100%; height: 215px; background: #0d1017;
+  border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; }
+.navpanel input { flex: 1; min-width: 0; background: #12161f;
+  border: 1px solid var(--line); color: var(--text); border-radius: 6px;
+  padding: 6px 8px; }
+.navpanel input:disabled { opacity: 0.5; }
+.navbtn, .routebtn, .cancelbtn { background: #232a38; border: 1px solid var(--line);
+  color: var(--text); border-radius: 8px; padding: 7px 10px;
+  font-weight: 600; cursor: pointer; white-space: nowrap; }
+.navbtn:active:not(:disabled) { background: #3a4568; }
+.navbtn.on { background: var(--accent); color: #00121f; border-color: var(--accent); }
+.navbtn.save { background: #123525; border-color: #2c7a4c; color: #c9ffdf; }
+.navbtn:disabled, .routebtn:disabled, .cancelbtn:disabled,
+.minibtn:disabled, .wpadd:disabled { opacity: 0.4; cursor: not-allowed; }
+.routebtn { flex: 1; background: #14432a; border-color: #2c7a4c; color: #c9ffdf; }
+.cancelbtn { background: #4a3a12; border-color: #7a6423; color: #ffe6a3; }
+.minibtn { background: transparent; border: 1px solid var(--line); color: var(--dim);
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.navwps { display: flex; flex-direction: column; gap: 4px;
+  max-height: 150px; overflow-y: auto; }
+.wprow { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.wpadd { width: 26px; flex: none; background: #12161f; color: var(--accent);
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.wpname { font-weight: 600; }
+.wpxy { font-size: 11px; margin-left: auto; }
+.navroute { display: flex; flex-wrap: wrap; gap: 5px; }
+.wpchip { background: #0e3a4f; border: 1px solid var(--accent); color: #bfe7ff;
+  border-radius: 999px; padding: 3px 9px; font-size: 12px; cursor: pointer; }

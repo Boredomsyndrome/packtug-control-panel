@@ -16,14 +16,20 @@ Safety model (v1 invariants preserved, watchdog now two-layered):
 """
 import errno
 import fcntl
+import logging
+import math
 import os
 import threading
 import time
+
+from robot import navstore
 
 ONLINE_TIMEOUT = 2.0        # no poll for this long -> robot shown OFFLINE
 FRAME_FRESH = 2.0           # camera frame older than this -> "no signal"
 SCAN_FRESH = 3.0            # lidar scan older than this -> stale (4 Hz uplink)
 _WAKE = 0.2                 # max Condition block before re-checking expiry
+
+log = logging.getLogger("robot.hub")
 
 
 class RobotHub:
@@ -67,6 +73,16 @@ class RobotHub:
         self.last_cam_ok = False          # robot-side self-flags (telemetry)
         self.last_scan_ok = False
         self.ros_topics = {}              # robot's live graph (diagnostics)
+
+        # --- v3.3 nav plane (docs/NAV.md) ---------------------------------
+        # Mailbox of the LAST nav command; the robot dedupes on rid, so a
+        # reconnect replay is harmless. nav_state = newest telemetry "nav".
+        self.nav_cmd = None
+        self.nav_rid = 0.0                # strictly increasing across restarts
+        self.nav_state: dict = {}
+        self.nav_mode = "off"             # off|mapping|localizing|route
+        self._pending_record: dict = {}   # point_rid -> waypoint name
+        self._seen_records: list = []     # record rids already persisted
 
         self.started = time.time()
 
@@ -123,7 +139,10 @@ class RobotHub:
         self._wake(self._cmd_events)
 
     def emergency_stop(self):
-        """Zero and latch: serve zero until /stop or an explicit new cmd."""
+        """Zero and latch: serve zero until /stop or an explicit new cmd.
+        Also queues a nav cancel — latching the teleop plane while a Nav2
+        goal keeps driving would be a safety hole (the robot-side estop
+        handler is the hard layer; this is the belt)."""
         with self.cv:
             self.cmd = (0.0, 0.0)
             self.cmd_ts = 0.0
@@ -131,6 +150,31 @@ class RobotHub:
             self.seq += 1
             self.cv.notify_all()
         self._wake(self._cmd_events)
+        self.push_nav("nav_cancel")
+
+    # ---------- nav plane (v3.3, docs/NAV.md) ----------
+
+    def push_nav(self, action, **payload):
+        """Queue a nav action for the robot; returns its rid. The cmd plane
+        carries the mailbox snapshot (ws pump AND http long-poll both pick
+        it up because seq bumps)."""
+        with self.cv:
+            rid = max(time.time(), self.nav_rid + 1e-6)
+            self.nav_rid = rid
+            msg = {"rid": rid, "action": action}
+            msg.update({k: v for k, v in payload.items() if v is not None})
+            self.nav_cmd = msg
+            if action == "record" and payload.get("name"):
+                self._pending_record[rid] = str(payload["name"])[:32]
+            self.seq += 1
+            self.cv.notify_all()
+        self._wake(self._cmd_events)
+        return rid
+
+    def expect_waypoint(self, rid, name):
+        """Map a record rid (as echoed by the robot) to the browser's name."""
+        with self.cv:
+            self._pending_record.setdefault(rid, str(name)[:32])
 
     # ---------- robot-facing actions ----------
 
@@ -169,6 +213,7 @@ class RobotHub:
             "estop": self.estop,
             "seq": self.seq,
             "cmd_timeout": self.cmd_timeout,
+            "nav": self.nav_cmd,
         }
 
     def contact(self, transport):
@@ -212,6 +257,38 @@ class RobotHub:
             rt = data.get("ros_topics")
             if isinstance(rt, dict):
                 self.ros_topics = rt
+            nav = data.get("nav")
+            if isinstance(nav, dict):
+                self.nav_state = nav
+                mode = nav.get("mode")
+                self.nav_mode = mode if mode in ("off", "mapping",
+                                                 "localizing", "route") else "off"
+                rec = nav.get("record")
+                if isinstance(rec, dict):
+                    self._persist_record_locked(rec)
+
+    def _persist_record_locked(self, rec):
+        """A telemetry 'record' block lands the waypoint in navstore —
+        once per rid, under names the browser registered via expect_waypoint
+        (or the name the robot echoes back). Caller holds cv."""
+        rid = rec.get("rid")
+        if not isinstance(rid, (int, float)):
+            return
+        if rid in self._seen_records:
+            return
+        self._seen_records.append(rid)
+        self._seen_records = self._seen_records[-100:]
+        name = self._pending_record.pop(rid, None) or rec.get("name")
+        x, y, yaw = rec.get("x"), rec.get("y"), rec.get("yaw")
+        frame = rec.get("frame") or "map"
+        if not all(isinstance(v, (int, float)) and math.isfinite(v)
+                   for v in (x, y, yaw)):
+            return
+        try:
+            navstore.save_waypoint(self.robot_id, name, float(x), float(y),
+                                   float(yaw), frame)
+        except (ValueError, OSError) as exc:
+            log.warning("waypoint %r rejected: %s", name, exc)
 
     def set_scan(self, scan):
         """Store the newest packed LaserScan (pre-validated dict)."""
@@ -278,6 +355,8 @@ class RobotHub:
                 "robot_cam_ok": self.last_cam_ok,
                 "robot_scan_ok": self.last_scan_ok,
                 "ros_topics": dict(self.ros_topics),
+                "nav_mode": self.nav_mode,
+                "nav": dict(self.nav_state),
                 "transport": "ws" if self.ws_connected else (
                     "http" if self.last_poll else None),
                 "ws_connected": self.ws_connected,

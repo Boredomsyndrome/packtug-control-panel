@@ -113,6 +113,34 @@ def frame(request, robot_id):
 
 @csrf_exempt
 @require_POST
+def map_upload(request, robot_id):
+    """v3.3: the robot uploads a saved map (navctl map-save output) right
+    after saving: JSON {name, pgm_b64, yaml}. Robot-authenticated plane.
+    Stored via navstore -> browser GETs /api/robot/<id>/maps/<name>.<ext>."""
+    hub, err = _authenticate(request, robot_id)
+    if err:
+        return err
+    if len(request.body) > 12 * 1024 * 1024:
+        return _err(413, "map upload too large")
+    try:
+        data = json.loads(request.body or b"{}")
+    except ValueError:
+        return _err(400, "map upload must be valid JSON")
+    if not isinstance(data, dict):
+        return _err(400, "map upload must be a JSON object")
+    from robot import navstore
+    try:
+        import base64 as _b64
+        pgm = _b64.b64decode(data.get("pgm_b64") or "", validate=True)
+        navstore.save_map(robot_id, str(data.get("name") or ""), pgm,
+                          str(data.get("yaml") or ""))
+    except (ValueError, OSError, TypeError) as e:
+        return _err(400, f"map rejected: {e}")
+    return JsonResponse({"ok": True, "maps": navstore.list_maps(robot_id)})
+
+
+@csrf_exempt
+@require_POST
 def scan(request, robot_id):
     """One packed LaserScan per request (HTTP fallback transport; the ws
     link carries the same JSON as a {\"type\":\"scan\"} text frame)."""

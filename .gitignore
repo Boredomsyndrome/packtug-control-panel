@@ -12,3 +12,4 @@ db.sqlite3
 .bridge.lock
 .DS_Store
 __MACOSX/
+.data/

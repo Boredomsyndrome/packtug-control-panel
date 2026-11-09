@@ -18,6 +18,10 @@ urlpatterns = [
     path("robotctl/<str:robot_id>/telemetry", robotctl.telemetry, name="robotctl-telemetry"),
     path("robotctl/<str:robot_id>/frame", robotctl.frame, name="robotctl-frame"),
     path("robotctl/<str:robot_id>/scan", robotctl.scan, name="robotctl-scan"),
+    path("robotctl/<str:robot_id>/map", robotctl.map_upload, name="robotctl-map"),
+    # v3.3 saved-map artifacts for the browser (browser plane: network trust)
+    path("api/robot/<str:robot_id>/maps/<str:name>.<str:ext>",
+         views.map_file_view, name="map-file"),
     # SPA catch-all (assets themselves are served by WhiteNoise from frontend/dist)
     re_path(r"^(?!api/|cam/|robotctl/).*$", views.index_view, name="index"),
 ]

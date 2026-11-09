@@ -9,9 +9,10 @@ rest of the app.
 from pathlib import Path
 
 from django.conf import settings
-from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.http import FileResponse, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.template.response import TemplateResponse
 
+from robot import navstore
 from robot.hub import registry
 
 
@@ -83,6 +84,20 @@ def registry_hubs_loop():
     for hub in registry.hubs.values():
         if hub._loop is None:
             hub.set_event_loop(loop)
+
+
+def map_file_view(request, robot_id, name, ext):
+    """Serve a saved map artifact to the browser (.pgm / .yaml).
+    Network-trust plane like the rest of the SPA API; navstore regex-locks
+    name+ext so the path can never escape the maps dir."""
+    if registry.robot(robot_id) is None:
+        return _err(404, "unknown robot")
+    path = navstore.map_file(robot_id, name, ext)
+    if path is None:
+        return _err(404, "map file not found")
+    ctype = ("image/x-portable-graymap" if ext == "pgm" else "text/yaml")
+    return FileResponse(open(path, "rb"), content_type=ctype,
+                        as_attachment=False, filename=f"{name}.{ext}")
 
 
 def index_view(request):

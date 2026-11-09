@@ -8,6 +8,11 @@ import math
 
 from rest_framework import serializers
 
+from django.core.validators import RegexValidator
+
+_NAME_RE = RegexValidator(r"^[A-Za-z0-9_-]{1,32}$",
+                          "only [A-Za-z0-9_-], 1-32 chars")
+
 
 class VelocityCommandSerializer(serializers.Serializer):
     """POST body for a velocity command: {"vx": m/s, "wz": rad/s}.
@@ -52,6 +57,8 @@ class RobotStatusSerializer(serializers.Serializer):
     robot_cam_ok = serializers.BooleanField(required=False)
     robot_scan_ok = serializers.BooleanField(required=False)
     ros_topics = serializers.DictField(required=False)
+    nav_mode = serializers.CharField(required=False)
+    nav = serializers.DictField(required=False)
     transport = serializers.CharField(allow_null=True, required=False)
     ws_connected = serializers.BooleanField(required=False)
     cmd_timeout = serializers.FloatField()
@@ -74,11 +81,39 @@ class TelemetrySerializer(serializers.Serializer):
     cam_ok = serializers.BooleanField(required=False, default=False)
     scan_ok = serializers.BooleanField(required=False, default=False)
     ros_topics = serializers.DictField(required=False)
+    nav = serializers.DictField(required=False)   # v3.3 nav state block
 
     def validate(self, attrs):
         for value in attrs.values():
             if isinstance(value, float) and not math.isfinite(value):
                 raise serializers.ValidationError("values must be finite")
+        return attrs
+
+
+class NavActionSerializer(serializers.Serializer):
+    """POST body for /api/robot/<id>/nav — the browser-side nav remote
+    (docs/NAV.md). We validate names + shapes HERE; the robot re-validates
+    defensively, and only 'route' with a resolvable pose list can move it."""
+    ACTIONS = ("map_on", "map_off", "map_save", "nav_on", "route",
+               "nav_cancel", "nav_off", "record", "align",
+               "delete_map", "delete_waypoint")
+    action = serializers.ChoiceField(choices=ACTIONS)
+    name = serializers.CharField(required=False, max_length=32,
+                                 validators=[_NAME_RE])
+    map = serializers.CharField(required=False, max_length=32,
+                                validators=[_NAME_RE])
+    waypoints = serializers.ListField(required=False, max_length=64,
+                                      child=serializers.CharField(max_length=32,
+                                                                  validators=[_NAME_RE]))
+
+    def validate(self, attrs):
+        a = attrs["action"]
+        if a in ("nav_on", "delete_map") and not attrs.get("map"):
+            raise serializers.ValidationError({"map": f"required for {a}"})
+        if a in ("route", "align", "delete_waypoint") and not attrs.get("waypoints"):
+            raise serializers.ValidationError({"waypoints": f"required for {a}"})
+        if a == "align" and len(attrs.get("waypoints") or []) != 1:
+            raise serializers.ValidationError({"waypoints": "align takes exactly one point"})
         return attrs
 
 

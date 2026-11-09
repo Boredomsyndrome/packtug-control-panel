@@ -737,6 +737,8 @@ class Client:
                 d = os.path.dirname(os.path.abspath(__file__))
                 spec = importlib.util.spec_from_file_location(
                     "webctl_navd", os.path.join(d, "navd.py"))
+                if spec is None or spec.loader is None:
+                    raise ImportError("navd.py not found next to client.py")
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 self.navd = mod.NavDaemon(self.sink, post=self._http,

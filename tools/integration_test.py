@@ -29,6 +29,7 @@ import errno as _errno
 import fcntl
 import json
 import os
+import shutil
 import signal
 import struct
 import subprocess
@@ -58,9 +59,11 @@ ENV = {
     "DJANGO_SECRET_KEY": "itest", "DJANGO_DEBUG": "true",
     "ALLOWED_HOSTS": "127.0.0.1,localhost",
     # own lock so the suite coexists with the live prod server
+    "WEBCTL_DATA_DIR": os.path.join(ROOT, ".itest-nav"),
     "WEBCTL_LOCK": os.path.join(ROOT, ".server.test.lock"),
 }
 
+shutil.rmtree(os.path.join(ROOT, ".itest-nav"), ignore_errors=True)
 procs = {}
 failures = []
 
@@ -258,7 +261,7 @@ try:
         procs[f"client-{rid}"] = (p, fh)
 
     start_robot("beta", {"WEBCTL_TRANSPORT": "http"})
-    start_robot("alpha", {"WEBCTL_CAM_MODE": "mjpeg",
+    start_robot("alpha", {"WEBCTL_NAV": "1", "WEBCTL_CAM_MODE": "mjpeg",
                           "WEBCTL_CAM_URL": "http://127.0.0.1:9103/stream",
                           "WEBCTL_CAM_FPS": "20"})
     time.sleep(2.5)
@@ -487,7 +490,76 @@ try:
         refused = True
     check("dup server: robot ws refused (no hub)", refused)
 
-    print("[11] offline detection")
+    print("[11] v3.3 nav plane (dry robot: no real ROS, no motion)")
+    st, _, b = req(API + "/alpha/nav", {"action": "record", "name": "itest-wp"})
+    check("nav record action accepted", st == 200 and json.loads(b)["ok"],
+          f"{st} {b[:90]}")
+    check("recorded waypoint lands in navstore via telemetry", wait_for(
+        lambda: "itest-wp" in json.loads(req(API + "/alpha/nav")[2].decode())["waypoints"],
+        6))
+    wp = json.loads(req(API + "/alpha/nav")[2].decode())["waypoints"].get("itest-wp") or {}
+    check("waypoint pose = robot dry scripted pose",
+          abs(wp.get("x", 0) - 0.5) < 1e-6 and abs(wp.get("yaw", 0) - 1.57) < 1e-6,
+          str(wp))
+
+    pgm = b"P5\n# itest\n8 8\n255\n" + bytes([254] * 64)
+    st, _, b = req(BASE + "/robotctl/alpha/map",
+                   {"name": "itestmap",
+                    "pgm_b64": base64.b64encode(pgm).decode(),
+                    "yaml": "image: itestmap.pgm\nresolution: 0.05\n"
+                            "origin: [-0.4, -0.4, 0.0]\n"},
+                   headers=robot_auth("alpha"))
+    check("robot map upload accepted", st == 200 and json.loads(b)["ok"], f"{st}")
+    st, _, b2 = req(BASE + "/api/robot/alpha/maps/itestmap.pgm")
+    check("map artifact served to browser byte-identical",
+          st == 200 and b2 == pgm, str(st))
+    st, _, b = req(BASE + "/robotctl/alpha/map", {"name": "x", "pgm_b64": "@@bad"},
+                   headers=robot_auth("alpha"))
+    check("garbage map upload rejected 400", st == 400)
+    st, _, _ = req(BASE + "/robotctl/alpha/map", {"name": "x"},
+                   headers=robot_auth("beta"))
+    check("map upload with wrong robot creds refused", st in (401, 403))
+
+    st, _, _ = req(API + "/alpha/nav", {"action": "bogus"})
+    check("bad nav action rejected 400", st == 400)
+    st, _, b = req(API + "/alpha/nav", {"action": "route", "waypoints": ["nope"]})
+    check("route via unknown waypoint rejected 400",
+          st == 400 and b"missing" in b)
+
+    st, _, b = req(API + "/alpha/nav", {"action": "map_on"})
+    check("map_on accepted", st == 200 and json.loads(b)["ok"])
+    check("hub mirrors robot nav mode (mapping)", wait_for(
+        lambda: status("alpha").get("nav", {}).get("mode") == "mapping", 8))
+    req(API + "/alpha/nav", {"action": "nav_on", "map": "itestmap"})
+    check("mode goes localizing", wait_for(
+        lambda: status("alpha").get("nav_mode") == "localizing", 8))
+
+    st, _, b = req(API + "/alpha/nav", {"action": "route", "waypoints": ["itest-wp"]})
+    check("route accepted", st == 200 and json.loads(b)["ok"])
+    check("hub sees mode=route", wait_for(
+        lambda: status("alpha").get("nav_mode") == "route", 5))
+    check("teleop cmd locked out with 409 during route", wait_for(
+        lambda: req(API + "/alpha/cmd", {"vx": 0.2, "wz": 0})[0] == 409, 3.0))
+    check("dry route completes (route_done>=1, localizing)", wait_for(
+        lambda: (status("alpha").get("nav", {}).get("route_done") or 0) >= 1
+        and status("alpha").get("nav_mode") == "localizing", 8))
+    st, _, _ = req(API + "/alpha/cmd", {"vx": 0.2, "wz": 0})
+    check("teleop accepted again after route", st == 200, str(st))
+
+    st, _, _ = req(API + "/alpha/nav", {"action": "nav_cancel"})
+    check("nav_cancel always accepted", st == 200)
+    req(API + "/alpha/nav", {"action": "nav_off"})
+    wait_for(lambda: status("alpha").get("nav_mode") == "off", 8)
+    st, _, _ = req(API + "/alpha/nav", {"action": "delete_waypoint",
+                                        "waypoints": ["itest-wp"]})
+    check("waypoint delete", st == 200 and wait_for(
+        lambda: "itest-wp" not in json.loads(
+            req(API + "/alpha/nav")[2].decode())["waypoints"], 3))
+    st, _, _ = req(API + "/alpha/nav", {"action": "delete_map", "map": "itestmap"})
+    check("map delete + artifact gone", st == 200 and wait_for(
+        lambda: req(BASE + "/api/robot/alpha/maps/itestmap.pgm")[0] == 404, 3))
+
+    print("[12] offline detection")
     pg_signal("client-beta", signal.SIGTERM)
     check("beta OFFLINE after client dies", wait_for(
         lambda: robots_map()["beta"]["online"] is False, 6))

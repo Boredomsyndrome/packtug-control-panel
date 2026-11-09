@@ -278,5 +278,114 @@ with c2._scan_lock:
 check("scan uploader is latest-wins too", pending == {"seq": 2}, repr(pending))
 check("post_scan stamped scan_ts", c2.scan_ts > 0)
 
+# ------------------------------------------------ 7. navd dry state machine
+import time as _time                                          # noqa: E402
+_navd_spec = importlib.util.spec_from_file_location(
+    "robotctl_navd", HERE.parent / "robotctl" / "navd.py")
+navd = importlib.util.module_from_spec(_navd_spec)
+_navd_spec.loader.exec_module(navd)
+
+
+def _wait_nav(nd, pred, timeout=4.0):
+    end = _time.time() + timeout
+    while _time.time() < end:
+        s = nd.snapshot()
+        if pred(s):
+            return s
+        _time.sleep(0.05)
+    return nd.snapshot()
+
+
+nd = navd.NavDaemon(sink=None, post=None, dry=True, robot_id="shimbot")
+_rids = iter(range(1, 200))
+
+
+def _nav_cmd(action, **kw):
+    m = {"rid": next(_rids), "action": action}
+    m.update(kw)
+    nd.handle(m)
+
+
+_nav_cmd("map_on")
+s = _wait_nav(nd, lambda s: s["mode"] == "mapping")
+check("navd dry: map_on -> mode=mapping", s["mode"] == "mapping", s["mode"])
+
+nd.handle({"rid": 1, "action": "nav_off"})          # stale rid replay
+_time.sleep(0.3)
+check("navd: stale/duplicate rid replay ignored",
+      nd.snapshot()["mode"] == "mapping")
+
+_nav_cmd("nav_on", map="room1")
+s = _wait_nav(nd, lambda s: s["mode"] == "localizing")
+check("navd dry: nav_on -> localizing, map remembered",
+      s["mode"] == "localizing" and s["map"] == "room1", str(s["map"]))
+
+_nav_cmd("record", name="wpA", point_rid=999.5)
+s = _wait_nav(nd, lambda s: s.get("record"))
+check("navd dry: record echoes name+pose+point_rid for the hub handshake",
+      bool(s.get("record")) and s["record"]["name"] == "wpA"
+      and abs(s["record"]["x"] - 0.5) < 1e-9
+      and s["record"]["rid"] == 999.5, str(s.get("record")))
+
+_nav_cmd("route", poses=[[1.0, 2.0, 0.0], [3.0, 4.0, 1.0]])
+s = _wait_nav(nd, lambda s: s["driving"], timeout=1.5)
+check("navd dry: route -> driving owns /cmd_vel", s["driving"]
+      and s["mode"] == "route", str(s["mode"]))
+s = _wait_nav(nd, lambda s: not s["driving"], timeout=4.0)
+check("navd dry: simulated route releases topic, mode->localizing, count=2",
+      not s["driving"] and s["mode"] == "localizing" and s["route_done"] == 2,
+      str(s))
+
+_nav_cmd("align", align_pose=[1.0, 2.0, 0.0])
+_time.sleep(0.3)
+s = nd.snapshot()
+check("navd dry: align accepted, still localizing, no error",
+      s["mode"] == "localizing" and not s["error"], str(s["error"]))
+
+nd.halt("shim-test")
+s = _wait_nav(nd, lambda s: s["mode"] == "off")
+check("navd: halt -> not driving, mode off, reason stamped",
+      not s["driving"] and s["mode"] == "off"
+      and "shim-test" in (s["error"] or ""), str(s["error"]))
+
+# ------------------------------------------- 8. teleop gate while navd drives
+class PubSink:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, vx, wz, info=None):
+        self.sent.append((vx, wz))
+
+
+c3 = client.Client.__new__(client.Client)
+c3.lock = threading.Lock()
+c3.held = (0.3, 0.2)
+c3.contacted_once = True
+c3.last_ok = _time.monotonic() + 60.0      # keep the watchdog out of it
+c3.tripped, c3.trips, c3.state = False, 0, "ok"
+c3.ws = None                     # publish_loop reports transport from this
+c3.publishes = 0
+c3.navd = types.SimpleNamespace(driving=True, halt=lambda r: None)
+c3.sink = PubSink()
+client.running = True
+th = threading.Thread(target=client.Client.publish_loop, args=(c3,),
+                      daemon=True)
+th.start()
+_time.sleep(0.4)
+check("client: teleop publisher SILENT while navd drives /cmd_vel",
+      c3.sink.sent == [], str(c3.sink.sent))
+c3.navd.driving = False
+_time.sleep(0.45)
+check("client: autonomy release flushes a zero and drops held velocity",
+      c3.sink.sent[:1] == [(0.0, 0.0)] and c3.held == (0.0, 0.0),
+      str(c3.sink.sent[:2]))
+c3.held = (0.25, 0.0)
+_time.sleep(0.3)
+check("client: teleop resumes at held velocity after release",
+      any(abs(v - 0.25) < 1e-9 for v, _ in c3.sink.sent),
+      str(c3.sink.sent[-3:]))
+client.running = False
+th.join(2)
+
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

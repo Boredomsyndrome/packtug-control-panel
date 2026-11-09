@@ -163,6 +163,8 @@ class RobotHub:
             self.nav_rid = rid
             msg = {"rid": rid, "action": action}
             msg.update({k: v for k, v in payload.items() if v is not None})
+            if action == "record":
+                msg["point_rid"] = rid   # robot echoes it in the record block
             self.nav_cmd = msg
             if action == "record" and payload.get("name"):
                 self._pending_record[rid] = str(payload["name"])[:32]

@@ -187,3 +187,20 @@ curl -u comet:*** http://127.0.0.1:8090/api/robot     # fleet
 
 Register another robot: append `,<id>:<token>` to `WEBCTL_ROBOTS` in `.env`,
 restart the tmux session, point a client at it — the fleet is data, not code.
+
+## 6. Autonomy (v3.3) — quick reference
+
+Full design: `docs/NAV.md`. Robot-side stack is opt-in via `WEBCTL_NAV=1`
+in `~/robotctl/robotctl.env` (deploy_to_robot.sh flips it); navd is inert
+and launches NOTHING until a browser action arrives.
+
+- `GET  /api/robot/<id>/nav` → `{mode, nav, waypoints{name:{x,y,yaw}}, maps[]}`
+- `POST /api/robot/<id>/nav` `{action, name?, map?, waypoints?[]}` —
+  actions: map_on/map_off/map_save/nav_on/route/nav_cancel/nav_off/record/
+  align/delete_map/delete_waypoint. **Only `route` can produce motion.**
+- Teleop `/cmd` answers 409 while `mode == "route"` (robot-side gate too).
+- Saved maps: `GET /api/robot/<id>/maps/<name>.<pgm|yaml>`; robot uploads
+  them robot-auth to `POST /robotctl/<id>/map` right after `map_save`.
+- Waypoints persist server-side in `.data/` (survives robot reboots).
+- Safety: estop, link watchdog and client exit paths all `halt` Nav2
+  (cancel goal + stop stack) before anything else.

@@ -154,11 +154,26 @@ class RobotHub:
 
     # ---------- nav plane (v3.3, docs/NAV.md) ----------
 
-    def push_nav(self, action, **payload):
-        """Queue a nav action for the robot; returns its rid. The cmd plane
-        carries the mailbox snapshot (ws pump AND http long-poll both pick
-        it up because seq bumps)."""
+    def robot_reachable(self) -> bool:
+        """Live transport now (ws up, or long-poll contact within timeout)."""
         with self.cv:
+            return self._reachable_locked()
+
+    def _reachable_locked(self) -> bool:
+        if self.ws_connected:
+            return True
+        return bool(self.last_poll) and \
+            (time.time() - self.last_poll) < ONLINE_TIMEOUT
+
+    def push_nav(self, action, **payload):
+        """Queue a nav action for the robot; returns its rid, or None if the
+        robot is not reachable — actions are NEVER queued-then-ambushed: an
+        offline robot must not wake up to a command (worst case: a route).
+        The cmd plane carries the mailbox snapshot (ws pump AND http
+        long-poll both pick it up because seq bumps)."""
+        with self.cv:
+            if not self._reachable_locked():
+                return None
             rid = max(time.time(), self.nav_rid + 1e-6)
             self.nav_rid = rid
             msg = {"rid": rid, "action": action}
@@ -230,6 +245,15 @@ class RobotHub:
             if on:
                 self.last_poll = time.time()
                 self.ws_epoch = epoch if epoch is not None else self.ws_epoch + 1
+                # Fresh session: drop any UNDELIVERED nav action and pending
+                # waypoint attribution. nav_cmd is held state re-sent in
+                # every snapshot; a robot that rebooted into this session
+                # must not replay whatever was left in the box. (In-flight
+                # routes live in navd on the robot, not here — unaffected.)
+                self.nav_cmd = None
+                self._pending_record.clear()
+                self.seq += 1
+                self.cv.notify_all()
                 return self.ws_epoch
             return None
 

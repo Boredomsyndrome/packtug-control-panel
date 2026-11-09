@@ -164,7 +164,8 @@ class RobotViewSet(ViewSet):
         elif a == "record":
             name = name or time.strftime("wp-%H%M%S")
             rid = hub.push_nav("record", name=name)
-            hub.expect_waypoint(rid, name)   # telemetry lands as this name
+            if rid is not None:
+                hub.expect_waypoint(rid, name)   # telemetry lands as this name
         elif a in ("delete_map", "delete_waypoint"):
             if a == "delete_map":
                 gone = navstore.delete_map(pk, map_name)
@@ -180,6 +181,11 @@ class RobotViewSet(ViewSet):
             rid = hub.push_nav("nav_on", map=map_name)
         else:                                  # map_on|map_off|nav_cancel|nav_off
             rid = hub.push_nav(a)
+        if rid is None and a not in ("delete_map", "delete_waypoint"):
+            return Response({"ok": False,
+                             "error": "robot offline — action NOT queued "
+                                      "(it will not fire on reconnect)"},
+                            status=http_status.HTTP_409_CONFLICT)
         return Response({"ok": True, "action": a, "rid": rid})
 
     @action(detail=True, methods=["post"])

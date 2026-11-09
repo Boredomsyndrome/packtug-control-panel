@@ -202,5 +202,8 @@ and launches NOTHING until a browser action arrives.
 - Saved maps: `GET /api/robot/<id>/maps/<name>.<pgm|yaml>`; robot uploads
   them robot-auth to `POST /robotctl/<id>/map` right after `map_save`.
 - Waypoints persist server-side in `.data/` (survives robot reboots).
+- Offline robot: nav POSTs answer 409 and are NOT queued — an offline
+  robot never wakes up to a leftover command; a fresh ws session also
+  drops any undelivered `nav_cmd` and pending record attribution.
 - Safety: estop, link watchdog and client exit paths all `halt` Nav2
   (cancel goal + stop stack) before anything else.

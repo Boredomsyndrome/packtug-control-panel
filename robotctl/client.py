@@ -43,7 +43,14 @@ LiDAR (auto, never blocks driving):
 Other env: WEBCTL_SERVER, WEBCTL_ROBOT_ID/_TOKEN, WEBCTL_TRANSPORT=auto|ws|http,
 WEBCTL_WATCHDOG=2.5, WEBCTL_POLL_WAIT=0.4, WEBCTL_CMD_VEL_TOPIC,
 WEBCTL_BATTERY_TOPICS, WEBCTL_DRY_RUN=1, WEBCTL_SINK=/tmp/x.json,
-WEBCTL_DRY_BATTERY=24.3, WEBCTL_CLIENT_VERSION=3.1-stdlib
+WEBCTL_DRY_BATTERY=24.3, WEBCTL_CLIENT_VERSION=3.3.0-stdlib
+
+Autonomous nav (v3.3, opt-in WEBCTL_NAV=1, docs/NAV.md): navd.py (same dir)
+runs the VENDOR slam_toolbox/Nav2 pipeline via ~/robotctl/navctl.sh. Nav
+commands ride the existing cmd plane ("nav" field); state rides telemetry
+("nav" field). While a route runs, Nav2 owns /cmd_vel and this client's
+10 Hz teleop publisher is SUSPENDED; estop/watchdog/SIGTERM halt the goal
+AND stop the nav stack. With WEBCTL_NAV unset everything below is inert.
 """
 import base64
 import http.client
@@ -67,7 +74,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.1.0-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.3.0-stdlib")
 
 SERVER = os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000").rstrip("/")
 ROBOT_ID = os.getenv("WEBCTL_ROBOT_ID", "")
@@ -104,6 +111,9 @@ SCAN_MAX_M = float(os.getenv("WEBCTL_SCAN_MAX_M", "12.0"))
 SCAN_DISCOVER_S = float(os.getenv("WEBCTL_SCAN_DISCOVER_S", "6.0"))
 
 CMD_VEL_TOPIC = os.getenv("WEBCTL_CMD_VEL_TOPIC", "/cmd_vel")
+# v3.3 autonomous nav helper (docs/NAV.md). When this flag is off NOTHING
+# related is imported — client behaviour is exactly the v3.2 teleop stack.
+NAV_ON = os.getenv("WEBCTL_NAV", "").lower() in ("1", "true", "yes")
 BATTERY_TOPICS = [t.strip() for t in
                   os.getenv("WEBCTL_BATTERY_TOPICS", "/PowerVoltage,/power_voltage").split(",")
                   if t.strip()]
@@ -359,6 +369,7 @@ class Client:
         self.cam_ts = 0.0              # monotonic stamps for telemetry OK flags
         self.scan_ts = 0.0
         self._topics_cache = (0.0, {})  # (checked_at, {"image": [...], "scan": [...]})
+        self.navd = None               # NavDaemon when WEBCTL_NAV=1
 
     # ---------- velocity ----------
     def apply(self, vx, wz, estop=False):
@@ -368,6 +379,10 @@ class Client:
             self.contacted_once = True
             self.tripped = False
             self.state = "estop" if estop else "driven"
+        if estop and self.navd:
+            # latched e-stop must ALSO kill autonomy: a Nav2 goal that is
+            # merely publish-blocked would resume the moment the gate opens.
+            self.navd.halt("estop")
 
     def touch(self):                    # server alive, but no new cmd payload
         with self.lock:
@@ -386,6 +401,9 @@ class Client:
                 self.trips += 1
                 self.tripped = True
                 log.warning("watchdog TRIPPED (no contact %.2fs) -> zero", ok_age)
+                if self.navd:
+                    # link down means robot stopped — autonomy included
+                    self.navd.halt("watchdog")
             self.state = "watchdog"
             return 0.0, 0.0
         return vx, wz
@@ -461,6 +479,9 @@ class Client:
                         seq = m.get("seq", seq)
                         self.apply(m.get("vx", 0.0), m.get("wz", 0.0),
                                    bool(m.get("estop")))
+                        navm = m.get("nav")
+                        if navm and self.navd:
+                            self.navd.handle(navm)
                     elif kind == "takeover":
                         log.warning("another robotctl connection took over; idling 5s")
                         try:
@@ -482,6 +503,9 @@ class Client:
                     d = json.loads(body)
                     seq = d["seq"]
                     self.apply(d["vx"], d["wz"], bool(d.get("estop")))
+                    navm = d.get("nav")
+                    if navm and self.navd:
+                        self.navd.handle(navm)
                 elif code in (401, 403, 404, 503):
                     self.state = f"http {code}"
                     log.error("cmd poll rejected (%d): %s", code, body[:200])
@@ -496,8 +520,22 @@ class Client:
     # ---------- velocity out ----------
     def publish_loop(self):
         dt = 1.0 / PUBLISH_HZ
+        was_driving = False
         while running:
             vx, wz = self.effective()
+            if self.navd and self.navd.driving:
+                # Nav2 owns /cmd_vel while a route runs — publishing our
+                # (zero) teleop here at 10 Hz would FIGHT its controller.
+                was_driving = True
+                time.sleep(dt)
+                continue
+            if was_driving:
+                # autonomy just released the topic: never hand back a stale
+                # held velocity — flush a zero first.
+                was_driving = False
+                with self.lock:
+                    self.held = (0.0, 0.0)
+                vx, wz = 0.0, 0.0
             try:
                 self.sink.publish(vx, wz, {
                     "publishes": self.publishes,
@@ -561,6 +599,8 @@ class Client:
                     "cam_ok": self.cam_ts and now - self.cam_ts < 5.0,
                     "scan_ok": self.scan_ts and now - self.scan_ts < 5.0,
                     "ros_topics": self.ros_topics()}
+            if self.navd:
+                body["nav"] = self.navd.snapshot()
             try:
                 if self.ws:
                     self.ws.send(json.dumps(body))
@@ -689,6 +729,22 @@ class Client:
         log.info("initialising velocity sink (dry_run=%s; first rclpy start "
                  "can take a few seconds)...", DRY_RUN)
         self.sink = self._make_sink()
+        if NAV_ON:
+            # explicit same-dir load: works whether client.py is run as a
+            # script, imported by the test harness, or copied to the robot
+            try:
+                import importlib.util
+                d = os.path.dirname(os.path.abspath(__file__))
+                spec = importlib.util.spec_from_file_location(
+                    "webctl_navd", os.path.join(d, "navd.py"))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self.navd = mod.NavDaemon(self.sink, post=self._http,
+                                          dry=DRY_RUN, robot_id=ROBOT_ID)
+                log.info("autonomous nav helper ACTIVE (WEBCTL_NAV=1)")
+            except Exception as e:
+                log.error("nav helper disabled (import/init failed): %s", e)
+                self.navd = None
         threads = [threading.Thread(target=self.net_loop, daemon=True, name="net"),
                    threading.Thread(target=self.publish_loop, daemon=True, name="publish"),
                    threading.Thread(target=self.telemetry_loop, daemon=True, name="telemetry")]
@@ -707,6 +763,8 @@ class Client:
             t.start()
         while running:
             time.sleep(0.2)
+        if self.navd:
+            self.navd.halt("shutdown")   # cancel goal + stop nav stack
         log.info("robotctl client shutting down")
 
 

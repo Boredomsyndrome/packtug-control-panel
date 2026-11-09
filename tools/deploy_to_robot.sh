@@ -13,7 +13,7 @@ ROBOT=${1:-wheeltec@192.168.42.11}
 cd "$(dirname "$0")/.."
 git diff --quiet || echo "WARN: working tree dirty — deploying MODIFIED files (commit first!)"
 
-for f in robotctl/client.py deploy/stack_up.sh deploy/watchdog_lidar.sh; do
+for f in robotctl/client.py robotctl/navd.py deploy/stack_up.sh deploy/watchdog_lidar.sh deploy/navctl.sh; do
   base=$(basename "$f")
   local_sha=$(sha256sum "$f" | cut -d' ' -f1)
   remote_sha=$(ssh "$ROBOT" "sha256sum ~/robotctl/$base 2>/dev/null | cut -d' ' -f1" || true)
@@ -24,5 +24,10 @@ for f in robotctl/client.py deploy/stack_up.sh deploy/watchdog_lidar.sh; do
     echo "copied: $base -> $ROBOT (restart below)"
   fi
 done
+
+# v3.3 autonomy: opt-in flag (docs/NAV.md). navd is INERT without it and
+# only ever launches the vendor stack on explicit browser actions — never
+# at boot. Adding the line itself moves nothing.
+ssh "$ROBOT" 'grep -q "^WEBCTL_NAV=" ~/robotctl/robotctl.env 2>/dev/null || { echo "WEBCTL_NAV=1" >> ~/robotctl/robotctl.env; echo "enabled WEBCTL_NAV=1 in robotctl.env"; }'
 
 ssh "$ROBOT" 'chmod +x ~/robotctl/stack_up.sh && exec bash ~/robotctl/stack_up.sh'

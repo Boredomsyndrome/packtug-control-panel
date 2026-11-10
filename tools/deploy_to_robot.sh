@@ -29,5 +29,11 @@ done
 # only ever launches the vendor stack on explicit browser actions — never
 # at boot. Adding the line itself moves nothing.
 ssh "$ROBOT" 'grep -q "^WEBCTL_NAV=" ~/robotctl/robotctl.env 2>/dev/null || { echo "WEBCTL_NAV=1" >> ~/robotctl/robotctl.env; echo "enabled WEBCTL_NAV=1 in robotctl.env"; }'
+# v3.4: L2TP-over-WiFi jitter delivers ~2.6 s contact gaps on this network —
+# the 2.5 s watchdog fired ~1x/min and halted mapping. 5 s absorbs the jitter
+# and still stops dead links far inside human reaction. Camera off: the v3.4
+# UI is lidar-only, and stopping the stream frees real bandwidth on the link.
+ssh "$ROBOT" 'grep -q "^WEBCTL_WATCHDOG=" ~/robotctl/robotctl.env 2>/dev/null || echo "WEBCTL_WATCHDOG=5.0" >> ~/robotctl/robotctl.env
+grep -q "^WEBCTL_CAM_MODE=" ~/robotctl/robotctl.env 2>/dev/null && sed -i "s/^WEBCTL_CAM_MODE=.*/WEBCTL_CAM_MODE=off/" ~/robotctl/robotctl.env || echo "WEBCTL_CAM_MODE=off" >> ~/robotctl/robotctl.env'
 
 ssh "$ROBOT" 'chmod +x ~/robotctl/stack_up.sh && exec bash ~/robotctl/stack_up.sh'

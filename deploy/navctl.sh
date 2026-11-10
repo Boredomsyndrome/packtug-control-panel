@@ -31,11 +31,34 @@ mkdir -p "$MAPS"
 has_topic() { timeout 6 ros2 topic list 2>/dev/null | grep -qx "$1"; }
 has_topic_like() { timeout 6 ros2 topic list 2>/dev/null | grep -q "$1"; }
 
+# The vendor robot_mode_description.launch.py gates the four_wheel_diff_bs
+# group on IfCondition(senior_mec_dl) — a copy-paste bug upstream, so the
+# S2000 chassis NEVER gets base_footprint->laser TF and slam_toolbox drops
+# every scan as "timestamp too old". We can't patch ~/wheeltec_ros2, so we
+# re-publish the exact same static transforms (from their launch source)
+# scoped to the nav plane: started on map-on/stack-on, killed on stop.
+# webctl_robot_client.py's cmdline contains 'webctl_navctl' too — excluded.
+ensure_tf() {
+  timeout 5 ros2 topic echo /tf_static --once 2>/dev/null \
+    | grep -q "child_frame_id: laser" || \
+  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run tf2_ros static_transform_publisher \
+      --x 0.157 --y 0 --z 0.257 --frame-id base_footprint --child-frame-id laser \
+      --ros-args -r __node:=webctl_navctl_tf" >>/tmp/nav_tf.log 2>&1 </dev/null &
+  # odom_frame in the vendor mapper params is odom_combined, but the base node
+  # publishes NO TF — the vendor factory stack runs robot_localization (EKF)
+  # for odom_combined->base_footprint; stack_up starts base_serial.launch.py
+  # (base only), so we bring the EKF up ourselves, scoped to the nav plane.
+  pgrep -f "wheeltec_ekf.launch.py" >/dev/null || \
+  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 launch turn_on_wheeltec_robot wheeltec_ekf.launch.py carto_slam:=true" >>/tmp/nav_ekf.log 2>&1 </dev/null &
+  sleep 2
+}
+
 case "$cmd" in
   map-on)
     if has_topic /map; then echo "mapping already up (/map live)"; exit 0; fi
+    ensure_tf
     setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER" >/tmp/nav_map.log 2>&1 </dev/null &
-    sleep 3
+    sleep 8
     if has_topic /map; then echo "mapping up"; else
       echo "FAILED: slam_toolbox did not publish /map — tail /tmp/nav_map.log"; exit 1; fi
     ;;
@@ -52,6 +75,7 @@ case "$cmd" in
   stack-on)
     name="${1:-room1}"
     [ -f "$MAPS/$name.yaml" ] || { echo "FAILED: map '$name' not saved"; exit 1; }
+    ensure_tf
     # slam_toolbox and AMCL both want to own map->odom: hand the TF over.
     pkill -f async_slam_toolbox_node 2>/dev/null
     sleep 2
@@ -69,11 +93,17 @@ case "$cmd" in
     pkill -f 'component_container'    2>/dev/null
     pkill -f 'async_slam_toolbox_node' 2>/dev/null
     pkill -f 'map_saver_cli'          2>/dev/null
+    pkill -f 'webctl_navctl_tf'       2>/dev/null
+    pkill -f 'wheeltec_ekf.launch'     2>/dev/null
+    pkill -f 'robot_localization/ekf'   2>/dev/null
     sleep 2
     pkill -9 -f 'bringup_launch.py'   2>/dev/null
     pkill -9 -f 'component_container' 2>/dev/null
     pkill -9 -f 'async_slam_toolbox_node' 2>/dev/null
     pkill -9 -f 'map_saver_cli'       2>/dev/null
+    pkill -9 -f 'webctl_navctl_tf'    2>/dev/null
+    pkill -9 -f 'wheeltec_ekf.launch'   2>/dev/null
+    pkill -9 -f 'robot_localization/ekf'  2>/dev/null
     sleep 1
     if has_topic /amcl_pose || has_topic /map; then
       echo "WARN: nav topics still live after stop"; exit 1

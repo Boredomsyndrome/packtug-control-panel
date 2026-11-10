@@ -85,6 +85,11 @@ POLL_WAIT = float(os.getenv("WEBCTL_POLL_WAIT", "0.4"))
 # hold the socket ~1s and starve pong, tripping the watchdog while healthy.
 # 2.5s still stops a dead link far inside human reaction time.
 WATCHDOG = float(os.getenv("WEBCTL_WATCHDOG", "2.5"))   # noqa: E305
+# v3.4: teleop velocity zeroes after WATCHDOG of silence (unchanged), but the
+# NAV plane uses a longer fuse — this WiFi/VPN link delivers ~5 s contact gaps
+# exactly when slam_toolbox/DDS spin up, and a 5 s hiccup must not vaporise a
+# mapping session. Sustained loss still tears autonomy down completely.
+NAV_LINK_LOST = float(os.getenv("WEBCTL_NAV_LINK_LOST", "15.0"))
 # server traffic only flows when commands CHANGE; the ping keeps "contact"
 # alive, so it MUST stay well under WATCHDOG (pong updates last_ok)
 WS_PING_S = min(float(os.getenv("WEBCTL_WS_PING_INTERVAL", "0.8")),
@@ -355,6 +360,7 @@ class Client:
         self.last_ok = 0.0
         self.contacted_once = False
         self.tripped = False
+        self.nav_lost = False
         self.trips = 0
         self.publishes = 0
         self.state = "starting"
@@ -378,6 +384,7 @@ class Client:
             self.last_ok = time.monotonic()
             self.contacted_once = True
             self.tripped = False
+            self.nav_lost = False
             self.state = "estop" if estop else "driven"
         if estop and self.navd:
             # latched e-stop must ALSO kill autonomy: a Nav2 goal that is
@@ -389,6 +396,7 @@ class Client:
             self.last_ok = time.monotonic()
             self.contacted_once = True
             self.tripped = False
+            self.nav_lost = False
 
     def effective(self):
         with self.lock:
@@ -401,9 +409,13 @@ class Client:
                 self.trips += 1
                 self.tripped = True
                 log.warning("watchdog TRIPPED (no contact %.2fs) -> zero", ok_age)
-                if self.navd:
-                    # link down means robot stopped — autonomy included
-                    self.navd.halt("watchdog")
+            if self.navd and ok_age > NAV_LINK_LOST and not self.nav_lost:
+                # v3.4: a SINGLE contact blip only zeroes teleop velocity;
+                # sustained loss (> NAV_LINK_LOST) tears autonomy down:
+                # link down means robot stopped — nav stack halted too.
+                self.nav_lost = True
+                log.warning("nav link lost %.1fs -> halting autonomy", ok_age)
+                self.navd.halt("nav link lost")
             self.state = "watchdog"
             return 0.0, 0.0
         return vx, wz

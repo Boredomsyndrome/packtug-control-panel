@@ -189,3 +189,11 @@ button { font-family: inherit; }
 .navroute { display: flex; flex-wrap: wrap; gap: 5px; }
 .wpchip { background: #0e3a4f; border: 1px solid var(--accent); color: #bfe7ff;
   border-radius: 999px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
+
+/* v3.4: camera pane removed — LiDAR is the main sensor view */
+.lidar.big { flex: 1 1 auto; height: auto; min-height: 320px; }
+.wpslotrow { gap: 8px; }
+.wpslotrow .navbtn.save { flex: 1; }
+.wpreadout { display: flex; gap: 16px; flex-wrap: wrap;
+  font: 11px ui-monospace, Menlo, monospace; color: var(--dim); }
+.wpreadout b { color: var(--text); }

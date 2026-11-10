@@ -42,7 +42,6 @@ export default function App() {
   const [lin, setLin] = useState(0.3)           // m/s applied while forward/back held
   const [rot, setRot] = useState(0.5)           // rad/s applied while turning held
   const [estopLatch, setEstopLatch] = useState(false)
-  const [camKey, setCamKey] = useState(0)
 
   const keysRef = useRef({ fwd: false, back: false, left: false, right: false })
   const movingRef = useRef(false)
@@ -179,7 +178,6 @@ export default function App() {
       post(`/api/robot/${encodeURIComponent(sel)}/stop`, {})  // stop the old one
     }
     setSel(id)
-    setCamKey((k) => k + 1)
   }
 
   const battV = status?.battery_v
@@ -229,19 +227,7 @@ export default function App() {
 
       <main className="grid">
         <div className="leftcol">
-        <section className="video">
-          {!sel ? (
-            <div className="camfail">
-              <p>No robot selected.</p>
-              <p className="dim">Register more robots by adding entries to
-                {' '}WEBCTL_ROBOTS on the server — the fleet scales with it.</p>
-            </div>
-          ) : (
-            <WsCam key={`${sel}-${camKey}`} robotId={sel} status={status} />
-          )}
-        </section>
-
-        <section className="lidar">
+        <section className="lidar big">
           {sel && <ScanView key={sel} robotId={sel} status={status} />}
         </section>
         </div>
@@ -313,82 +299,11 @@ export default function App() {
             {status.id} · applied {status.applied.vx.toFixed(2)} m/s {status.applied.wz.toFixed(2)} rad/s ·
             link state {status.applied.vx !== 0 || status.applied.wz !== 0 ? 'driving' : 'idle'} ·
             watchdog trips {status.watchdog_trips} · seq {status.seq} ·
-            cam {status.camera ? 'live' : 'off'} ·
             lidar {status.scan ? 'live' : 'off'} ·
             clamps ±{maxLin} m/s ±{maxRot} rad/s
           </span>
         ) : <span>connecting…</span>}
       </footer>
-    </div>
-  )
-}
-
-function WsCam({ robotId, status }) {
-  // Primary path: /ws/cam/<id> binary frames (8-byte float64 server ts +
-  // JPEG). If no WS server (WSGI-only fallback) we degrade to the legacy
-  // /cam/<id> HTTP MJPEG relay, then to an error card.
-  const imgRef = useRef(null)
-  const [mode, setMode] = useState('ws')     // ws -> mjpeg -> down
-  const [fps, setFps] = useState(0)
-  const [lat, setLat] = useState(null)
-
-  useEffect(() => {
-    if (mode !== 'ws') return undefined
-    let ws = null, frames = 0, lastAge = null, closed = false
-    try {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      ws = new WebSocket(`${proto}://${location.host}/ws/cam/${encodeURIComponent(robotId)}`)
-    } catch { setMode('mjpeg'); return undefined }
-    ws.binaryType = 'arraybuffer'
-    ws.onmessage = (e) => {
-      const buf = e.data
-      if (!(buf instanceof ArrayBuffer) || buf.byteLength < 12) return
-      frames += 1
-      const dv = new DataView(buf)
-      lastAge = Date.now() - dv.getFloat64(0, true) * 1000
-      const blob = new Blob([buf.slice(8)], { type: 'image/jpeg' })
-      const next = URL.createObjectURL(blob)
-      const img = imgRef.current
-      if (img) {
-        const prev = img.src
-        img.src = next
-        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
-      } else {
-        URL.revokeObjectURL(next)
-      }
-    }
-    ws.onerror = () => { /* onclose decides fallback */ }
-    ws.onclose = () => { closed = true; setMode((m) => (m === 'ws' ? 'mjpeg' : m)) }
-    const iv = setInterval(() => { setFps(frames); frames = 0; setLat(lastAge) }, 1000)
-    return () => { clearInterval(iv); if (!closed) { try { ws && ws.close() } catch {} } }
-  }, [robotId, mode])
-
-  if (mode === 'down') {
-    return (
-      <div className="camfail">
-        <p>Camera stream unavailable for {robotId}.</p>
-        <p className="dim">Robot client camera state: {String(status?.camera)} ·{' '}
-          robot-side ok: {String(status?.robot_cam_ok)}</p>
-        {status && <p className="dim hintsmall">{sensorHint(status, 'image')}</p>}
-        <button onClick={() => setMode('ws')}>Retry stream</button>
-      </div>
-    )
-  }
-  if (mode === 'mjpeg') {
-    return (
-      <div className="wsview">
-        <img src={`/cam/${encodeURIComponent(robotId)}`} alt={`${robotId} camera`}
-             onError={() => setMode('down')} />
-        <span className="camtag">http mjpeg fallback</span>
-      </div>
-    )
-  }
-  return (
-    <div className="wsview">
-      <img ref={imgRef} alt={`${robotId} camera`} />
-      <span className="camtag">
-        ◉ ws {fps} fps{lat != null ? ` · ${Math.max(0, Math.round(lat))} ms` : ' · …'}
-      </span>
     </div>
   )
 }
@@ -399,6 +314,8 @@ function ScanView({ robotId, status }) {
   // counterclockwise, 0.0 range = no return (left as a gap).
   const canvasRef = useRef(null)
   const scanRef = useRef(null)
+  const navRef = useRef(null)      // GET /nav snapshot — overlay of saved points
+  const [navTick, setNavTick] = useState(0)
   const [meta, setMeta] = useState({ points: 0, age: null, fresh: false, err: false })
 
   useEffect(() => {
@@ -417,6 +334,25 @@ function ScanView({ robotId, status }) {
     }
     tick()
     const id = setInterval(tick, 300)
+    return () => { stop = true; clearInterval(id) }
+  }, [robotId])
+
+  // Saved waypoints live in the MAP frame. When SLAM/Nav2 reports a pose we
+  // transform them into the robot frame and paint them on the lidar sweep —
+  // so 'where is P2 from here' is readable at a glance, even mid-mapping.
+  useEffect(() => {
+    let stop = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/robot/${encodeURIComponent(robotId)}/nav`)
+        const d = await res.json()
+        if (stop) return
+        navRef.current = d.ok ? d : null
+        setNavTick((n) => n + 1)
+      } catch { /* hub blip: keep the last snapshot */ }
+    }
+    tick()
+    const id = setInterval(tick, 1000)
     return () => { stop = true; clearInterval(id) }
   }, [robotId])
 
@@ -467,11 +403,28 @@ function ScanView({ robotId, status }) {
         g.beginPath(); g.moveTo(cx, cy - 7); g.lineTo(cx - 4.5, cy + 4)
         g.lineTo(cx + 4.5, cy + 4); g.closePath(); g.fill()
       }
+      const nv = navRef.current
+      if (scan && nv && Array.isArray(nv.nav?.pose)) {
+        const [p0, p1, ph] = nv.nav.pose
+        const co = Math.cos(ph || 0), si = Math.sin(ph || 0)
+        for (const [n, w] of Object.entries(nv.waypoints || {})) {
+          const dx = w.x - p0, dy = w.y - p1
+          const fwd = dx * co + dy * si        // ahead of the robot
+          const lft = -dx * si + dy * co       // to its left
+          if (fwd * fwd + lft * lft > rmax * rmax) continue
+          const sx = cx - lft * scale, sy = cy - fwd * scale
+          g.beginPath(); g.arc(sx, sy, 4, 0, 2 * Math.PI)
+          g.fillStyle = '#4cc2ff'; g.fill()
+          g.strokeStyle = '#0b0e14'; g.lineWidth = 1.5; g.stroke()
+          g.fillStyle = '#cfe3ff'; g.font = '11px ui-monospace, Menlo, monospace'
+          g.fillText(n, sx + 7, sy - 5)
+        }
+      }
     }
     draw()
     window.addEventListener('resize', draw)
     return () => window.removeEventListener('resize', draw)
-  }, [meta])
+  }, [meta, navTick])
 
   const ageTxt = meta.age == null ? '—' : `${Math.round(meta.age * 1000)} ms`
   return (
@@ -494,13 +447,13 @@ function ScanView({ robotId, status }) {
 // one validated POST action. Nothing here moves the robot except START ROUTE
 // (server-side the /cmd route also gets a 409 so teleop can't fight Nav2).
 const NAV_LABEL = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', route: 'ROUTE ▶' }
+const SLOT = ['p1', 'p2', 'p3']   // the web UI's fixed point slots
 
 function NavPanel({ robotId, status, connected }) {
   const [data, setData] = useState(null)   // GET /nav body
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [mapName, setMapName] = useState('room1')
-  const [wpName, setWpName] = useState('')
   const [showMap, setShowMap] = useState('')
   const [route, setRoute] = useState([])
 
@@ -596,17 +549,20 @@ function NavPanel({ robotId, status, connected }) {
                 title="start Nav2 localization on the selected map"
                 onClick={() => act({ action: 'nav_on', map: showMap || maps[0].name })}>🎯 nav</button>
       </div>
-      <div className="row">
-        <input value={wpName} maxLength={32} placeholder="point name (auto if blank)"
-               disabled={!live || !navActive}
-               onChange={(e) => setWpName(e.target.value.replace(/[^A-Za-z0-9_-]/g, ''))} />
-        <button className="navbtn save" disabled={!live || !navActive}
-                title="store the robot's current pose in the map"
-                onClick={async () => {
-                  const n = wpName.trim()
-                  await act({ action: 'record', ...(n ? { name: n } : {}) })
-                  setWpName('')
-                }}>📍 save point here</button>
+      <div className="row wpslotrow">
+        {SLOT.map((n) => (
+          <button key={n} className="navbtn save" disabled={!live || !navActive}
+                  title={`store the robot's current pose as ${n}`}
+                  onClick={() => act({ action: 'record', name: n })}>📍 {n.toUpperCase()}</button>
+        ))}
+      </div>
+      <div className="wpreadout">
+        {SLOT.map((n) => {
+          const w = wps[n]
+          return <span key={n}><b>{n.toUpperCase()}</b>: {w
+            ? `${w.x.toFixed(2)}, ${w.y.toFixed(2)} m · ${(w.yaw * 57.2958).toFixed(0)}°`
+            : '—'}</span>
+        })}
       </div>
 
       <div className="navwps">
@@ -656,8 +612,8 @@ function NavPanel({ robotId, status, connected }) {
           <button className="minibtn" onClick={() => setRoute([])}>clear</button>
         )}
       </div>
-      <p className="hint">🗺 teleop freely while SLAM builds the map → 💾 saves it → 🎯
-        localizes → 📍 saves points → queue points → START ROUTE. Nothing drives
+      <p className="hint">🗺 teleop while SLAM builds the map → 💾 save → 🎯 localize → park anywhere,
+        hit 📍 P1/P2/P3 to stamp that spot → queue points → START ROUTE. Nothing drives
         until you press it; E-STOP and the link watchdog always win.</p>
     </>
   )

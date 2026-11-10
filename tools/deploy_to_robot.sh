@@ -28,6 +28,7 @@ done
 # v3.3 autonomy: opt-in flag (docs/NAV.md). navd is INERT without it and
 # only ever launches the vendor stack on explicit browser actions — never
 # at boot. Adding the line itself moves nothing.
+scp -q "$REPO/deploy/ekf_navctl.yaml" "$ROBOT:robotctl/ekf_navctl.yaml" 2>/dev/null || true
 ssh "$ROBOT" 'grep -q "^WEBCTL_NAV=" ~/robotctl/robotctl.env 2>/dev/null || { echo "WEBCTL_NAV=1" >> ~/robotctl/robotctl.env; echo "enabled WEBCTL_NAV=1 in robotctl.env"; }'
 # v3.4: L2TP-over-WiFi jitter delivers ~2.6 s contact gaps on this network —
 # the 2.5 s watchdog fired ~1x/min and halted mapping. 5 s absorbs the jitter

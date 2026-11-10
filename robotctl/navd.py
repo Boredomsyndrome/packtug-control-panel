@@ -125,10 +125,10 @@ class NavDaemon:
 
     def _do_action(self, action, m):
         if action == "map_on":
-            self._navctl(["map-on"], ok_mode="mapping")
+            self._navctl(["map-on"], ok_mode="mapping", timeout=180)
         elif action == "map_save":
             name = self._safe(m.get("name"), "room1")
-            if self._navctl(["map-save", name], ok_mode=None):
+            if self._navctl(["map-save", name], ok_mode=None, timeout=120):
                 self._upload_map(name)
         elif action == "map_off":
             self._navctl(["stop"], ok_mode="off")
@@ -138,7 +138,7 @@ class NavDaemon:
                 with self.lock:
                     self.error = "nav_on: map name required"
                 return
-            if self._navctl(["stack-on", name], ok_mode="localizing"):
+            if self._navctl(["stack-on", name], ok_mode="localizing", timeout=180):
                 with self.lock:
                     self.map = name
                 point = m.get("align_pose")

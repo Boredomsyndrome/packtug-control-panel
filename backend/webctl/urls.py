@@ -1,4 +1,5 @@
 from django.urls import path, re_path
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView
 from rest_framework.routers import SimpleRouter
 
 from robot import robotctl, views
@@ -22,6 +23,10 @@ urlpatterns = [
     # v3.3 saved-map artifacts for the browser (browser plane: network trust)
     path("api/robot/<str:robot_id>/maps/<str:name>.<str:ext>",
          views.map_file_view, name="map-file"),
+    # API docs (LAN/VPN network-trusted like everything browser-facing)
+    path("api/schema", SpectacularAPIView.as_view(), name="schema"),
+    path("api/redoc", SpectacularRedocView.as_view(url_name="schema"),
+         name="redoc"),
     # SPA catch-all (assets themselves are served by WhiteNoise from frontend/dist)
     re_path(r"^(?!api/|cam/|robotctl/).*$", views.index_view, name="index"),
 ]

@@ -42,6 +42,7 @@ MAX_FRAME = int(os.getenv("MAX_FRAME", str(2 * 1024 * 1024)))  # cam JPEG cap
 INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
+    "drf_spectacular",
     "robot",
 ]
 
@@ -52,6 +53,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # no django.contrib.auth in INSTALLED_APPS — avoid DRF importing AnonymousUser
     "UNAUTHENTICATED_USER": None,
 }
@@ -68,7 +70,9 @@ TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
         "DIRS": [PROJECT_ROOT / "frontend" / "dist"],
-        "APP_DIRS": False,
+        # APP_DIRS True: drf_spectacular's redoc template ships in its own
+        # app dir; without this /api/redoc 500s (TemplateDoesNotExist)
+        "APP_DIRS": True,
         "OPTIONS": {"context_processors": []},
     },
 ]
@@ -87,6 +91,17 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Serve the built React app (frontend/dist) directly: /assets/* etc.
 WHITENOISE_ROOT = PROJECT_ROOT / "frontend" / "dist"
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "WHEELTEC WebCtl API",
+    "DESCRIPTION": "Hub API: robot fleet, velocity/estop, LiDAR frames and "
+                   "the nav remote (docs/NAV.md). Browser plane is "
+                   "network-trusted (LAN/VPN); robot plane keeps per-robot "
+                   "tokens.",
+    "VERSION": "3.4.2",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SORT_OPERATIONS": False,
+}
 
 # Browser password REMOVED 2026-11-04 (v3.2): access control is the network
 # (VPN/LAN trust). Robot plane still authenticates per-robot tokens in

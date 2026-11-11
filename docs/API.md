@@ -207,3 +207,19 @@ and launches NOTHING until a browser action arrives.
   drops any undelivered `nav_cmd` and pending record attribution.
 - Safety: estop, link watchdog and client exit paths all `halt` Nav2
   (cancel goal + stop stack) before anything else.
+
+
+## v3.5 nav reliability (2026-11-11: corridor incident)
+- Map upload body: `{name, enc:"gz", pgm_gz_b64, yaml}` (zlib; legacy
+  `pgm_b64` still accepted, hub-side inflate capped at MAX_PGM).
+  Robot retries x3 (2s/4s backoff) and RE-uploads every unsynced local
+  map on client start (`_heal_uploads`).
+- `GET /api/robot/<id>/nav` `maps[]` merges hub-saved (`uploaded:true`)
+  with robot-local maps whose upload was lost (`uploaded:false`) —
+  `nav_on` works off the robot's own files either way.
+- `POST .../nav {"action":"nav_on","map":"<name>","waypoints":["<wp>"]?}`
+  — optional single-waypoint align hint arms AMCL there; without it AMCL
+  is armed at map origin. Initialpose is RE-published (transient_local,
+  1.2 s cadence, ≤15 s) until `/amcl_pose` confirms — nav2's own pattern;
+  one-shot publishes were lost during AMCL startup (volatile QoS).
+- `delete_map` now also deletes the robot-side copy (`navd delete_map`).

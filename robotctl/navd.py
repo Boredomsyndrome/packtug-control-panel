@@ -38,7 +38,7 @@ MAPS_DIR = os.path.join(NAV_HOME, "maps")
 NAVCTL = os.path.join(NAV_HOME, "navctl.sh")
 BASE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 ACTIONS = {"map_on", "map_off", "map_save", "nav_on", "route",
-           "nav_cancel", "nav_off", "record", "align"}
+           "nav_cancel", "nav_off", "record", "align", "delete_map"}
 
 
 
@@ -78,6 +78,10 @@ class NavDaemon:
         self._buffer = None                 # tf2 Buffer (lazy)
         self._pose_pub = None               # /initialpose publisher (lazy)
         self._map_timer = 0.0
+        self._uploaded = set()              # maps confirmed present on the hub
+        self._ip_stop = None                # Event of the running initialpose loop
+        self._amcl_rx = 0.0                 # monotonic ts of last /amcl_pose seen
+        self._amcl_sub = None               # /amcl_pose listener (created once)
         os.makedirs(MAPS_DIR, exist_ok=True)
         threading.Thread(target=self._resync_mode, daemon=True,
                          name="nav-resync").start()   # non-blocking: it shells out
@@ -114,6 +118,7 @@ class NavDaemon:
                     "error": self.error, "record": self.record,
                     "driving": self.driving}
         snap["pose"], snap["frame"] = self._pose_sample()
+        snap["local_maps"] = self._local_maps()
         return snap
 
     # --------------------------------------------------------------- worker
@@ -149,13 +154,17 @@ class NavDaemon:
             if self._navctl(["stack-on", name], ok_mode="localizing", timeout=180):
                 with self.lock:
                     self.map = name
-                point = m.get("align_pose")
-                if point:
-                    self._publish_initial_pose(point)
+                # AMCL starts assuming the robot sits at map origin — which
+                # is only true if it never moved since saving. Hand it a
+                # pose anyway (default 0,0,0) and RE-publish until amcl_pose
+                # confirms: one-shot initialpose is lost during AMCL's
+                # startup window (nav2_system_tests does the same loop).
+                self._republish_initial_pose(m.get("align_pose") or
+                                             [0.0, 0.0, 0.0])
         elif action == "align":
             point = m.get("align_pose")
             if point:
-                self._publish_initial_pose(point)
+                self._republish_initial_pose(point)
         elif action == "route":
             self._start_route(m.get("poses") or [])
         elif action == "nav_cancel":
@@ -164,6 +173,16 @@ class NavDaemon:
             self._do_halt("nav_off")
         elif action == "record":
             self._do_record(m)
+        elif action == "delete_map":
+            name = self._safe(m.get("map"), "")
+            if name:
+                for ext in (".pgm", ".yaml"):
+                    try:
+                        os.remove(os.path.join(MAPS_DIR, name + ext))
+                    except OSError:
+                        pass
+                self._uploaded.discard(name)
+                log.info("nav: deleted local map '%s'", name)
 
     # ------------------------------------------------------- action internals
     def _start_route(self, poses):
@@ -359,33 +378,94 @@ class NavDaemon:
         ps.pose.orientation.w = math.cos(yaw / 2.0)
         return ps
 
-    def _publish_initial_pose(self, point):
-        """AMCL initial pose (align button / nav_on align)."""
+    def _republish_initial_pose(self, point):
+        """AMCL initialpose, nav2's own retry pattern (web-grounded 2026-11-11:
+        nav2 PR #774 + nav_to_pose_tester_node.py — AMCL's /initialpose
+        subscriber is default/volatile QoS, so publishing while AMCL is still
+        activating silently loses it; the official tester re-publishes until
+        amcl_pose comes back). transient_local pub adds a second safety net.
+        """
         if self.dry:
-            log.info("nav(dry): initialpose %s", point)
+            log.info("nav(dry): initialpose (republish) %s", point)
             return
         node = self._node()
         if node is None:
             return
         try:
             from geometry_msgs.msg import PoseWithCovarianceStamped
-            if self._pose_pub is None:
-                self._pose_pub = node.create_publisher(
-                    PoseWithCovarianceStamped, "/initialpose", 2)
-            x, y, yaw = float(point[0]), float(point[1]), float(point[2])
-            msg = PoseWithCovarianceStamped()
-            msg.header.frame_id = "map"
-            msg.header.stamp = node.get_clock().now().to_msg()
-            msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
-            msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
-            msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
-            cov = msg.pose.covariance
-            cov[0] = cov[7] = 0.25          # 0.5 m sigma x,y
-            cov[35] = 0.1                    # ~0.3 rad sigma yaw
-            self._pose_pub.publish(msg)
-            log.info("nav: initialpose published (%.2f, %.2f)", x, y)
         except Exception as e:
-            log.warning("initialpose failed: %s", e)
+            log.warning("initialpose import failed: %s", e)
+            return
+        if self._ip_stop is not None:
+            self._ip_stop.set()               # cancel a previous align loop
+        stop = threading.Event()
+        self._ip_stop = stop
+        threading.Thread(target=self._initialpose_loop,
+                         args=(node, [float(v) for v in point[:3]], stop,
+                               PoseWithCovarianceStamped),
+                         daemon=True, name="nav-initialpose").start()
+
+    def _amcl_pose_seen(self, _msg=None):
+        self._amcl_rx = time.monotonic()
+
+    def _initialpose_loop(self, node, pt, stop, Msg):
+        # Plain default-QoS publishers, like nav2's own tester node —
+        # rclpy QoS enums are a known import landmine on this robot
+        # (shim check "QoSProfile built with depth=1 and NO durability/
+        # reliability enums"); the republish loop alone covers the race.
+        try:
+            if self._pose_pub is None:
+                self._pose_pub = node.create_publisher(Msg, "/initialpose", 10)
+            if self._amcl_sub is None:
+                self._amcl_sub = node.create_subscription(
+                    Msg, "/amcl_pose", self._amcl_pose_seen, 10)
+        except Exception as e:
+            log.warning("initialpose setup failed: %s", e)
+            return
+        msg = Msg()
+        msg.header.frame_id = "map"
+        x, y, yaw = pt[0], pt[1], pt[2]
+        msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        cov = msg.pose.covariance
+        cov[0] = cov[7] = 0.25               # 0.5 m sigma x,y
+        cov[35] = 0.1                        # ~0.3 rad sigma yaw
+        t0 = time.monotonic()
+        while not stop.wait(1.2) and time.monotonic() - t0 < 15.0:
+            msg.header.stamp = node.get_clock().now().to_msg()
+            try:
+                self._pose_pub.publish(msg)
+            except Exception:
+                pass
+            if self._amcl_rx >= t0:
+                log.info("nav: initialpose accepted (amcl_pose seen)")
+                return
+        log.warning("initialpose: no amcl_pose confirmation within 15 s — "
+                    "press ⌖ on the waypoint the robot physically sits on")
+
+    def _local_maps(self):
+        """Names of map artifacts saved on THIS robot (navctl map-save)."""
+        try:
+            names = sorted({f.rsplit(".", 1)[0]
+                            for f in os.listdir(MAPS_DIR)
+                            if f.endswith((".pgm", ".yaml"))})
+        except OSError:
+            return []
+        return names[:12]
+
+    def _heal_uploads(self):
+        """Re-send every local map the hub may never have received: a flaky
+        link drops uploads silently, and an empty hub list makes the 🎯 nav
+        button permanently disabled (corridor incident, 2026-11-11)."""
+        if self.dry or self.post is None:
+            return
+        time.sleep(3.0)                       # let the client session warm up
+        for name in self._local_maps():
+            if name in self._uploaded:
+                continue
+            log.info("nav: healing map upload '%s'", name)
+            self._upload_map(name)
 
     # ------------------------------------------------------------------ pose
     # v3.4.4 evidence: on this Jetson, tf2_ros PYTHON listeners (both a
@@ -542,6 +622,10 @@ class NavDaemon:
                 log.info("nav resync: adopting mode=%s from robot", self.mode)
         except Exception as e:
             log.debug("nav resync failed: %s", e)
+        try:
+            self._heal_uploads()
+        except Exception:
+            log.debug("map heal failed", exc_info=True)
 
     def _nav_running(self):
         if self.dry:
@@ -556,6 +640,7 @@ class NavDaemon:
     # ------------------------------------------------------------ map upload
     def _upload_map(self, name, dry=False):
         if dry:
+            self._uploaded.add(name)
             return True
         try:
             pgm = open(os.path.join(MAPS_DIR, f"{name}.pgm"), "rb").read()
@@ -568,27 +653,44 @@ class NavDaemon:
             with self.lock:
                 self.error = "map upload: pgm > 8 MB"
             return False
-        body = json.dumps({"name": name,
-                           "pgm_b64": base64.b64encode(pgm).decode(),
-                           "yaml": yml.decode("utf-8", "replace")}).encode()
         if self.post is None:
             with self.lock:
                 self.error = "map upload: no http post available"
             return False
-        try:
-            code, resp = self.post(
-                "POST", f"/robotctl/{self.robot_id}/map", body=body,
-                headers={"Content-Type": "application/json"}, timeout=30.0)
-        except Exception as e:
+        # gzip first (web-grounded choice: PGMs are run-length friendly, a
+        # multi-MB map collapses to a few hundred KB — one POST surviving
+        # the flaky warehouse link beats three fat ones), then retry x3.
+        import zlib
+        gz = zlib.compress(pgm, 6)
+        body = json.dumps({"name": name, "enc": "gz",
+                           "pgm_gz_b64": base64.b64encode(gz).decode(),
+                           "yaml": yml.decode("utf-8", "replace")}).encode()
+        delay = 2.0
+        for attempt in (1, 2, 3):
+            try:
+                code, resp = self.post(
+                    "POST", f"/robotctl/{self.robot_id}/map", body=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=30.0)
+            except Exception as e:
+                code, resp = -1, repr(e)
+            if code == 200:
+                self._uploaded.add(name)
+                with self.lock:
+                    if self.error and self.error.startswith("map upload"):
+                        self.error = None
+                log.info("nav: map '%s' uploaded (%d B pgm -> %d B body)",
+                         name, len(pgm), len(body))
+                return True
+            log.warning("map upload attempt %d/3 for '%s': http %s %r",
+                        attempt, name, code, str(resp)[:160])
             with self.lock:
-                self.error = f"map upload failed: {e}"
-            return False
-        if code != 200:
-            with self.lock:
-                self.error = f"map upload http {code}: {resp[:160]!r}"
-            return False
-        log.info("nav: map '%s' uploaded (%d B pgm)", name, len(pgm))
-        return True
+                self.error = (f"map upload '{name}' x{attempt}: "
+                              f"http {code}: {str(resp)[:160]!r}")
+            if attempt < 3:
+                time.sleep(delay)
+                delay *= 2
+        return False
 
     # ---------------------------------------------------------------- utils
     @staticmethod

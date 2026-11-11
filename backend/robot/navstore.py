@@ -135,6 +135,20 @@ def save_map(robot_id: str, name: str, pgm: bytes, yaml: str) -> None:
         os.replace(tmp, path)
 
 
+def merge_maps(uploaded: list, local_names) -> list:
+    """Hub list = uploaded maps + robot-local maps whose upload never made
+    it (uploaded=False). nav_on reads the ROBOT's own files, so the UI must
+    still offer these — otherwise one lost upload = unreachable nav plane
+    (corridor incident, 2026-11-11)."""
+    out = [dict(m, uploaded=True) for m in uploaded]
+    have = {m["name"] for m in out}
+    for nm in local_names or []:
+        if isinstance(nm, str) and nm not in have:
+            out.append({"name": nm, "bytes": 0, "saved": 0,
+                        "yaml": False, "uploaded": False})
+    return out
+
+
 def delete_map(robot_id: str, name: str) -> bool:
     vname = valid_name(name)
     if vname is None:

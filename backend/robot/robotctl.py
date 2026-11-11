@@ -12,6 +12,7 @@ whatever `cmd` returns can never receive a stale or out-of-range velocity.
 """
 import base64
 import json
+import zlib
 
 from django.conf import settings
 from django.http import JsonResponse
@@ -131,10 +132,18 @@ def map_upload(request, robot_id):
     from robot import navstore
     try:
         import base64 as _b64
-        pgm = _b64.b64decode(data.get("pgm_b64") or "", validate=True)
+        if data.get("enc") == "gz":      # v3.5: zlib'd pgm (flaky-link safe)
+            blob = _b64.b64decode(data.get("pgm_gz_b64") or "", validate=True)
+            dobj = zlib.decompressobj()
+            pgm = dobj.decompress(blob, navstore.MAX_PGM + 1)
+            pgm += dobj.flush()
+            if len(pgm) > navstore.MAX_PGM:
+                raise ValueError(f"decompressed pgm exceeds {navstore.MAX_PGM} B")
+        else:
+            pgm = _b64.b64decode(data.get("pgm_b64") or "", validate=True)
         navstore.save_map(robot_id, str(data.get("name") or ""), pgm,
                           str(data.get("yaml") or ""))
-    except (ValueError, OSError, TypeError) as e:
+    except (ValueError, OSError, TypeError, zlib.error) as e:
         return _err(400, f"map rejected: {e}")
     return JsonResponse({"ok": True, "maps": navstore.list_maps(robot_id)})
 

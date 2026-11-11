@@ -120,11 +120,14 @@ class RobotViewSet(ViewSet):
             return err
         assert hub is not None and pk is not None   # guaranteed by _hub_or_404
         if request.method.lower() == "get":
+            maps = navstore.merge_maps(
+                navstore.list_maps(pk),
+                (hub.nav_state or {}).get("local_maps"))
             return Response({"ok": True,
                              "mode": hub.nav_mode,
                              "nav": hub.nav_state,
                              "waypoints": navstore.list_waypoints(pk),
-                             "maps": navstore.list_maps(pk)})
+                             "maps": maps})
         if not registry.owns:
             return Response({"ok": False, "error": NOT_OWNER},
                             status=http_status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -169,6 +172,7 @@ class RobotViewSet(ViewSet):
         elif a in ("delete_map", "delete_waypoint"):
             if a == "delete_map":
                 gone = navstore.delete_map(pk, map_name)
+                hub.push_nav("delete_map", map=map_name)  # robot copy too
             else:
                 gone = navstore.delete_waypoint(pk, names[0])
             if not gone:
@@ -178,7 +182,15 @@ class RobotViewSet(ViewSet):
         elif a == "map_save":
             rid = hub.push_nav("map_save", name=name or "room1")
         elif a == "nav_on":
-            rid = hub.push_nav("nav_on", map=map_name)
+            extra = {}
+            if names:                      # optional align hint: start
+                wps = navstore.list_waypoints(pk)      # localization armed
+                wp = wps.get(names[0])                 # at this waypoint
+                if wp is None:
+                    return Response({"ok": False, "error": "unknown waypoint"},
+                                    status=http_status.HTTP_400_BAD_REQUEST)
+                extra["align_pose"] = [wp["x"], wp["y"], wp["yaw"]]
+            rid = hub.push_nav("nav_on", map=map_name, **extra)
         else:                                  # map_on|map_off|nav_cancel|nav_off
             rid = hub.push_nav(a)
         if rid is None and a not in ("delete_map", "delete_waypoint"):

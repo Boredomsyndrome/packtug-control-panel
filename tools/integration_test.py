@@ -24,6 +24,7 @@ then shuts everything down. Safe to run repeatedly.
 
 Usage:  .venv/bin/python -u tools/integration_test.py
 """
+import atexit
 import base64
 import errno as _errno
 import fcntl
@@ -64,6 +65,18 @@ ENV = {
 }
 
 shutil.rmtree(os.path.join(ROOT, ".itest-nav"), ignore_errors=True)
+
+# v3.5: a robot-local map whose upload never reached the hub must still be
+# offered for 🎯 nav (nav_on reads the robot's OWN files). Seed one in the
+# dry client's maps dir; dry navd lists it, hub merges it as uploaded=False.
+_GHOST_DIR = os.path.expanduser("~/robotctl/maps")
+os.makedirs(_GHOST_DIR, exist_ok=True)
+_GHOST_PGM = os.path.join(_GHOST_DIR, "webctl-itest-ghost.pgm")
+open(_GHOST_PGM, "wb").write(b"P5\n1 1\n255\n\x00")
+open(os.path.join(_GHOST_DIR, "webctl-itest-ghost.yaml"), "w").write(
+    "image: webctl-itest-ghost.pgm\n")
+atexit.register(lambda: [os.remove(p) for p in (
+    _GHOST_PGM, _GHOST_PGM.replace(".pgm", ".yaml")) if os.path.exists(p)])
 procs = {}
 failures = []
 
@@ -503,9 +516,10 @@ try:
           str(wp))
 
     pgm = b"P5\n# itest\n8 8\n255\n" + bytes([254] * 64)
+    import zlib as _zl
     st, _, b = req(BASE + "/robotctl/alpha/map",
-                   {"name": "itestmap",
-                    "pgm_b64": base64.b64encode(pgm).decode(),
+                   {"name": "itestmap", "enc": "gz",
+                    "pgm_gz_b64": base64.b64encode(_zl.compress(pgm, 6)).decode(),
                     "yaml": "image: itestmap.pgm\nresolution: 0.05\n"
                             "origin: [-0.4, -0.4, 0.0]\n"},
                    headers=robot_auth("alpha"))
@@ -533,6 +547,11 @@ try:
     req(API + "/alpha/nav", {"action": "nav_on", "map": "itestmap"})
     check("mode goes localizing", wait_for(
         lambda: status("alpha").get("nav_mode") == "localizing", 8))
+    st, _, b = req(API + "/alpha/nav", {"action": "nav_on",
+                                        "map": "itestmap",
+                                        "waypoints": ["itest-wp"]})
+    check("nav_on with waypoint align hint accepted (v3.5)",
+          st == 200 and json.loads(b)["ok"], str(st))
 
     st, _, b = req(API + "/alpha/nav", {"action": "route", "waypoints": ["itest-wp"]})
     check("route accepted", st == 200 and json.loads(b)["ok"])
@@ -558,6 +577,11 @@ try:
     st, _, _ = req(API + "/alpha/nav", {"action": "delete_map", "map": "itestmap"})
     check("map delete + artifact gone", st == 200 and wait_for(
         lambda: req(BASE + "/api/robot/alpha/maps/itestmap.pgm")[0] == 404, 3))
+    check("robot-local map w/o hub copy still listed for nav (v3.5)",
+          wait_for(lambda: any(
+              x["name"] == "webctl-itest-ghost" and x.get("uploaded") is False
+              for x in json.loads(req(API + "/alpha/nav")[2].decode())["maps"]),
+              6))
 
     print("[12] offline detection")
     pg_signal("client-beta", signal.SIGTERM)

@@ -514,7 +514,9 @@ function NavPanel({ robotId, status, connected }) {
             <select value={showMap} onChange={(e) => setShowMap(e.target.value)}>
               {maps.map((m) => (
                 <option key={m.name} value={m.name}>
-                  {m.name} · {Math.round(m.bytes / 1024)} KB
+                  {m.name}{m.uploaded === false
+                    ? ' (robot only — no preview)'
+                    : ` · ${Math.round(m.bytes / 1024)} KB`}
                 </option>
               ))}
             </select>

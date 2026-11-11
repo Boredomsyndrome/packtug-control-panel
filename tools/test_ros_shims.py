@@ -342,11 +342,18 @@ s = nd.snapshot()
 check("navd dry: align accepted, still localizing, no error",
       s["mode"] == "localizing" and not s["error"], str(s["error"]))
 
+# v3.4.6 semantics (tests/test_halt_semantics.py matrix): SOFT halts keep
+# the stack — only explicit nav_off tears it down.
 nd.halt("shim-test")
-s = _wait_nav(nd, lambda s: s["mode"] == "off")
-check("navd: halt -> not driving, mode off, reason stamped",
-      not s["driving"] and s["mode"] == "off"
+s = _wait_nav(nd, lambda s: s["driving"] is False
+              and "shim-test" in (s["error"] or ""))
+check("navd: soft halt -> not driving, stack PRESERVED, reason stamped",
+      not s["driving"] and s["mode"] == "localizing"
       and "shim-test" in (s["error"] or ""), str(s["error"]))
+nd.halt("nav_off")
+s = _wait_nav(nd, lambda s: s["mode"] == "off")
+check("navd: hard halt (nav_off) -> mode off",
+      s["mode"] == "off", str(s["mode"]))
 
 # ------------------------------------------- 8. teleop gate while navd drives
 class PubSink:
@@ -386,6 +393,82 @@ check("client: teleop resumes at held velocity after release",
       str(c3.sink.sent[-3:]))
 client.running = False
 th.join(2)
+
+# ---------------------- 7c. v3.5: map upload reliability, heal, local maps
+import base64 as _b64, json as _json, os as _os, tempfile as _ttmp, zlib as _zlib
+
+_maps = _ttmp.mkdtemp(prefix="navd-maps-")
+navd.MAPS_DIR = _maps
+_pgm = b"P5\n2 2\n255\n" + bytes(range(4))
+open(_os.path.join(_maps, "corridor.pgm"), "wb").write(_pgm * 20)
+open(_os.path.join(_maps, "corridor.yaml"), "w").write("image: corridor.pgm\n")
+s = nd.snapshot()
+check("navd snapshot reports robot-local maps",
+      "corridor" in s["local_maps"], str(s.get("local_maps")))
+
+_calls = {"n": 0}
+_caught = []
+def _flaky_post(method, path, body=None, headers=None, timeout=None):
+    _calls["n"] += 1
+    _caught.append((method, path, body))
+    if _calls["n"] == 1:
+        return (-1, "timed out")            # simulate the dropped link
+    return (200, b'{"ok": true}')
+nd3 = navd.NavDaemon(sink=None, post=_flaky_post, dry=False,
+                     robot_id="shimbot")
+ok = nd3._upload_map("corridor")
+check("upload retry rides out one fake link failure",
+      ok and _calls["n"] == 2, f"ok={ok} calls={_calls['n']}")
+_d = _json.loads(_caught[-1][2])
+check("map upload body is gzip-encoded and byte-round-trips",
+      _d.get("enc") == "gz" and
+      _zlib.decompress(_b64.b64decode(_d["pgm_gz_b64"])) == _pgm * 20)
+check("successful upload marks map uploaded (heal won't resend)",
+      "corridor" in nd3._uploaded)
+nd3.handle({"rid": _time.time() + 1, "action": "delete_map",
+            "map": "corridor"})
+_deadline = _time.monotonic() + 3.0
+while _os.path.exists(_os.path.join(_maps, "corridor.pgm")) \
+        and _time.monotonic() < _deadline:
+    _time.sleep(0.1)
+check("delete_map action removes the robot-side map files",
+      not _os.path.exists(_os.path.join(_maps, "corridor.pgm")))
+
+# initialpose republish loop: stub node, verify republish-until-amcl_pose
+import threading as _th2
+class _Pub:
+    def __init__(self): self.msgs = []
+    def publish(self, m): self.msgs.append(m)
+class _Node:
+    def __init__(self): self.pub = _Pub(); self.subs = {}
+    def create_publisher(self, t, topic, qos): return self.pub
+    def create_subscription(self, t, topic, cb, qos):
+        self.subs[topic] = cb; return object()
+    def get_clock(self):
+        import types as _t
+        return _t.SimpleNamespace(now=lambda: _t.SimpleNamespace(
+            to_msg=lambda: _t.SimpleNamespace()))
+# shim already fakes geometry_msgs.msg (with Twist) — just add our msg type
+sys.modules["geometry_msgs.msg"].PoseWithCovarianceStamped = (
+    lambda: types.SimpleNamespace(
+        header=types.SimpleNamespace(),
+        pose=types.SimpleNamespace(
+            pose=types.SimpleNamespace(position=types.SimpleNamespace(),
+                                       orientation=types.SimpleNamespace()),
+            covariance=[0.0] * 36)))
+nd4 = navd.NavDaemon(sink=None, post=None, dry=False, robot_id="shimbot")
+nd4._own_node = _Node()
+nd4._republish_initial_pose([1.0, 2.0, 0.5])
+_time.sleep(1.5)
+check("initialpose republishes while AMCL is silent (nav2 pattern)",
+      len(nd4._own_node.pub.msgs) >= 1)
+nd4._own_node.subs["/amcl_pose"](None)      # AMCL acknowledges
+_time.sleep(2.6)                            # outlast any in-flight publish
+_n = len(nd4._own_node.pub.msgs)
+_time.sleep(2.6)                            # the loop must NOT keep firing
+check("republish stops once amcl_pose seen",
+      len(nd4._own_node.pub.msgs) == _n,
+      f"{_n} -> {len(nd4._own_node.pub.msgs)}")
 
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

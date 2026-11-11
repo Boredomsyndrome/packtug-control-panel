@@ -44,7 +44,7 @@ ensure_tf() {
   setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run tf2_ros static_transform_publisher \
       --x 0.157 --y 0 --z 0.257 --frame-id base_footprint --child-frame-id laser \
       --ros-args -r __node:=webctl_navctl_tf" >>/tmp/nav_tf.log 2>&1 </dev/null &
-  # odom_frame in the vendor mapper params is odom_combined, but the base node
+  # NOTE (verified 2026-11-09): the vendor mapper params set NO frame ids, so
   # publishes NO TF — we run robot_localization EKF ourselves (odometry-only:
   # the stock config wants /imu/data_raw which the base node never feeds on
   # this robot, and ships publish_tf:false). ~/robotctl/ekf_navctl.yaml =
@@ -58,7 +58,7 @@ case "$cmd" in
   map-on)
     ensure_tf
     if has_topic /map; then echo "mapping already up (/map live)"; exit 0; fi
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER" >/tmp/nav_map.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
     sleep 8
     if has_topic /map; then echo "mapping up"; else
       echo "FAILED: slam_toolbox did not publish /map — tail /tmp/nav_map.log"; exit 1; fi

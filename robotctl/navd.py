@@ -54,6 +54,7 @@ class NavDaemon:
         self.post = post                    # client._http bound method
         self.robot_id = robot_id
         self.dry = dry
+        self._pose_dbg = 0
         self.lock = threading.Lock()        # guards everything below
         self.mode = "off"
         self.map = ""
@@ -68,6 +69,10 @@ class NavDaemon:
                                         name="nav-worker")
         self._worker.start()
         self._client = None                 # ActionClient (lazy, real mode)
+        self._own_node = None               # navd-dedicated rclpy node
+        self._tf_proc = None                # tf2_echo stream (real mode)
+        self._tf_pose = None                # ((x, y, yaw), monotonic ts)
+        self._tf_open_fail = 0.0            # backoff after spawn failure
         self._goal = None
         self._buffer = None                 # tf2 Buffer (lazy)
         self._pose_pub = None               # /initialpose publisher (lazy)
@@ -287,7 +292,27 @@ class NavDaemon:
 
     # ---------------------------------------------------------- ROS plumbing
     def _node(self):
-        return getattr(self.sink, "node", None)
+        """navd's OWN rclpy node, spun by its own executor thread.
+
+        v3.4.4: this used to borrow the sink's node — but a
+        TransformListener attached there never saw map/odom TF in the
+        client process (probe: can_transform=0 even with 1s timeout,
+        while an identical standalone listener got pose instantly —
+        humble SingleThreadedExecutor shared with sink callbacks starves
+        TF delivery). Own node, own executor, no hitchhiking."""
+        if self.dry:
+            return None
+        if self._own_node is None:
+            import rclpy
+            import threading
+            from rclpy.executors import SingleThreadedExecutor
+            node = rclpy.create_node("webctl_navd")
+            ex = SingleThreadedExecutor()
+            ex.add_node(node)
+            threading.Thread(target=ex.spin, daemon=True,
+                             name="webctl-navd-spin").start()
+            self._own_node = node
+        return self._own_node
 
     def _action_client(self):
         if self._client is not None:
@@ -351,43 +376,74 @@ class NavDaemon:
         except Exception as e:
             log.warning("initialpose failed: %s", e)
 
-    def _tf_buffer(self):
-        if self._buffer is None:
-            import tf2_ros
-            self._buffer = tf2_ros.Buffer()
-            tf2_ros.TransformListener(self._buffer, self._node())
-        return self._buffer
+    # ------------------------------------------------------------------ pose
+    # v3.4.4 evidence: on this Jetson, tf2_ros PYTHON listeners (both a
+    # dedicated node AND a standalone probe process) receive the camera TF
+    # frames but NEVER slam/EKF map/odom frames whenever the client process
+    # is alive — rclcpp tooling (tf2_echo) sees everything. DDS/SHM quirk,
+    # root cause beyond our pay grade. So the pose rides a persistent
+    # rclcpp tf2_echo STREAM parsed into a cache; one process, zero-per-
+    # sample, self-healing.
+
+    def _tf_stream(self):
+        """Ensure the tf2_echo map->base_footprint stream is alive."""
+        if self._tf_proc is not None:
+            if self._tf_proc.poll() is None:
+                return
+            self._tf_proc = None  # died (TF tree went down) -> respawn
+        if time.monotonic() - self._tf_open_fail < 30.0:
+            return  # back off after a failed spawn; slam may not exist yet
+        ros = os.environ.get("WEBCTL_ROS_SETUP", "/opt/ros/humble/setup.bash")
+        try:
+            proc = subprocess.Popen(
+                ["bash", "-lc",
+                 f"source {ros} && exec ros2 run tf2_ros tf2_echo "
+                 "map base_footprint"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1, start_new_session=True)
+        except OSError as e:
+            self._tf_open_fail = time.monotonic()
+            log.warning("tf stream spawn failed: %s", e)
+            return
+        self._tf_proc = proc
+        threading.Thread(target=self._tf_reader, args=(proc,),
+                         daemon=True, name="webctl-navd-tf").start()
+
+    def _tf_reader(self, proc):
+        import re
+        trans = re.compile(r"- Translation: \[([^]]*)]")
+        quat = re.compile(r"- Rotation: in Quaternion \[([^]]*)]")
+        x = y = 0.0
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                m = trans.search(line)
+                if m:
+                    v = [float(s) for s in m.group(1).split(",")]
+                    x, y = v[0], v[1]
+                    continue
+                m = quat.search(line)
+                if m:
+                    qx, qy, qz, qw = (float(s) for s in m.group(1).split(","))
+                    yaw = math.atan2(2.0 * (qw * qz + qx * qy),
+                                     1.0 - 2.0 * (qy * qy + qz * qz))
+                    self._tf_pose = ((x, y, yaw), time.monotonic())
+        except (ValueError, OSError):
+            pass
 
     def _pose_sample(self):
-        """(x, y, yaw) + frame string from TF: prefer map->base_footprint,
-        fall back to odom_combined->base_footprint (flagged in frame)."""
+        """(x, y, yaw) + frame from the TF stream cache (map frame)."""
         if self.dry:
             t = time.monotonic() * 0.1
             return ((0.5 * math.cos(t), 0.5 * math.sin(t), t % 6.2831853),
                     "map") if self.mode != "off" else (None, None)
-        node = self._node()
-        if node is None:
-            return None, None
-        try:
-            import rclpy
-            buf = self._tf_buffer()
-            tnow = rclpy.time.Time()
-            for parent, frame in (("map", "map"), ("odom_combined", "odom_combined")):
-                try:
-                    if not buf.can_transform(parent, "base_footprint", tnow,
-                                             timeout_sec=0):
-                        continue
-                    tfr = buf.lookup_transform(parent, "base_footprint", tnow)
-                    t, q = tfr.transform.translation, tfr.transform.rotation
-                    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                                     1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-                    return (t.x, t.y, yaw), frame
-                except Exception:
-                    continue
-            return None, None
-        except Exception as e:
-            log.debug("pose sample failed: %s", e)
-            return None, None
+        self._tf_stream()
+        cached = self._tf_pose
+        if cached and time.monotonic() - cached[1] < 4.0:
+            return cached[0], "map"
+        return None, None
 
     # ------------------------------------------------------- navctl wrapper
     def _navctl(self, args, ok_mode=None, timeout=60):

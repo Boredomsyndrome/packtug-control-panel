@@ -31,16 +31,20 @@
  *   POST   /api/arm/joints                 -> ArmStatus  { joints_deg: number[6] }
  *   POST   /api/arm/learning               -> ArmStatus  { enabled, confirm }
  *   POST   /api/arm/velocity               -> ArmStatus  { percent: 1..20 }
+ *   POST   /api/arm/reach                  -> ArmStatus  { max_reach_m: 0.15..0.50 }
  *   POST   /api/arm/motors/enable          -> ArmStatus  (leave learning mode)
  *   POST   /api/arm/gripper/open           -> ArmStatus
  *   POST   /api/arm/gripper/close          -> ArmStatus
  *   POST   /api/arm/tool/scan              -> ArmStatus  (detect attached tool)
  *   POST   /api/arm/home                   -> ArmStatus  (fold to safe home pose)
+ *   POST   /api/arm/recover                -> ArmStatus  (slow retract after collision/fault)
+ *   POST   /api/arm/fault/clear            -> ArmStatus  (acknowledge after inspection)
  *   POST   /api/arm/calibrate              -> ArmStatus  { confirm: true } (auto sweep)
+ *   GET    /api/camera/stream              -> MJPEG proxy from the Jetson
  *   GET    /api/arm/poses                  -> { poses: ArmPosePreset[] }
  *   POST   /api/arm/poses                  -> { pose, poses }  { name, joints_deg? }
  *   DELETE /api/arm/poses/:name            -> { poses }
- *   POST   /api/arm/poses/:name/apply      -> ArmStatus  (recall pose, ≤180°)
+ *   POST   /api/arm/poses/:name/apply      -> ArmStatus  { linear: bool } (recall pose)
  *   GET    /api/arm/sequences              -> { sequences: ArmSequence[] }
  *   POST   /api/arm/sequences              -> { sequence, sequences }  { name, poses[], dwell_sec }
  *   DELETE /api/arm/sequences/:name        -> { sequences }
@@ -92,16 +96,21 @@ export const ENDPOINTS: EndpointSpec[] = [
   { method: 'POST', path: '/api/arm/joints', description: 'Move all joints to absolute targets (≤60° each)', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/learning', description: 'Release motors for manual posing / re-engage', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/velocity', description: 'Set the arm speed cap (1–20%)', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/reach', description: 'Set the max horizontal gripper-tip reach', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/motors/enable', description: 'Re-engage motors after learning mode', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/gripper/open', description: 'Open the attached gripper', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/gripper/close', description: 'Close / grasp with the attached gripper', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/gripper/raw', description: 'Raw 1-parameter OPEN/CLOSE_GRIPPER test', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/tool/scan', description: 'Detect the currently attached tool', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/home', description: 'Fold the arm to the PyNiryo home pose', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/recover', description: 'Slowly retract to the last safe point after a collision/fault', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/fault/clear', description: 'Acknowledge a motion fault after inspection', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/calibrate', description: 'Auto-calibrate the arm (full-range sweep)', status: 'implemented-live' },
+  { method: 'GET', path: '/api/camera/stream', description: 'MJPEG proxy from the Jetson RealSense bridge', status: 'implemented-live' },
   { method: 'GET', path: '/api/arm/poses', description: 'List saved joint poses', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/poses', description: 'Save the current pose under a name (upsert)', status: 'implemented-live' },
   { method: 'DELETE', path: '/api/arm/poses/:name', description: 'Delete a saved pose', status: 'implemented-live' },
-  { method: 'POST', path: '/api/arm/poses/:name/apply', description: 'Move the arm back to a saved pose', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/poses/:name/apply', description: 'Move to a saved pose (linear Cartesian by default)', status: 'implemented-live' },
   { method: 'GET', path: '/api/arm/sequences', description: 'List saved pose sequences', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/sequences', description: 'Save / overwrite a named sequence of poses', status: 'implemented-live' },
   { method: 'DELETE', path: '/api/arm/sequences/:name', description: 'Delete a saved sequence', status: 'implemented-live' },

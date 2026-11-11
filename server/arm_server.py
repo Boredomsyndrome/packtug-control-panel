@@ -12,6 +12,12 @@ limits moves: each request may change a joint by at most ``MAX_REQUEST_DEG``
 ``MAX_VELOCITY`` percent. Motions are performed with PyNiryo's blocking
 ``move_joints``; keep a hand on the power switch.
 
+A failed move or a collision/overload latches a fault and records the last
+confirmed-safe joint position. ``POST /api/arm/recover`` retracts slowly to
+that point; ``POST /api/arm/fault/clear`` acknowledges it after inspection.
+Manual commands are capped at 60° per joint; the bridge no longer subdivides
+them into 15° internal steps.
+
 Usage (from the control-panel folder):
 
     conda run --no-capture-output -n ned python server/arm_server.py --port 8020
@@ -21,19 +27,23 @@ Usage (from the control-panel folder):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import math
 import os
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -41,27 +51,121 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 DEFAULT_HOST = os.getenv("ARM_HOST", "10.10.10.10")
-MAX_STEP_DEG = 15.0       # internal segment size for a move
+CAMERA_STREAM_URL = os.getenv(
+    "CAMERA_STREAM_URL",
+    "http://100.73.98.69:8080/stream",
+)
+CAMERA_DEPTH_URL = os.getenv(
+    "CAMERA_DEPTH_URL",
+    "http://100.73.98.69:8080/depth",
+)
+CAMERA_DEPTH_STATS_URL = os.getenv(
+    "CAMERA_DEPTH_STATS_URL",
+    "http://100.73.98.69:8080/depth_stats",
+)
+CAMERA_MODE_URL = os.getenv(
+    "CAMERA_MODE_URL",
+    "http://100.73.98.69:8080/mode",
+)
+MAX_STEP_DEG = 60.0       # internal segment size; one segment per manual command
 MAX_REQUEST_DEG = 60.0    # largest joint change accepted per manual command
 MAX_POSE_DEG = 180.0      # largest joint change when recalling a saved pose
 MAX_VELOCITY = 5
 MAX_VELOCITY_LIMIT = 20
-GRIPPER_SPEED = 400
-GRIPPER_CLOSE_TORQUE = 60
-GRIPPER_HOLD_TORQUE = 30
 POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
 SEQUENCES_FILE = Path(__file__).resolve().parent / "arm_sequences.json"
 HOME_TRANSIT = "__home__"   # built-in safe transit: pyniryo move_to_home_pose()
+CONNECTION_ERRORS = {"HostNotReachableException", "ClientNotConnectedException"}
+READ_TIMEOUT_S = 5.0        # status/telemetry calls must not block forever
+MOTION_TIMEOUT_S = 120.0    # long moves at low speed
+TOOL_TIMEOUT_S = 15.0
+TOOL_EXTENSION_M = 0.10     # approximate gripper tip beyond the tool frame
+DEFAULT_MAX_REACH_M = 0.47
+MIN_REACH_M = 0.15
+MAX_REACH_M = 0.50
+RECOVERY_VELOCITY = 2       # percent; slow retract after a collision/fault
+RECOVERY_TOLERANCE_DEG = 0.5
+JOINT_VERIFY_TOLERANCE_DEG = 2.0  # blocked/stalled move detection after a segment
+COLLISION_MARKERS = (
+    "collision",
+    "overload",
+    "torque",
+    "blocked",
+    "hardware error",
+    "motor error",
+)
 
-# Ned2 joint limits, radians. J3 uses the URDF value; J5 uses the range the
-# robot's MoveIt stack actually enforces (-100°..+55°), which is narrower than
-# the marketing spec. A 0.5° margin keeps targets off the hard stops.
+
+class _RawCommand:
+    """Minimal stand-in for a pyniryo Command enum member.
+
+    ``NiryoRobot.__send_n_receive`` only reads ``command.name``. This lets the
+    bridge use newer firmware commands (collision-detected) while keeping the
+    pinned pyniryo 1.1.2 client, and fail harmlessly on older robot stacks.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _rpy_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return rz @ ry @ rx
+
+
+def _transform(xyz: tuple[float, float, float], rpy: tuple[float, float, float]) -> np.ndarray:
+    m = np.eye(4)
+    m[:3, :3] = _rpy_matrix(*rpy)
+    m[:3, 3] = xyz
+    return m
+
+
+def _joint_rot(q: float) -> np.ndarray:
+    m = np.eye(4)
+    c, s = math.cos(q), math.sin(q)
+    m[:2, :2] = [[c, -s], [s, c]]
+    return m
+
+
+def fk_tip(joints_deg: list[float]) -> tuple[float, float, float]:
+    """Ned2 URDF forward kinematics for the gripper tip (base frame, metres)."""
+    if len(joints_deg) != 6:
+        raise ValueError("exactly 6 joint angles are required")
+    q = [math.radians(float(v)) for v in joints_deg]
+    chain = [
+        ((0.0, 0.0, 0.1013), (0.0, 0.0, 0.0)),
+        ((0.0, 0.0, 0.065), (math.pi / 2, 0.0, 0.0)),
+        ((0.012, 0.221, 0.0), (0.0, 0.0, math.pi / 2)),
+        ((0.0325, -0.065, 0.0), (math.pi / 2, 0.0, 0.0)),
+        ((0.0, 0.0, 0.17), (-math.pi / 2, 0.0, 0.0)),
+        ((0.00925, -0.0197, 0.0), (math.pi / 2, 0.0, 0.0)),
+    ]
+    m = np.eye(4)
+    for i, (xyz, rpy) in enumerate(chain):
+        m = m @ _transform(xyz, rpy) @ _joint_rot(q[i])
+    tool = m @ _transform((0.0, 0.0, 0.0285), (math.pi, -math.pi / 2, 0.0))
+    tip = tool @ _transform((0.0, 0.0, TOOL_EXTENSION_M), (0.0, 0.0, 0.0))
+    return float(tip[0, 3]), float(tip[1, 3]), float(tip[2, 3])
+
+
+def tip_radius(joints_deg: list[float]) -> float:
+    x, y, _ = fk_tip(joints_deg)
+    return math.hypot(x, y)
+
+# Joint limits, radians. The physical Ned unit accepts a wider J5 range than
+# the old installed URDF; the robot-side xacro was opened to 110° alongside
+# this table. A 0.5° margin keeps targets off the hard stops.
 JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-2.949, 2.949),
     (-1.83, 0.61),
     (-1.34390352404, 1.49225651046),
     (-2.089, 2.089),
-    (-1.74532925199, 0.959931088597),
+    (-1.74532925199, math.radians(110.0)),
     (-2.53, 2.53),
 ]
 JOINT_MARGIN_DEG = 0.5
@@ -97,6 +201,19 @@ class JointIn(BaseModel):
 
 class VelocityIn(BaseModel):
     percent: int = Field(ge=1, le=MAX_VELOCITY_LIMIT)
+
+
+class ReachIn(BaseModel):
+    max_reach_m: float = Field(ge=MIN_REACH_M, le=MAX_REACH_M)
+
+
+class ApplyPoseIn(BaseModel):
+    linear: bool = True
+
+
+class GripperRawIn(BaseModel):
+    open: bool
+    speed: int = Field(default=500, ge=100, le=1000)
 
 
 class LearningIn(BaseModel):
@@ -135,9 +252,16 @@ class ArmController:
         self.busy = False
         self.last_error: str | None = None
         self.max_velocity = MAX_VELOCITY
+        self.max_reach_m = DEFAULT_MAX_REACH_M
         self.updated_at: float | None = None
         self.tool: str | None = None
         self.gripper: str = "unknown"
+        self.fault: str | None = None
+        self.collision: bool = False
+        self.recovery_available: bool = False
+        self.recovery_target_deg: list[float] | None = None
+        self.last_good_joints: list[float] | None = None
+        self.collision_api_supported: bool | None = None
 
     # ---------- snapshot ----------
 
@@ -153,6 +277,9 @@ class ArmController:
                 "learning_mode": self.learning_mode,
                 "max_velocity": self.max_velocity,
                 "velocity_limit": MAX_VELOCITY_LIMIT,
+                "max_reach_m": round(self.max_reach_m, 3),
+                "tool_extension_m": TOOL_EXTENSION_M,
+                "reach_m": round(tip_radius(self.joints_deg), 3) if self.joints_deg else None,
                 "max_step_deg": MAX_STEP_DEG,
                 "max_request_deg": MAX_REQUEST_DEG,
                 "max_pose_deg": MAX_POSE_DEG,
@@ -161,7 +288,54 @@ class ArmController:
                 "gripper": self.gripper,
                 "busy": self.busy,
                 "error": self.last_error,
+                "fault": self.fault,
+                "collision": self.collision,
+                "recovery_available": self.recovery_available,
+                "recovery_target_deg": (
+                    list(self.recovery_target_deg)
+                    if self.recovery_target_deg is not None
+                    else None
+                ),
+                "collision_api": (
+                    "hardware" if self.collision_api_supported
+                    else "motion-error" if self.collision_api_supported is False
+                    else "unknown"
+                ),
                 "updated_at": self.updated_at,
+            }
+
+    def hardware_status(self) -> dict[str, Any]:
+        with self._motion:
+            with self._state:
+                if not self.connected:
+                    raise HTTPException(409, "arm is not connected")
+                if not self.mock and self._robot is None:
+                    raise HTTPException(409, "arm is not connected")
+            if self.mock:
+                return {"mock": True, "hardware_version": "mock", "error_message": None,
+                        "hardware_errors": [], "motors_temperature": [], "motors_voltage": []}
+            try:
+                with self._socket_timeout(READ_TIMEOUT_S):
+                    hw = self._robot.get_hardware_status()
+            except Exception as exc:
+                with self._state:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
+                raise HTTPException(502, self.last_error) from exc
+            return {
+                "mock": False,
+                "hardware_version": getattr(hw, "hardware_version", None),
+                "rpi_temperature": getattr(hw, "rpi_temperature", None),
+                "connection_up": getattr(hw, "connection_up", None),
+                "error_message": getattr(hw, "error_message", None),
+                "calibration_needed": getattr(hw, "calibration_needed", None),
+                "calibration_in_progress": getattr(hw, "calibration_in_progress", None),
+                "motor_names": getattr(hw, "motor_names", []),
+                "motor_types": getattr(hw, "motor_types", []),
+                "motors_temperature": getattr(hw, "motors_temperature", []),
+                "motors_voltage": getattr(hw, "motors_voltage", []),
+                "hardware_errors": getattr(hw, "hardware_errors", []),
             }
 
     def status(self) -> dict[str, Any]:
@@ -174,6 +348,8 @@ class ArmController:
                 except Exception as exc:  # keep serving the cached snapshot
                     with self._state:
                         self.last_error = f"{type(exc).__name__}: {exc}"
+                        if type(exc).__name__ in CONNECTION_ERRORS:
+                            self.connected = False
                 finally:
                     self._motion.release()
         return self.snapshot()
@@ -194,6 +370,11 @@ class ArmController:
                     self.learning_mode = False
                     self.tool = "GRIPPER_1"
                     self.gripper = "unknown"
+                    self.fault = None
+                    self.collision = False
+                    self.recovery_available = False
+                    self.recovery_target_deg = None
+                    self.last_good_joints = list(self.joints_deg)
                     self.last_error = None
                     self.updated_at = time.time()
                 log.info("mock arm connected (%s)", host)
@@ -203,6 +384,12 @@ class ArmController:
 
             log.info("connecting to Ned2 at %s ...", host)
             robot = NiryoRobot(host)
+            sock = getattr(robot, "_NiryoRobot__client_socket", None)
+            if sock is not None:
+                try:
+                    sock.settimeout(TOOL_TIMEOUT_S)
+                except OSError:
+                    pass
             try:
                 robot.set_arm_max_velocity(self.max_velocity)
                 tool_name = None
@@ -214,11 +401,19 @@ class ArmController:
                 with self._state:
                     self._robot = robot
                 self._read_locked()
+                self._probe_collision_api_locked()
                 with self._state:
                     self.connected = True
                     self.host = host
                     self.tool = tool_name
                     self.gripper = "unknown"
+                    self.fault = None
+                    self.collision = False
+                    self.recovery_available = False
+                    self.recovery_target_deg = None
+                    self.last_good_joints = (
+                        list(self.joints_deg) if self.joints_deg is not None else None
+                    )
                     self.last_error = None
             except Exception:
                 with self._state:
@@ -253,8 +448,34 @@ class ArmController:
             self.tool = None
             self.gripper = "unknown"
             self.busy = False
+            self.fault = None
+            self.collision = False
+            self.recovery_available = False
+            self.recovery_target_deg = None
+            self.last_good_joints = None
+            self.collision_api_supported = None
 
     # ---------- reads ----------
+
+    @contextlib.contextmanager
+    def _socket_timeout(self, seconds: float):
+        """Bound PyNiryo socket calls; its default recv timeout is infinite."""
+        sock = getattr(self._robot, "_NiryoRobot__client_socket", None)
+        old: float | None = None
+        if sock is not None:
+            try:
+                old = sock.gettimeout()
+                sock.settimeout(seconds)
+            except OSError:
+                sock = None
+        try:
+            yield
+        finally:
+            if sock is not None:
+                try:
+                    sock.settimeout(old)
+                except OSError:
+                    pass
 
     def _read_locked(self) -> None:
         if self.mock:
@@ -262,16 +483,17 @@ class ArmController:
         robot = self._robot
         if robot is None:
             raise ConnectionError("not connected")
-        joints = [math.degrees(float(v)) for v in robot.get_joints()]
-        p = robot.get_pose()
-        pose = {
-            "x": float(p.x), "y": float(p.y), "z": float(p.z),
-            "roll": math.degrees(float(p.roll)),
-            "pitch": math.degrees(float(p.pitch)),
-            "yaw": math.degrees(float(p.yaw)),
-        }
-        calibration_needed = bool(robot.need_calibration())
-        learning_mode = bool(robot.get_learning_mode())
+        with self._socket_timeout(READ_TIMEOUT_S):
+            joints = [math.degrees(float(v)) for v in robot.get_joints()]
+            p = robot.get_pose()
+            pose = {
+                "x": float(p.x), "y": float(p.y), "z": float(p.z),
+                "roll": math.degrees(float(p.roll)),
+                "pitch": math.degrees(float(p.pitch)),
+                "yaw": math.degrees(float(p.yaw)),
+            }
+            calibration_needed = bool(robot.need_calibration())
+            learning_mode = bool(robot.get_learning_mode())
         with self._state:
             self.joints_deg = joints
             self.pose = pose
@@ -287,6 +509,127 @@ class ArmController:
         with self._state:
             return list(self.joints_deg or [])
 
+    # ---------- fault / collision detection ----------
+
+    def _probe_collision_api_locked(self) -> None:
+        """Try the newer GET_COLLISION_DETECTED command once on connect.
+
+        pyniryo 1.1.2 predates the public collision property, but the robot
+        firmware may still support the command. If it does, use it as the
+        primary detector; otherwise fall back to failed-motion classification.
+        """
+        if self.mock:
+            return
+        detected = self._query_collision_flag_locked()
+        if detected:
+            self._clear_collision_flag_locked()
+
+    def _query_collision_flag_locked(self) -> bool | None:
+        if self.mock or self._robot is None:
+            return None
+        if self.collision_api_supported is False:
+            return None
+        send = getattr(self._robot, "_NiryoRobot__send_n_receive", None)
+        if send is None:
+            with self._state:
+                self.collision_api_supported = False
+            return None
+        try:
+            with self._socket_timeout(READ_TIMEOUT_S):
+                value = send(_RawCommand("GET_COLLISION_DETECTED"))
+        except Exception as exc:
+            text = str(exc).lower()
+            if "unknown" in text or "not implemented" in text or "unrecognized" in text:
+                with self._state:
+                    self.collision_api_supported = False
+            return None
+        with self._state:
+            self.collision_api_supported = True
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes")
+        return bool(value)
+
+    def _clear_collision_flag_locked(self) -> None:
+        if self.mock or self.collision_api_supported is not True:
+            return
+        send = getattr(self._robot, "_NiryoRobot__send_n_receive", None)
+        if send is None:
+            return
+        try:
+            with self._socket_timeout(READ_TIMEOUT_S):
+                send(_RawCommand("CLEAR_COLLISION_DETECTED"))
+        except Exception as exc:
+            log.debug("could not clear robot collision flag: %s", exc)
+
+    def _hardware_fault_message_locked(self) -> str | None:
+        """Return a non-empty hardware error message, if the robot reports one."""
+        if self.mock or self._robot is None:
+            return None
+        try:
+            with self._socket_timeout(READ_TIMEOUT_S):
+                hw = self._robot.get_hardware_status()
+        except Exception as exc:
+            log.debug("hardware status read failed: %s", exc)
+            return None
+        raw_errors = getattr(hw, "hardware_errors", None) or []
+        if isinstance(raw_errors, str):
+            raw_errors = [raw_errors]
+        errors = [
+            str(item).strip()
+            for item in raw_errors
+            if str(item).strip().lower() not in ("", "0", "none", "null")
+        ]
+        message = str(getattr(hw, "error_message", "") or "").strip()
+        if message.lower() in ("", "none", "null", "ok"):
+            message = ""
+        if errors or message:
+            return message or "; ".join(errors)
+        return None
+
+    @staticmethod
+    def _is_collision_text(text: str) -> bool:
+        lowered = text.lower()
+        return any(marker in lowered for marker in COLLISION_MARKERS)
+
+    def _record_motion_fault_locked(self, exc: BaseException, actual: list[float] | None = None) -> None:
+        """Latch a motion fault and remember the last known-safe joint position."""
+        text = str(exc).strip() or type(exc).__name__
+        detected = self._query_collision_flag_locked()
+        collision = bool(detected) or self._is_collision_text(text)
+        hardware = self._hardware_fault_message_locked()
+        if hardware and hardware.lower() not in text.lower():
+            text = f"{text} (hardware: {hardware})"
+        with self._state:
+            if actual is not None:
+                self.joints_deg = [float(v) for v in actual]
+            target = list(self.last_good_joints) if self.last_good_joints is not None else None
+            current = self.joints_deg
+            self.fault = text
+            self.collision = collision
+            self.recovery_target_deg = target
+            self.recovery_available = bool(
+                target is not None
+                and current is not None
+                and max(abs(a - b) for a, b in zip(current, target)) > RECOVERY_TOLERANCE_DEG
+            )
+            self.last_error = text
+            self.updated_at = time.time()
+        if detected:
+            self._clear_collision_flag_locked()
+        log.error("arm motion fault%s: %s", " (collision)" if collision else "", text)
+
+    def _read_after_fault_locked(self) -> list[float] | None:
+        """Best-effort read of the real joints after a failed motion."""
+        if self.mock:
+            with self._state:
+                return list(self.joints_deg) if self.joints_deg is not None else None
+        try:
+            self._read_locked()
+        except Exception as exc:
+            log.warning("could not read joints after fault: %s", exc)
+        with self._state:
+            return list(self.joints_deg) if self.joints_deg is not None else None
+
     # ---------- motion ----------
 
     def _check_motion_locked(self) -> None:
@@ -299,6 +642,12 @@ class ArmController:
                 raise HTTPException(409, "calibration required — run ned_calibrate.py --go")
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
+            if self.fault:
+                raise HTTPException(
+                    409,
+                    "arm is in a motion fault state — press Recover to retract to the "
+                    "last safe point before moving again",
+                )
 
     def _check_tool_locked(self) -> None:
         with self._state:
@@ -306,6 +655,8 @@ class ArmController:
                 raise HTTPException(409, "arm is not connected")
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
+            if self.fault:
+                raise HTTPException(409, "arm is in a motion fault state — recover first")
             tool = self.tool
         if not self.mock and (not tool or "GRIPPER" not in tool):
             raise HTTPException(409, "no gripper detected — attach it and rescan the tool")
@@ -330,22 +681,46 @@ class ArmController:
                     f"the {max_delta:.0f}° limit for this command",
                 )
 
-    def _execute_move_locked(self, current: list[float], target: list[float]) -> None:
-        """Run the move in <=MAX_STEP_DEG segments so a slider drag is smooth."""
+    def _path_waypoints(self, current: list[float], target: list[float]) -> list[list[float]]:
         max_delta = max(abs(t - c) for c, t in zip(current, target))
         segments = max(1, math.ceil(max_delta / MAX_STEP_DEG))
-        for i in range(1, segments + 1):
-            alpha = i / segments
-            waypoint = [c + (t - c) * alpha for c, t in zip(current, target)]
+        return [
+            [c + (t - c) * (i / segments) for c, t in zip(current, target)]
+            for i in range(1, segments + 1)
+        ]
+
+    def _check_path_reach(self, current: list[float], target: list[float]) -> None:
+        waypoints = self._path_waypoints(current, target)
+        for i, waypoint in enumerate(waypoints, start=1):
+            radius = tip_radius(waypoint)
+            if radius > self.max_reach_m + 1e-6:
+                raise HTTPException(
+                    400,
+                    f"path exceeds max horizontal reach {self.max_reach_m:.3f} m "
+                    f"at segment {i}/{len(waypoints)} (tip radius {radius:.3f} m); "
+                    "use linear path or move the pose inward",
+                )
+
+    def _execute_move_locked(self, waypoints: list[list[float]]) -> None:
+        """Run the move in <=MAX_STEP_DEG segments so a slider drag is smooth."""
+        for i, waypoint in enumerate(waypoints, start=1):
             try:
-                self._robot.move_joints([math.radians(v) for v in waypoint])
+                with self._socket_timeout(MOTION_TIMEOUT_S):
+                    self._robot.move_joints([math.radians(v) for v in waypoint])
+                if self._query_collision_flag_locked():
+                    raise RuntimeError(
+                        f"robot reported a collision after segment {i}/{len(waypoints)}"
+                    )
             except Exception as exc:
+                actual = self._read_after_fault_locked()
+                self._record_motion_fault_locked(exc, actual)
                 raise RuntimeError(
-                    f"segment {i}/{segments} failed at joints "
+                    f"segment {i}/{len(waypoints)} failed at joints "
                     f"{[round(v, 1) for v in waypoint]}: {exc}"
                 ) from exc
             with self._state:
-                self.joints_deg = waypoint
+                self.joints_deg = list(waypoint)
+                self.last_good_joints = list(waypoint)
                 self.updated_at = time.time()
 
     def _move_locked(
@@ -359,15 +734,24 @@ class ArmController:
         try:
             if current is None:
                 current = self._current_joints_locked()
+            with self._state:
+                self.last_good_joints = list(current)
             self._validate_target(target_deg, current, max_delta)
+            waypoints = self._path_waypoints(current, target_deg)
+            self._check_path_reach(current, target_deg)
             if self.mock:
                 time.sleep(0.15)
                 with self._state:
                     self.joints_deg = [float(v) for v in target_deg]
+                    self.last_good_joints = [float(v) for v in target_deg]
                     self.updated_at = time.time()
             else:
-                self._execute_move_locked(current, target_deg)
+                self._execute_move_locked(waypoints)
                 self._read_locked()
+                with self._state:
+                    self.last_good_joints = (
+                        list(self.joints_deg) if self.joints_deg is not None else list(target_deg)
+                    )
             with self._state:
                 self.last_error = None
         except HTTPException:
@@ -375,7 +759,9 @@ class ArmController:
         except Exception as exc:
             log.exception("motion failed")
             with self._state:
-                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                if type(exc).__name__ in CONNECTION_ERRORS:
+                    self.connected = False
             raise HTTPException(502, self.last_error) from exc
         finally:
             with self._state:
@@ -412,26 +798,147 @@ class ArmController:
             with self._state:
                 self.busy = True
             try:
+                current = self._current_joints_locked()
+                with self._state:
+                    self.last_good_joints = list(current)
                 if self.mock:
                     time.sleep(0.2)
                     with self._state:
                         self.joints_deg = [0.0, -15.0, 20.0, 0.0, 0.0, 0.0]
+                        self.last_good_joints = list(self.joints_deg)
                         self.updated_at = time.time()
                 else:
-                    self._robot.move_to_home_pose()
+                    with self._socket_timeout(MOTION_TIMEOUT_S):
+                        self._robot.move_to_home_pose()
                     self._read_locked()
+                    with self._state:
+                        self.last_good_joints = (
+                            list(self.joints_deg) if self.joints_deg is not None else None
+                        )
                 with self._state:
                     self.last_error = None
             except HTTPException:
                 raise
             except Exception as exc:
                 log.exception("home move failed")
+                actual = self._read_after_fault_locked()
+                self._record_motion_fault_locked(exc, actual)
                 with self._state:
-                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
                 raise HTTPException(502, self.last_error) from exc
             finally:
                 with self._state:
                     self.busy = False
+        return self.snapshot()
+
+    def recover(self) -> dict[str, Any]:
+        """Retract along the last commanded path to the last known-safe joints.
+
+        This is deliberately a short, slow reverse move, not an automatic
+        ``home`` sweep: after a collision the arm is already touching an object,
+        so the safest first action is to undo the failed segment. The fault is
+        cleared only after the retract succeeds; otherwise the operator must
+        inspect the arm and release the motors manually.
+        """
+        with self._motion:
+            with self._state:
+                if not self.connected:
+                    raise HTTPException(409, "arm is not connected")
+                if not self.mock and self._robot is None:
+                    raise HTTPException(409, "arm is not connected")
+                if self.calibration_needed:
+                    raise HTTPException(409, "calibration required")
+                if self.learning_mode:
+                    raise HTTPException(409, "motors are released — enable motors first")
+                target = list(self.last_good_joints) if self.last_good_joints is not None else None
+            if target is None:
+                raise HTTPException(
+                    409,
+                    "no safe retract point recorded — release the motors and move the arm "
+                    "clear by hand, then clear the fault",
+                )
+            with self._state:
+                self.busy = True
+            old_velocity = self.max_velocity
+            try:
+                current = self._current_joints_locked()
+                if max(abs(a - b) for a, b in zip(current, target)) <= RECOVERY_TOLERANCE_DEG:
+                    with self._state:
+                        self.joints_deg = list(target)
+                        self.last_good_joints = list(target)
+                        self.fault = None
+                        self.collision = False
+                        self.recovery_available = False
+                        self.recovery_target_deg = None
+                        self.last_error = None
+                        self.busy = False
+                        self.updated_at = time.time()
+                    return self.snapshot()
+                if self.mock:
+                    time.sleep(0.15)
+                    with self._state:
+                        self.joints_deg = list(target)
+                else:
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.set_arm_max_velocity(min(old_velocity, RECOVERY_VELOCITY))
+                    waypoints = self._path_waypoints(current, target)
+                    self._execute_move_locked(waypoints)
+                    self._read_locked()
+                with self._state:
+                    self.last_good_joints = (
+                        list(self.joints_deg) if self.joints_deg is not None else list(target)
+                    )
+                    self.fault = None
+                    self.collision = False
+                    self.recovery_available = False
+                    self.recovery_target_deg = None
+                    self.last_error = None
+                    self.updated_at = time.time()
+                log.info("arm recovered to last safe point at %s", self.last_good_joints)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.exception("arm recovery failed")
+                actual = self._read_after_fault_locked()
+                self._record_motion_fault_locked(exc, actual)
+                with self._state:
+                    self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                raise HTTPException(502, f"recovery failed: {self.last_error}") from exc
+            finally:
+                if not self.mock:
+                    try:
+                        with self._socket_timeout(TOOL_TIMEOUT_S):
+                            self._robot.set_arm_max_velocity(old_velocity)
+                    except Exception as exc:
+                        log.warning("could not restore arm speed after recovery: %s", exc)
+                with self._state:
+                    self.busy = False
+        return self.snapshot()
+
+    def clear_fault(self) -> dict[str, Any]:
+        """Acknowledge a fault after the operator has inspected the arm."""
+        with self._motion:
+            with self._state:
+                if not self.connected:
+                    raise HTTPException(409, "arm is not connected")
+            self._clear_collision_flag_locked()
+            if not self.mock:
+                try:
+                    self._read_locked()
+                except Exception as exc:
+                    log.warning("could not read joints while clearing fault: %s", exc)
+            with self._state:
+                self.fault = None
+                self.collision = False
+                self.recovery_available = False
+                self.recovery_target_deg = None
+                self.last_good_joints = (
+                    list(self.joints_deg) if self.joints_deg is not None else None
+                )
+                self.last_error = None
+                self.updated_at = time.time()
         return self.snapshot()
 
     def calibrate(self) -> dict[str, Any]:
@@ -457,9 +964,13 @@ class ArmController:
                         self.learning_mode = False
                         self.updated_at = time.time()
                 else:
-                    if self._robot.get_learning_mode():
-                        self._robot.set_learning_mode(False)
-                    self._robot.calibrate_auto()
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        needs_release = self._robot.get_learning_mode()
+                    if needs_release:
+                        with self._socket_timeout(TOOL_TIMEOUT_S):
+                            self._robot.set_learning_mode(False)
+                    with self._socket_timeout(MOTION_TIMEOUT_S):
+                        self._robot.calibrate_auto()
                     self._read_locked()
                 with self._state:
                     self.last_error = None
@@ -485,7 +996,8 @@ class ArmController:
                     self.updated_at = time.time()
                 return self.snapshot()
             try:
-                self._robot.set_learning_mode(False)
+                with self._socket_timeout(TOOL_TIMEOUT_S):
+                    self._robot.set_learning_mode(False)
                 self._read_locked()
                 with self._state:
                     self.last_error = None
@@ -503,7 +1015,8 @@ class ArmController:
                 connected = self.connected and self._robot is not None
             if connected and not self.mock:
                 try:
-                    self._robot.set_arm_max_velocity(percent)
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.set_arm_max_velocity(percent)
                 except Exception as exc:
                     log.exception("set velocity failed")
                     with self._state:
@@ -513,6 +1026,12 @@ class ArmController:
                 self.max_velocity = percent
                 self.last_error = None
                 self.updated_at = time.time()
+        return self.snapshot()
+
+    def set_reach(self, max_reach_m: float) -> dict[str, Any]:
+        with self._state:
+            self.max_reach_m = round(float(max_reach_m), 3)
+            self.updated_at = time.time()
         return self.snapshot()
 
     def set_learning(self, enabled: bool) -> dict[str, Any]:
@@ -530,12 +1049,14 @@ class ArmController:
                         self.learning_mode = enabled
                         self.updated_at = time.time()
                 elif enabled:
-                    self._robot.set_learning_mode(True)
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.set_learning_mode(True)
                     with self._state:
                         self.learning_mode = True
                         self.updated_at = time.time()
                 else:
-                    self._robot.set_learning_mode(False)
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.set_learning_mode(False)
                     self._read_locked()
                 with self._state:
                     self.last_error = None
@@ -550,6 +1071,27 @@ class ArmController:
                     self.busy = False
         return self.snapshot()
 
+    def _send_linear_pose(self, pose_obj: Any) -> None:
+        """Older Ned2 firmware expects MOVE_LINEAR_POSE with 6 params (no frame).
+
+        pyniryo's public move_linear_pose() appends an empty frame name, so the
+        robot rejects it with "6 parameters expected but 7 given".
+        """
+        from pyniryo.api.enums_communication import Command
+
+        send = getattr(self._robot, "_NiryoRobot__send_n_receive", None)
+        if send is None:
+            raise RuntimeError("pyniryo TCP client layout changed; cannot send raw pose")
+        send(
+            Command.MOVE_LINEAR_POSE,
+            float(pose_obj.x),
+            float(pose_obj.y),
+            float(pose_obj.z),
+            float(pose_obj.roll),
+            float(pose_obj.pitch),
+            float(pose_obj.yaw),
+        )
+
     def _gripper_action(self, close: bool) -> dict[str, Any]:
         with self._motion:
             self._check_tool_locked()
@@ -559,13 +1101,14 @@ class ArmController:
                 if self.mock:
                     time.sleep(0.2)
                 elif close:
-                    self._robot.close_gripper(
-                        speed=GRIPPER_SPEED,
-                        max_torque_percentage=GRIPPER_CLOSE_TORQUE,
-                        hold_torque_percentage=GRIPPER_HOLD_TORQUE,
-                    )
+                    # grasp/release use the robot's parameterless tool commands.
+                    # open_gripper()/close_gripper() send 3 params that older
+                    # Ned2 firmware rejects with "1 parameters expected".
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.grasp_with_tool()
                 else:
-                    self._robot.open_gripper(speed=GRIPPER_SPEED)
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.release_with_tool()
                 with self._state:
                     self.gripper = "closed" if close else "open"
                     self.last_error = None
@@ -573,8 +1116,11 @@ class ArmController:
             except HTTPException:
                 raise
             except Exception as exc:
+                log.exception("gripper command failed")
                 with self._state:
                     self.last_error = f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
                 raise HTTPException(502, self.last_error) from exc
             finally:
                 with self._state:
@@ -586,6 +1132,42 @@ class ArmController:
 
     def close_gripper(self) -> dict[str, Any]:
         return self._gripper_action(True)
+
+    def raw_gripper(self, open_gripper: bool, speed: int) -> dict[str, Any]:
+        """Send the firmware's 1-parameter OPEN/CLOSE_GRIPPER command."""
+        with self._motion:
+            self._check_tool_locked()
+            with self._state:
+                self.busy = True
+            try:
+                if self.mock:
+                    time.sleep(0.2)
+                else:
+                    from pyniryo.api.enums_communication import Command
+
+                    send = getattr(self._robot, "_NiryoRobot__send_n_receive", None)
+                    if send is None:
+                        raise RuntimeError("pyniryo TCP client layout changed")
+                    command = Command.OPEN_GRIPPER if open_gripper else Command.CLOSE_GRIPPER
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        send(command, int(speed))
+                with self._state:
+                    self.gripper = "open" if open_gripper else "closed"
+                    self.last_error = None
+                    self.updated_at = time.time()
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.exception("raw gripper command failed")
+                with self._state:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
+                raise HTTPException(502, self.last_error) from exc
+            finally:
+                with self._state:
+                    self.busy = False
+        return self.snapshot()
 
     def scan_tool(self) -> dict[str, Any]:
         with self._motion:
@@ -599,8 +1181,9 @@ class ArmController:
                     self.updated_at = time.time()
                 return self.snapshot()
             try:
-                self._robot.update_tool()
-                tool_name = getattr(self._robot.get_current_tool_id(), "name", None)
+                with self._socket_timeout(TOOL_TIMEOUT_S):
+                    self._robot.update_tool()
+                    tool_name = getattr(self._robot.get_current_tool_id(), "name", None)
             except Exception as exc:
                 with self._state:
                     self.last_error = f"{type(exc).__name__}: {exc}"
@@ -642,6 +1225,15 @@ class ArmController:
                             round(max(JOINT_LIMITS_DEG[i][0], min(JOINT_LIMITS_DEG[i][1], float(v))), 3)
                             for i, v in enumerate(joints)
                         ],
+                        "radius_m": round(
+                            tip_radius(
+                                [
+                                    max(JOINT_LIMITS_DEG[i][0], min(JOINT_LIMITS_DEG[i][1], float(v)))
+                                    for i, v in enumerate(joints)
+                                ]
+                            ),
+                            3,
+                        ),
                         "created_at": entry.get("created_at"),
                         "updated_at": entry.get("updated_at"),
                     }
@@ -706,17 +1298,91 @@ class ArmController:
             self._write_poses_locked(remaining)
         return {"poses": remaining}
 
-    def apply_pose(self, name: str) -> dict[str, Any]:
+    def apply_pose(self, name: str, linear: bool = True) -> dict[str, Any]:
         with self._poses_lock:
             poses = self._load_poses_locked()
             pose = next((p for p in poses if p["name"] == name), None)
         if pose is None:
             raise HTTPException(404, f"pose not found: {name}")
+        target = pose["joints_deg"]
         with self._motion:
             self._check_motion_locked()
             current = self._current_joints_locked()
+            if linear:
+                with self._state:
+                    self.busy = True
+                    self.last_good_joints = list(current)
+                try:
+                    radius = tip_radius(target)
+                    if radius > self.max_reach_m + 1e-6:
+                        raise HTTPException(
+                            400,
+                            f"horizontal reach {radius:.3f} m exceeds max {self.max_reach_m:.3f} m",
+                        )
+                    if self.mock:
+                        time.sleep(0.2)
+                        with self._state:
+                            self.joints_deg = [float(v) for v in target]
+                            self.last_good_joints = [float(v) for v in target]
+                            self.updated_at = time.time()
+                    else:
+                        with self._socket_timeout(TOOL_TIMEOUT_S):
+                            target_pose = self._robot.forward_kinematics(
+                                [math.radians(v) for v in target]
+                            )
+                        with self._socket_timeout(MOTION_TIMEOUT_S):
+                            self._send_linear_pose(target_pose)
+                        if self._query_collision_flag_locked():
+                            raise RuntimeError(
+                                "robot reported a collision during the linear move"
+                            )
+                        self._read_locked()
+                        with self._state:
+                            self.last_good_joints = (
+                                list(self.joints_deg)
+                                if self.joints_deg is not None
+                                else list(target)
+                            )
+                    with self._state:
+                        self.last_error = None
+                except HTTPException as exc:
+                    raise HTTPException(exc.status_code, f"pose '{name}': {exc.detail}") from exc
+                except Exception as exc:
+                    log.exception("linear pose move failed")
+                    text = str(exc).lower()
+                    collision = self._query_collision_flag_locked()
+                    if collision or self._is_collision_text(text):
+                        actual = self._read_after_fault_locked()
+                        self._record_motion_fault_locked(exc, actual)
+                        with self._state:
+                            self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                        raise HTTPException(502, f"pose '{name}': {self.last_error}") from exc
+                    if "goal has been aborted" in text:
+                        log.warning(
+                            "linear path for pose '%s' was aborted by the robot; "
+                            "falling back to the joint-space path",
+                            name,
+                        )
+                        try:
+                            return self._move_locked(target, max_delta=MAX_POSE_DEG)
+                        except HTTPException as fallback_exc:
+                            raise HTTPException(
+                                fallback_exc.status_code,
+                                f"pose '{name}': {fallback_exc.detail}",
+                            ) from fallback_exc
+                    actual = self._read_after_fault_locked()
+                    self._record_motion_fault_locked(exc, actual)
+                    with self._state:
+                        self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                        if type(exc).__name__ in CONNECTION_ERRORS:
+                            self.connected = False
+                    raise HTTPException(502, f"pose '{name}': {self.last_error}") from exc
+                finally:
+                    with self._state:
+                        self.busy = False
+                return self.snapshot()
             try:
-                return self._move_locked(pose["joints_deg"], current, MAX_POSE_DEG)
+                return self._move_locked(target, current, MAX_POSE_DEG)
             except HTTPException as exc:
                 raise HTTPException(exc.status_code, f"pose '{name}': {exc.detail}") from exc
 
@@ -844,9 +1510,80 @@ def create_app(controller: ArmController) -> FastAPI:
     def health() -> dict[str, Any]:
         return {"status": "ok", "mock": controller.mock, "time": time.time()}
 
+    def _proxy_camera(url: str, label: str):
+        if not url:
+            raise HTTPException(503, f"{label} URL is not configured")
+        try:
+            upstream = urllib.request.urlopen(url, timeout=10)
+        except Exception as exc:
+            raise HTTPException(502, f"{label} unavailable: {exc}") from exc
+
+        content_type = (
+            upstream.headers.get("Content-Type")
+            or "multipart/x-mixed-replace; boundary=frame"
+        )
+
+        def generate():
+            try:
+                while True:
+                    chunk = upstream.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                upstream.close()
+
+        return StreamingResponse(
+            generate(),
+            media_type=content_type,
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/camera/stream")
+    def camera_stream():
+        """Proxy the Jetson RGB MJPEG stream so the UI stays same-origin."""
+        return _proxy_camera(CAMERA_STREAM_URL, "camera stream")
+
+    @app.get("/api/camera/depth")
+    def camera_depth():
+        """Proxy the colorized Jetson depth MJPEG stream."""
+        return _proxy_camera(CAMERA_DEPTH_URL, "camera depth stream")
+
+    @app.get("/api/camera/depth_stats")
+    def camera_depth_stats():
+        if not CAMERA_DEPTH_STATS_URL:
+            raise HTTPException(503, "CAMERA_DEPTH_STATS_URL is not configured")
+        try:
+            with urllib.request.urlopen(CAMERA_DEPTH_STATS_URL, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise HTTPException(502, f"camera depth stats unavailable: {exc}") from exc
+        return payload
+
+    @app.get("/api/camera/mode")
+    def camera_mode(value: str):
+        if value not in ("rgb", "depth"):
+            raise HTTPException(400, "camera mode must be rgb or depth")
+        if not CAMERA_MODE_URL:
+            raise HTTPException(503, "CAMERA_MODE_URL is not configured")
+        try:
+            with urllib.request.urlopen(
+                f"{CAMERA_MODE_URL}?value={value}", timeout=15
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise HTTPException(502, f"camera mode switch failed: {exc}") from exc
+        if not payload.get("ok"):
+            raise HTTPException(502, payload.get("error", "camera mode switch failed"))
+        return payload
+
     @app.get("/api/arm/status")
     def arm_status() -> dict[str, Any]:
         return controller.status()
+
+    @app.get("/api/arm/hardware")
+    def arm_hardware() -> dict[str, Any]:
+        return controller.hardware_status()
 
     @app.post("/api/arm/connect")
     def arm_connect(body: ConnectIn) -> dict[str, Any]:
@@ -895,6 +1632,10 @@ def create_app(controller: ArmController) -> FastAPI:
     def arm_gripper_close() -> dict[str, Any]:
         return controller.close_gripper()
 
+    @app.post("/api/arm/gripper/raw")
+    def arm_gripper_raw(body: GripperRawIn) -> dict[str, Any]:
+        return controller.raw_gripper(body.open, body.speed)
+
     @app.post("/api/arm/tool/scan")
     def arm_tool_scan() -> dict[str, Any]:
         return controller.scan_tool()
@@ -902,6 +1643,14 @@ def create_app(controller: ArmController) -> FastAPI:
     @app.post("/api/arm/home")
     def arm_home() -> dict[str, Any]:
         return controller.move_home()
+
+    @app.post("/api/arm/recover")
+    def arm_recover() -> dict[str, Any]:
+        return controller.recover()
+
+    @app.post("/api/arm/fault/clear")
+    def arm_clear_fault() -> dict[str, Any]:
+        return controller.clear_fault()
 
     @app.post("/api/arm/calibrate")
     def arm_calibrate(body: CalibrateIn) -> dict[str, Any]:
@@ -922,8 +1671,12 @@ def create_app(controller: ArmController) -> FastAPI:
         return controller.delete_pose(name)
 
     @app.post("/api/arm/poses/{name}/apply")
-    def arm_apply_pose(name: str) -> dict[str, Any]:
-        return controller.apply_pose(name)
+    def arm_apply_pose(name: str, body: ApplyPoseIn | None = None) -> dict[str, Any]:
+        return controller.apply_pose(name, True if body is None else body.linear)
+
+    @app.post("/api/arm/reach")
+    def arm_reach(body: ReachIn) -> dict[str, Any]:
+        return controller.set_reach(body.max_reach_m)
 
     @app.get("/api/arm/sequences")
     def arm_sequences() -> dict[str, Any]:

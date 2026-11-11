@@ -244,6 +244,33 @@ button {
   color: var(--text-faint);
 }
 
+.camera-feed {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+
+.camera-error {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.camera-error p {
+  margin: 0 0 8px;
+}
+
+.camera-stats {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .kpi-value {
   font-size: 26px;
   font-weight: 700;

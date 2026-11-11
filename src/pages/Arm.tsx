@@ -20,6 +20,12 @@ const HOSTS = [
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 type LogEntry = { id: string; t: string; text: string; level: 'info' | 'success' | 'warn' | 'error' }
+type DepthStats = {
+  nearest_m: number | null
+  farthest_m: number | null
+  valid_pixels: number
+  age_sec: number | null
+}
 
 export function Arm() {
   const [status, setStatus] = useState<ArmStatus | null>(null)
@@ -43,6 +49,13 @@ export function Arm() {
     { name: string; step: number; total: number; phase: 'transit' | 'pose' } | null
   >(null)
   const [sequenceStopping, setSequenceStopping] = useState(false)
+  const [linearPath, setLinearPath] = useState(true)
+  const [camKey, setCamKey] = useState(0)
+  const [camError, setCamError] = useState(false)
+  const [camMode, setCamMode] = useState<'rgb' | 'depth'>('rgb')
+  const [camSwitching, setCamSwitching] = useState(false)
+  const [camTargetMode, setCamTargetMode] = useState<'rgb' | 'depth' | null>(null)
+  const [depthStats, setDepthStats] = useState<DepthStats | null>(null)
   const stopSequenceRef = useRef(false)
 
   useEffect(() => {
@@ -66,6 +79,26 @@ export function Arm() {
 
     void poll()
     const timer = window.setInterval(poll, 1000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/camera/depth_stats')
+        if (!res.ok) return
+        const stats = (await res.json()) as DepthStats
+        if (alive) setDepthStats(stats)
+      } catch {
+        // The camera card handles stream errors; stats are optional.
+      }
+    }
+    void tick()
+    const timer = window.setInterval(tick, 1000)
     return () => {
       alive = false
       window.clearInterval(timer)
@@ -119,20 +152,34 @@ export function Arm() {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
       addLog(`${label} — ${msg}`, 'error')
+      try {
+        // Pull the fault/recovery fields immediately instead of waiting for the poll.
+        applySnapshot(await api.getArmStatus())
+      } catch {
+        // The poll will retry if the bridge is temporarily unreachable.
+      }
     } finally {
       setPending(false)
     }
   }
 
   const canMove =
-    !!status?.connected && !status.calibration_needed && !status.learning_mode && !status.busy && !pending
+    !!status?.connected &&
+    !status.calibration_needed &&
+    !status.learning_mode &&
+    !status.busy &&
+    !status.fault &&
+    !pending
   const hasGripper = !!status?.tool?.includes('GRIPPER')
   const canUseGripper =
-    !!status?.connected && !status.learning_mode && !status.busy && !pending && hasGripper
+    !!status?.connected && !status.learning_mode && !status.busy && !status.fault && !pending && hasGripper
   const addablePose = poses.some((p) => p.name === stepToAdd) ? stepToAdd : (poses[0]?.name ?? '')
   const speedOptions = Array.from(new Set([5, 10, 15, 20, status?.max_velocity ?? 5])).sort(
     (a, b) => a - b,
   )
+  const reachOptions = Array.from(
+    new Set([0.4, 0.42, 0.44, 0.45, 0.46, 0.47, 0.48, 0.5, status?.max_reach_m ?? 0.47]),
+  ).sort((a, b) => a - b)
 
   function connect() {
     const ip = host.trim()
@@ -200,12 +247,55 @@ export function Arm() {
     void run('Scan tool', () => api.scanArmTool())
   }
 
+  function rawGripper(open: boolean) {
+    void run(`Raw gripper ${open ? 'open' : 'close'}`, () => api.rawArmGripper(open))
+  }
+
   function homeArm() {
     void run('Home / fold', () => api.homeArm())
   }
 
+  function recoverArm() {
+    void run('Recover to last safe point', () => api.recoverArm())
+  }
+
+  function clearFault() {
+    if (!window.confirm('Only clear the fault after you have inspected the arm and confirmed the workspace is clear.')) {
+      return
+    }
+    void run('Clear motion fault', () => api.clearArmFault())
+  }
+
+  async function switchCameraMode(mode: 'rgb' | 'depth') {
+    if (mode === camMode && !camError) {
+      setCamKey((value) => value + 1)
+      return
+    }
+    setCamSwitching(true)
+    setCamTargetMode(mode)
+    setCamError(false)
+    try {
+      const res = await fetch(`/api/camera/mode?value=${mode}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = (await res.json()) as { ok: boolean; error?: string }
+      if (!data.ok) throw new Error(data.error ?? 'camera mode switch failed')
+      setCamMode(mode)
+      setCamKey((value) => value + 1)
+    } catch (err) {
+      setCamError(true)
+      addLog(`Camera ${mode} — ${err instanceof Error ? err.message : String(err)}`, 'error')
+    } finally {
+      setCamSwitching(false)
+      setCamTargetMode(null)
+    }
+  }
+
   function setSpeed(percent: number) {
     void run(`Speed ${percent}%`, () => api.setArmVelocity(percent))
+  }
+
+  function setReach(maxReachM: number) {
+    void run(`Max reach ${maxReachM.toFixed(2)} m`, () => api.setArmReach(maxReachM))
   }
 
   async function savePose() {
@@ -248,7 +338,9 @@ export function Arm() {
   }
 
   function applyPose(name: string) {
-    void run(`Recall pose: ${name}`, () => api.applyArmPose(name))
+    void run(`Recall pose: ${name} (${linearPath ? 'linear' : 'joint'})`, () =>
+      api.applyArmPose(name, linearPath),
+    )
   }
 
   function addDraftStep() {
@@ -351,7 +443,9 @@ export function Arm() {
           setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'transit' })
           addLog(`Transit → ${sequence.transit === '__home__' ? 'Home / fold' : sequence.transit}`, 'info')
           const transitSnapshot =
-            sequence.transit === '__home__' ? await api.homeArm() : await api.applyArmPose(sequence.transit)
+            sequence.transit === '__home__'
+              ? await api.homeArm()
+              : await api.applyArmPose(sequence.transit, linearPath)
           applySnapshot(transitSnapshot)
           if (stopSequenceRef.current) {
             stopped = true
@@ -360,7 +454,7 @@ export function Arm() {
         }
         setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'pose' })
         addLog(`Step ${i + 1}/${sequence.poses.length}: ${pose}`, 'info')
-        const snapshot = await api.applyArmPose(pose)
+        const snapshot = await api.applyArmPose(pose, linearPath)
         applySnapshot(snapshot)
         if (stopSequenceRef.current) {
           stopped = true
@@ -406,10 +500,11 @@ export function Arm() {
     <>
       <PageHeader
         title="Arm Control"
-        desc="Niryo Ned2 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command (15° segments)."
+        desc="Niryo Ned2 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command."
         actions={
           <>
             {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}
+            {status?.fault && <Badge tone="red" dot>FAULT</Badge>}
             <Badge
               tone={!status?.connected ? 'grey' : status.calibration_needed || status.learning_mode ? 'amber' : 'green'}
               dot
@@ -424,6 +519,94 @@ export function Arm() {
         No hardware E-stop on this arm. Keep the workspace clear and a hand on the power switch. A slider release may
         move a joint up to 60°, and manual posing releases the motors — hold the arm before enabling free motion.
       </div>
+
+      <Card
+        title="Camera"
+        hint="Intel RealSense D455 · live RGB / depth stream from the Jetson"
+        right={
+          <>
+            <div className="row" style={{ gap: 4 }}>
+              {(['rgb', 'depth'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  className={`btn sm ${camMode === mode ? 'primary' : ''}`}
+                  onClick={() => void switchCameraMode(mode)}
+                  disabled={camSwitching}
+                >
+                  {mode === 'rgb' ? 'RGB' : 'Depth'}
+                </button>
+              ))}
+            </div>
+            <Badge tone={camError ? 'red' : camSwitching ? 'amber' : 'green'} dot>
+              {camError ? 'offline' : camSwitching ? 'switching' : 'live'}
+            </Badge>
+          </>
+        }
+      >
+        {camSwitching ? (
+          <div className="camera-error">
+            <p>Switching camera to {(camTargetMode ?? camMode) === 'rgb' ? 'RGB' : 'depth'}…</p>
+            <p className="faint">The Jetson restarts the RealSense sensor in the selected mode (~5–10 s).</p>
+          </div>
+        ) : camError ? (
+          <div className="camera-error">
+            <p>Camera stream unavailable.</p>
+            <p className="faint">Check the Jetson camera node, `CAMERA_STREAM_URL`, and the Tailscale link.</p>
+            <button
+              className="btn sm"
+              onClick={() => {
+                setCamError(false)
+                setCamKey((value) => value + 1)
+              }}
+            >
+              Retry stream
+            </button>
+          </div>
+        ) : (
+          <>
+            <img
+              key={`${camMode}-${camKey}`}
+              className="camera-feed"
+              src={`${camMode === 'rgb' ? '/api/camera/stream' : '/api/camera/depth'}?t=${camKey}`}
+              alt={camMode === 'rgb' ? 'RealSense RGB camera' : 'RealSense colorized depth'}
+              onError={() => setCamError(true)}
+            />
+            {camMode === 'depth' && (
+              <div className="camera-stats mono">
+                nearest valid depth: {depthStats?.nearest_m != null ? `${depthStats.nearest_m.toFixed(3)} m` : '—'}
+                {' · '}farthest: {depthStats?.farthest_m != null ? `${depthStats.farthest_m.toFixed(3)} m` : '—'}
+                {' · '}valid pixels: {depthStats?.valid_pixels ?? '—'}
+              </div>
+            )}
+          </>
+        )}
+      </Card>
+
+      {status?.fault && (
+        <div className="error-banner">
+          <div>
+            <strong>{status.collision ? 'Collision / motion fault' : 'Motion fault'}.</strong>{' '}
+            {status.fault}
+          </div>
+          <div className="row" style={{ marginTop: 10, alignItems: 'center' }}>
+            <button
+              className="btn sm primary"
+              onClick={recoverArm}
+              disabled={pending || status.busy || !status.recovery_available}
+            >
+              {pending ? 'Working…' : 'Recover to last safe point'}
+            </button>
+            <button className="btn sm" onClick={clearFault} disabled={pending || status.busy}>
+              Clear after inspection
+            </button>
+            <span className="faint" style={{ fontSize: 12 }}>
+              {status.recovery_available
+                ? 'Slow reverse move to the last confirmed-safe joint position.'
+                : 'No retract point available; release the motors and move the arm clear by hand.'}
+            </span>
+          </div>
+        </div>
+      )}
 
       {status?.calibration_needed && (
         <div className="error-banner">
@@ -455,7 +638,7 @@ export function Arm() {
         </div>
       )}
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && !status?.fault && <div className="error-banner">{error}</div>}
 
       <div className="grid cols-2">
         <Card title="Connection" hint="PyNiryo TCP :40001 · one client at a time">
@@ -532,6 +715,21 @@ export function Arm() {
                 </select>
               </div>
               <div className="row between">
+                <span className="muted">Max reach</span>
+                <select
+                  value={status?.max_reach_m ?? 0.47}
+                  onChange={(e) => setReach(Number(e.target.value))}
+                  disabled={pending || status?.busy}
+                  style={{ maxWidth: 100 }}
+                >
+                  {reachOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value.toFixed(2)} m
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="row between">
                 <span className="muted">Per-command limit</span>
                 <span className="mono">≤{status?.max_request_deg ?? 60}°</span>
               </div>
@@ -541,6 +739,20 @@ export function Arm() {
                   {status?.connected ? (status.calibration_needed ? 'required' : 'ok') : '—'}
                 </span>
               </div>
+              <div className="row between">
+                <span className="muted">Collision detect</span>
+                <span className="mono">
+                  {status?.collision_api === 'hardware'
+                    ? 'firmware flag'
+                    : status?.collision_api === 'motion-error'
+                      ? 'motion error'
+                      : 'probing'}
+                </span>
+              </div>
+            </div>
+            <div className="faint" style={{ fontSize: 11.5 }}>
+              Max reach is measured at the gripper tip (tool frame + {status?.tool_extension_m ?? 0.1} m).
+              Joint-path moves are rejected if the arc exceeds it; linear pose moves check the endpoints.
             </div>
           </div>
         </Card>
@@ -553,6 +765,20 @@ export function Arm() {
                 <span className="mono">
                   {(status.pose.x * 1000).toFixed(0)} / {(status.pose.y * 1000).toFixed(0)} /{' '}
                   {(status.pose.z * 1000).toFixed(0)} mm
+                </span>
+              </div>
+              <div className="row between">
+                <span className="muted">Horizontal reach</span>
+                <span
+                  className="mono"
+                  style={{
+                    color:
+                      status.reach_m != null && status.reach_m > (status.max_reach_m ?? Infinity)
+                        ? 'var(--red)'
+                        : undefined,
+                  }}
+                >
+                  {status.reach_m != null ? `${status.reach_m.toFixed(3)} m` : '—'}
                 </span>
               </div>
               <div className="row between">
@@ -600,12 +826,23 @@ export function Arm() {
                 Rescan tool
               </button>
             </div>
+            <div className="row">
+              <button className="btn sm" onClick={() => rawGripper(true)} disabled={!canUseGripper}>
+                Raw open
+              </button>
+              <button className="btn sm" onClick={() => rawGripper(false)} disabled={!canUseGripper}>
+                Raw close
+              </button>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                firmware 1-param test
+              </span>
+            </div>
             <div className="row between" style={{ fontSize: 12.5 }}>
               <span className="muted">Gripper state</span>
               <span className="mono">{status?.gripper ?? 'unknown'}</span>
             </div>
             <p className="faint" style={{ fontSize: 12, margin: 0 }}>
-              Close uses 60% grip torque. Buttons block while the gripper moves.
+Uses the robot's native grasp/release tool commands. Buttons block while the gripper moves.
             </p>
           </div>
 
@@ -670,6 +907,16 @@ export function Arm() {
             >
               Save current pose
             </button>
+            <label className="row" style={{ gap: 6, fontSize: 12, color: 'var(--text-dim)', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={linearPath}
+                onChange={(e) => setLinearPath(e.target.checked)}
+                disabled={pending || status?.busy || !!sequenceRun}
+                style={{ width: 'auto', accentColor: 'var(--accent)' }}
+              />
+              Linear path
+            </label>
             <span className="faint" style={{ fontSize: 12 }}>
               Same name overwrites; saving during manual pose captures the hand-posed position.
             </span>
@@ -683,6 +930,7 @@ export function Arm() {
                 <tr>
                   <th>Name</th>
                   <th>Joints °</th>
+                  <th style={{ width: 100 }}>Reach</th>
                   <th style={{ width: 190 }}>Saved</th>
                   <th style={{ width: 150 }} />
                 </tr>
@@ -693,6 +941,16 @@ export function Arm() {
                     <td className="mono">{pose.name}</td>
                     <td className="faint mono" style={{ fontSize: 11.5 }}>
                       {pose.joints_deg.map((v) => v.toFixed(1)).join(' · ')}
+                    </td>
+                    <td
+                      className="mono"
+                      style={{
+                        fontSize: 11.5,
+                        color:
+                          pose.radius_m > (status?.max_reach_m ?? Infinity) ? 'var(--red)' : 'var(--text-faint)',
+                      }}
+                    >
+                      {pose.radius_m ? `${pose.radius_m.toFixed(2)} m` : '—'}
                     </td>
                     <td className="faint mono" style={{ fontSize: 11.5 }}>
                       {new Date(pose.updated_at ?? pose.created_at ?? Date.now()).toLocaleString('en-GB')}
@@ -718,8 +976,8 @@ export function Arm() {
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
-            Recalling a preset runs at the current speed cap in 15° segments. Keep the workspace clear for the whole
-            move.
+            Linear path moves the gripper in a straight Cartesian line and avoids the outward arc; joint path uses
+            60° joint segments and is rejected if the arc exceeds Max reach. Recall runs at the current speed cap.
           </p>
         </div>
       </Card>
@@ -1037,7 +1295,7 @@ export function Arm() {
             Home / fold
           </button>
           <span className="faint" style={{ fontSize: 12 }}>
-            Drag sliders commit on release. The bridge splits moves into 15° segments.
+            Drag sliders commit on release. Manual moves are capped at 60° per command.
           </span>
         </div>
       </Card>

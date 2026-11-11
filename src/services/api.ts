@@ -63,6 +63,9 @@ export interface ArmStatus {
   learning_mode: boolean | null
   max_velocity: number
   velocity_limit: number
+  max_reach_m: number
+  tool_extension_m: number
+  reach_m: number | null
   max_step_deg: number
   max_request_deg: number
   max_pose_deg: number
@@ -71,12 +74,18 @@ export interface ArmStatus {
   gripper: string
   busy: boolean
   error: string | null
+  fault: string | null
+  collision: boolean
+  recovery_available: boolean
+  recovery_target_deg: number[] | null
+  collision_api: 'hardware' | 'motion-error' | 'unknown'
   updated_at: number | null
 }
 
 export interface ArmPosePreset {
   name: string
   joints_deg: number[]
+  radius_m: number
   created_at: string | null
   updated_at: string | null
 }
@@ -95,7 +104,7 @@ const ARM_LIMITS_DEG: [number, number][] = [
   [-104.35, 34.45],
   [-76.5, 85.0],
   [-119.19, 119.19],
-  [-99.5, 54.5],
+  [-99.5, 109.5],
   [-144.46, 144.46],
 ]
 
@@ -109,6 +118,7 @@ const mockArm = {
   tool: null as string | null,
   gripper: 'unknown',
   maxVelocity: 5,
+  maxReach: 0.47,
   error: null as string | null,
 }
 
@@ -123,7 +133,10 @@ function mockArmStatus(): ArmStatus {
     learning_mode: mockArm.learningMode,
     max_velocity: mockArm.maxVelocity,
     velocity_limit: 20,
-    max_step_deg: 15,
+    max_reach_m: mockArm.maxReach,
+    tool_extension_m: 0.1,
+    reach_m: null,
+    max_step_deg: 60,
     max_request_deg: 60,
     max_pose_deg: 180,
     limits_deg: ARM_LIMITS_DEG,
@@ -131,6 +144,11 @@ function mockArmStatus(): ArmStatus {
     gripper: mockArm.gripper,
     busy: false,
     error: mockArm.error,
+    fault: null,
+    collision: false,
+    recovery_available: false,
+    recovery_target_deg: null,
+    collision_api: 'motion-error',
     updated_at: Math.floor(Date.now() / 1000),
   }
 }
@@ -371,6 +389,16 @@ export const api = {
     return jsonRequest<ArmStatus>('/arm/velocity', { percent })
   },
 
+  /** Set the max horizontal gripper-tip reach (metres). */
+  async setArmReach(maxReachM: number): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(80)
+      mockArm.maxReach = Math.max(0.15, Math.min(0.5, maxReachM))
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/reach', { max_reach_m: maxReachM })
+  },
+
   /** Fold to the PyNiryo home pose (safe transit / park). */
   async homeArm(): Promise<ArmStatus> {
     if (MOCK_MODE) {
@@ -380,6 +408,28 @@ export const api = {
       return mockArmStatus()
     }
     return jsonRequest<ArmStatus>('/arm/home', {})
+  },
+
+  /** Retract slowly to the last safe joint position after a collision/fault. */
+  async recoverArm(): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(300)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      mockArm.error = null
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/recover', {})
+  },
+
+  /** Acknowledge a motion fault after inspecting the arm by hand. */
+  async clearArmFault(): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(100)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      mockArm.error = null
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/fault/clear', {})
   },
 
   /** Auto-calibration sweeps the full joint range (~30 s); workspace must be clear. */
@@ -428,6 +478,18 @@ export const api = {
     return jsonRequest<ArmStatus>('/arm/gripper/close', {})
   },
 
+  /** Firmware-specific 1-parameter OPEN/CLOSE_GRIPPER (speed 100–1000). */
+  async rawArmGripper(openGripper: boolean, speed = 500): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(200)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      if (mockArm.learningMode) throw new Error('motors are released')
+      mockArm.gripper = openGripper ? 'open' : 'closed'
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/gripper/raw', { open: openGripper, speed })
+  },
+
   async scanArmTool(): Promise<ArmStatus> {
     if (MOCK_MODE) {
       await delay(200)
@@ -462,7 +524,7 @@ export const api = {
         existing.updated_at = now
         return { ...existing, joints_deg: [...existing.joints_deg] }
       }
-      const pose: ArmPosePreset = { name: trimmed, joints_deg: joints, created_at: now, updated_at: now }
+      const pose: ArmPosePreset = { name: trimmed, joints_deg: joints, radius_m: 0, created_at: now, updated_at: now }
       mockPoses.push(pose)
       return { ...pose, joints_deg: [...pose.joints_deg] }
     }
@@ -487,7 +549,7 @@ export const api = {
     )
   },
 
-  async applyArmPose(name: string): Promise<ArmStatus> {
+  async applyArmPose(name: string, linear = true): Promise<ArmStatus> {
     if (MOCK_MODE) {
       await delay(300)
       const pose = mockPoses.find((p) => p.name === name)
@@ -495,7 +557,7 @@ export const api = {
       mockArmMove(pose.joints_deg, 180)
       return mockArmStatus()
     }
-    return jsonRequest<ArmStatus>(`/arm/poses/${encodeURIComponent(name)}/apply`, {})
+    return jsonRequest<ArmStatus>(`/arm/poses/${encodeURIComponent(name)}/apply`, { linear })
   },
 
   async listArmSequences(): Promise<ArmSequence[]> {

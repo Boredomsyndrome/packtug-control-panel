@@ -406,10 +406,17 @@ class NavDaemon:
                 seen = self._tf_pose[1] if self._tf_pose else self._tf_started
                 if time.monotonic() - seen > 120.0:
                     log.warning("tf stream silent >120s — recycling for respawn")
+                    # killpg: terminate() only reaped the `ros2 run` wrapper;
+                    # the real tf2_echo binary orphaned out (23 zombies in
+                    # one afternoon, DDS spam -> load 14). start_new_session
+                    # made proc.pid the pgid, so kill the whole group.
                     try:
-                        self._tf_proc.terminate()
+                        os.killpg(os.getpgid(self._tf_proc.pid), 9)
                     except OSError:
-                        pass
+                        try:
+                            self._tf_proc.kill()
+                        except OSError:
+                            pass
                     self._tf_proc = None
                 else:
                     return

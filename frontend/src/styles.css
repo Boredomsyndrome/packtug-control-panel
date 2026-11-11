@@ -17,9 +17,10 @@ body {
   font-family: system-ui, "Segoe UI", Roboto, sans-serif;
   -webkit-user-select: none;
   user-select: none;
+  overflow-y: auto;  /* v3.4.5: short screens must be able to scroll */
 }
 
-.app { display: flex; flex-direction: column; height: 100%; }
+.app { display: flex; flex-direction: column; min-height: 100%; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -39,7 +40,7 @@ body {
 .bar i { display: block; height: 100%; background: var(--ok); }
 
 .grid {
-  flex: 1; display: grid; grid-template-columns: 1fr 340px;
+  flex: 1 0 auto; display: grid; grid-template-columns: 1fr 340px;
   gap: 14px; padding: 14px; min-height: 0;
 }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
@@ -146,7 +147,7 @@ button { font-family: inherit; }
 /* ---- v3.3 autonomy panel ---- */
 .rightcol { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 .navpanel { background: var(--panel); border: 1px solid var(--line);
-  border-radius: 10px; padding: 12px; flex: 0 1 auto; overflow-y: auto;
+  border-radius: 10px; padding: 12px; flex: 0 0 auto; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px; }
 .navhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .navmode { font-size: 11px; font-weight: 700; padding: 2px 9px;
@@ -191,7 +192,7 @@ button { font-family: inherit; }
   border-radius: 999px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
 
 /* v3.4: camera pane removed — LiDAR is the main sensor view */
-.lidar.big { flex: 1 1 auto; height: auto; min-height: 320px; }
+.lidar.big { flex: 1 1 48vh; height: auto; min-height: 320px; }
 .wpslotrow { gap: 8px; }
 .wpslotrow .navbtn.save { flex: 1; }
 .wpreadout { display: flex; gap: 16px; flex-wrap: wrap;

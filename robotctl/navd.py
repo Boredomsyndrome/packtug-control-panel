@@ -130,7 +130,7 @@ class NavDaemon:
 
     def _do_action(self, action, m):
         if action == "map_on":
-            self._navctl(["map-on"], ok_mode="mapping", timeout=180)
+            self._navctl(["map-on"], ok_mode="mapping", timeout=300)
         elif action == "map_save":
             name = self._safe(m.get("name"), "room1")
             if self._navctl(["map-save", name], ok_mode=None, timeout=120):
@@ -472,6 +472,8 @@ class NavDaemon:
                 self.error = f"navctl {args[0]}: {out[-240:]}"
             log.warning("navctl %s failed: %s", args, out[-240:])
             return False
+        with self.lock:
+            self.error = None  # a success clears any stale navctl error
         if ok_mode is not None:
             with self.lock:
                 self.mode = ok_mode

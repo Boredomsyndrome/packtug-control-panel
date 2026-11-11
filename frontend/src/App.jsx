@@ -286,7 +286,7 @@ export default function App() {
         </section>
 
         {sel && (
-          <section className="navpanel">
+          <section className="navpanel" id="autonomy">
             <NavPanel key={sel} robotId={sel} status={status} connected={connected} />
           </section>
         )}

@@ -485,8 +485,18 @@ class NavDaemon:
                 self._upload_map(args[1], dry=True)
             return True
         try:
-            r = subprocess.run(["bash", NAVCTL] + list(args),
-                               capture_output=True, text=True, timeout=timeout)
+            # Capture via TEMP FILES, never PIPEs: navctl.sh's `ros2` calls
+            # auto-start the ros2 daemon, which inherits any pipe we pass —
+            # the pipe then never EOFs and run() blocks to its timeout even
+            # though the stack came up (v3.4.7 incident, 2026-11-11).
+            import tempfile
+            with tempfile.TemporaryFile("w+") as _o, \
+                    tempfile.TemporaryFile("w+") as _e:
+                r = subprocess.run(["bash", NAVCTL] + list(args),
+                                   stdout=_o, stderr=_e, text=True,
+                                   stdin=subprocess.DEVNULL, timeout=timeout)
+                _o.seek(0); _e.seek(0)
+                r.stdout, r.stderr = _o.read(), _e.read()
         except (OSError, subprocess.TimeoutExpired) as e:
             with self.lock:
                 self.error = f"navctl {' '.join(args)}: {e}"

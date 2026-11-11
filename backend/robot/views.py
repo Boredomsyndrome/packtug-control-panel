@@ -100,6 +100,19 @@ def map_file_view(request, robot_id, name, ext):
                         as_attachment=False, filename=f"{name}.{ext}")
 
 
+def _no_cache_index(response):
+    """index.html must NEVER be cached — it pins hashed bundle names.
+
+    A cached stale index.html asks the hub for JS files that the current
+    WhiteNoise index no longer knows, the SPA catch-all serves HTML for
+    those requests, and the browser shows a BLANK PAGE. Cost of a miss:
+    one 304. Cost of a stale: users stare at nothing, desu.
+    """
+    if response.template_name and "index.html" in response.template_name:
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 def index_view(request):
     dist = Path(settings.PROJECT_ROOT) / "frontend" / "dist" / "index.html"
     if not dist.exists():
@@ -108,4 +121,4 @@ def index_view(request):
             "Run <code>cd frontend && npm ci && npm run build</code>.</p>",
             status=200,
         )
-    return TemplateResponse(request, "index.html")
+    return _no_cache_index(TemplateResponse(request, "index.html"))

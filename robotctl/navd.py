@@ -71,6 +71,7 @@ class NavDaemon:
         self._client = None                 # ActionClient (lazy, real mode)
         self._own_node = None               # navd-dedicated rclpy node
         self._tf_proc = None                # tf2_echo stream (real mode)
+        self._tf_started = 0.0              # monotonic ts of current spawn
         self._tf_pose = None                # ((x, y, yaw), monotonic ts)
         self._tf_open_fail = 0.0            # backoff after spawn failure
         self._goal = None
@@ -78,6 +79,8 @@ class NavDaemon:
         self._pose_pub = None               # /initialpose publisher (lazy)
         self._map_timer = 0.0
         os.makedirs(MAPS_DIR, exist_ok=True)
+        threading.Thread(target=self._resync_mode, daemon=True,
+                         name="nav-resync").start()   # non-blocking: it shells out
 
     # ------------------------------------------------------------- client API
     def handle(self, msg):
@@ -255,21 +258,29 @@ class NavDaemon:
                 self.mode = "localizing"
 
     def _do_halt(self, reason):
+        # Soft reasons (e-stop pressed, transient link loss, client restart)
+        # must NOT tear the SLAM/EKF stack down — a 15s WiFi flap or a client
+        # upgrade used to destroy minutes of mapping, and setsid'd processes +
+        # startup resync exist precisely so the plane outlives the client.
+        # Only the explicit nav-off button tears the stack down.
+        soft = reason != "nav_off"
         with self.lock:
             self.driving = False
             self.error = f"halted: {reason}"
+            if soft and self.mode == "route":
+                self.mode = "localizing"   # stack still up; route aborted
         goal = self._goal
         if goal is not None:
             try:
                 goal.cancel_goal_async()
             except Exception:
                 pass
-        if not self.dry and (self.mode != "off" or self._nav_running()):
+        if not soft and not self.dry and (self.mode != "off" or self._nav_running()):
             self._navctl(["stop"], ok_mode="off", timeout=20)
-        else:
+        elif not soft:
             with self.lock:
                 self.mode, self.map = "off", self.map
-        log.warning("nav HALT (%s)", reason)
+        log.warning("nav HALT (%s, %s)", reason, "soft" if soft else "hard")
 
     def _do_record(self, m):
         name = self._safe(m.get("name"), f"wp-{int(time.time())}")
@@ -386,11 +397,24 @@ class NavDaemon:
     # sample, self-healing.
 
     def _tf_stream(self):
-        """Ensure the tf2_echo map->base_footprint stream is alive."""
+        """Ensure the tf2_echo map->base_footprint stream is ALIVE AND TALKING."""
         if self._tf_proc is not None:
             if self._tf_proc.poll() is None:
-                return
-            self._tf_proc = None  # died (TF tree went down) -> respawn
+                # A tf2_echo spawned before the TF tree existed logs one
+                # complaint then goes SILENT FOREVER (tf2_echo behavior).
+                # Recycle streams that stopped producing pose samples.
+                seen = self._tf_pose[1] if self._tf_pose else self._tf_started
+                if time.monotonic() - seen > 120.0:
+                    log.warning("tf stream silent >120s — recycling for respawn")
+                    try:
+                        self._tf_proc.terminate()
+                    except OSError:
+                        pass
+                    self._tf_proc = None
+                else:
+                    return
+            else:
+                self._tf_proc = None  # died (TF tree went down) -> respawn
         if time.monotonic() - self._tf_open_fail < 30.0:
             return  # back off after a failed spawn; slam may not exist yet
         ros = os.environ.get("WEBCTL_ROS_SETUP", "/opt/ros/humble/setup.bash")
@@ -406,6 +430,7 @@ class NavDaemon:
             log.warning("tf stream spawn failed: %s", e)
             return
         self._tf_proc = proc
+        self._tf_started = time.monotonic()
         threading.Thread(target=self._tf_reader, args=(proc,),
                          daemon=True, name="webctl-navd-tf").start()
 
@@ -481,6 +506,25 @@ class NavDaemon:
                     self.driving = False
         log.info("navctl %s -> %s", " ".join(args), out[-160:] or "ok")
         return True
+
+    def _resync_mode(self):
+        """Adopt the truth about the nav plane from the robot itself —
+        a client restart must not report 'idle' while SLAM/Nav2 run on
+        (they're setsid'd and outlive the client by design)."""
+        if self.dry:
+            return
+        try:
+            r = subprocess.run(["bash", NAVCTL, "status"],
+                               capture_output=True, text=True, timeout=15)
+            st = (r.stdout or "").strip()
+            if "localizing" in st:
+                self.mode = "localizing"
+            elif "mapping" in st:
+                self.mode = "mapping"
+            if self.mode != "off":
+                log.info("nav resync: adopting mode=%s from robot", self.mode)
+        except Exception as e:
+            log.debug("nav resync failed: %s", e)
 
     def _nav_running(self):
         if self.dry:

@@ -542,8 +542,8 @@ function NavPanel({ robotId, status, connected }) {
         <input value={mapName} maxLength={32} placeholder="map name"
                disabled={!live || mode === 'route'}
                onChange={(e) => setMapName(e.target.value.replace(/[^A-Za-z0-9_-]/g, ''))} />
-        <button className="navbtn" disabled={!live || mode === 'route'}
-                title="stop SLAM, save it as the named map"
+        <button className="navbtn" disabled={!live || !navActive}
+                title="stop SLAM, save it as the named map (needs SLAM/nav running)"
                 onClick={() => act({ action: 'map_save', name: mapName || 'room1' })}>💾 save</button>
         <button className="navbtn" disabled={!live || !maps.length || mode === 'route'}
                 title="start Nav2 localization on the selected map"

@@ -30,6 +30,10 @@ mkdir -p "$MAPS"
 
 has_topic() { timeout 6 ros2 topic list 2>/dev/null | grep -qx "$1"; }
 has_topic_like() { timeout 6 ros2 topic list 2>/dev/null | grep -q "$1"; }
+# ros2 CLI probes need the ros2 daemon — cold daemon = 40s per probe = every
+# bounded check FAILS. Process checks are instant and daemon-free; the
+# [x] bracket stops the script matching its own argv.
+proc() { pgrep -f "$1" >/dev/null 2>&1; }
 
 # The vendor robot_mode_description.launch.py gates the four_wheel_diff_bs
 # group on IfCondition(senior_mec_dl) — a copy-paste bug upstream, so the
@@ -57,15 +61,15 @@ ensure_tf() {
 case "$cmd" in
   map-on)
     ensure_tf
-    if has_topic /map; then echo "mapping already up (/map live)"; exit 0; fi
+    if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
     setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
-    sleep 8
-    if has_topic /map; then echo "mapping up"; else
-      echo "FAILED: slam_toolbox did not publish /map — tail /tmp/nav_map.log"; exit 1; fi
+    for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
+    if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
+      echo "FAILED: slam_toolbox died at startup — tail /tmp/nav_map.log"; exit 1; fi
     ;;
   map-save)
     name="${1:-room1}"
-    has_topic /map || { echo "FAILED: no /map — start mapping first"; exit 1; }
+    proc "[a]sync_slam_toolbox_node" || proc "[m]ap_server" || { echo "FAILED: no live map publisher — start mapping or nav first"; exit 1; }
     ros2 run nav2_map_server map_saver_cli -f "$MAPS/$name" >/tmp/nav_saver.log 2>&1
     if [ -f "$MAPS/$name.pgm" ] && [ -f "$MAPS/$name.yaml" ]; then
       echo "saved $MAPS/$name"
@@ -82,11 +86,10 @@ case "$cmd" in
     sleep 2
     setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 launch wheeltec_nav2 bringup_launch.py slam:=false autostart:=true map:=$MAPS/$name.yaml params_file:=$PARAM" >/tmp/nav_stack.log 2>&1 </dev/null &
     sleep 10
-    if has_topic /amcl_pose || has_topic /initialpose; then
-      if has_topic_like follow_waypoints; then echo "nav up (map=$name, waypoints ok)"
-      else echo "nav up (map=$name) WARN: /follow_waypoints not visible yet"; fi
+    if proc "[b]ringup_launch.py"; then
+      echo "nav up (map=$name)"
     else
-      echo "FAILED: AMCL not live — tail /tmp/nav_stack.log"; exit 1
+      echo "FAILED: Nav2 launch died — tail /tmp/nav_stack.log"; exit 1
     fi
     ;;
   stop)
@@ -105,17 +108,16 @@ case "$cmd" in
     pkill -9 -f 'webctl_navctl_tf'    2>/dev/null
     pkill -9 -f 'webctl_navctl_ekf'   2>/dev/null
     
-    sleep 1
-    if has_topic /amcl_pose || has_topic /map; then
-      echo "WARN: nav topics still live after stop"; exit 1
+    sleep 2
+    if proc "[a]sync_slam_toolbox_node" || proc "[b]ringup_launch.py"; then
+      echo "WARN: nav processes still live after stop"; exit 1
     fi
     echo "nav stopped"
     ;;
   status)
     state=""
-    has_topic /map && state="$state mapping"
-    has_topic /amcl_pose && state="$state localizing"
-    has_topic_like follow_waypoints && state="$state waypoints"
+    proc "[a]sync_slam_toolbox_node" && state="$state mapping"
+    proc "[b]ringup_launch.py" && state="$state localizing"
     [ -n "$state" ] && { echo "running$state"; exit 0; }
     echo "idle"; exit 0
     ;;

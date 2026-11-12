@@ -156,7 +156,10 @@ class RobotViewSet(ViewSet):
                                  "missing": missing},
                                 status=http_status.HTTP_400_BAD_REQUEST)
             poses = [[wps[w]["x"], wps[w]["y"], wps[w]["yaw"]] for w in names]
-            rid = hub.push_nav("route", poses=poses, order=list(names))
+            # pass the last-known map so the robot can AUTO-ARM the stack if
+            # it is sitting idle (route button = "whatever it takes to drive")
+            rid = hub.push_nav("route", poses=poses, order=list(names),
+                               map=(hub.nav_state or {}).get("map"))
         elif a == "align":
             wps = navstore.list_waypoints(pk)
             wp = wps.get(names[0])

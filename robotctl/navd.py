@@ -166,7 +166,7 @@ class NavDaemon:
             if point:
                 self._republish_initial_pose(point)
         elif action == "route":
-            self._start_route(m.get("poses") or [])
+            self._start_route(m.get("poses") or [], m)
         elif action == "nav_cancel":
             self._cancel_goal()
         elif action == "nav_off":
@@ -185,16 +185,17 @@ class NavDaemon:
                 log.info("nav: deleted local map '%s'", name)
 
     # ------------------------------------------------------- action internals
-    def _start_route(self, poses):
+    def _start_route(self, poses, m=None):
         """poses: [[x, y, yaw], …] in the MAP frame. THE only motion path."""
         if len(poses) < 1:
             with self.lock:
                 self.error = "route: empty pose list"
             return
         with self.lock:
-            if self.mode not in ("localizing", "route"):
-                self.error = "route: nav stack not up (start nav first)"
-                return
+            not_up = self.mode not in ("localizing", "route")
+        if not_up and not self._auto_arm(m or {}):
+            return
+        with self.lock:
             self.route_total = len(poses)
             self.route_done = 0
             self.error = None
@@ -204,6 +205,11 @@ class NavDaemon:
             log.info("nav(dry): route %d waypoints (simulated)", len(poses))
             threading.Timer(2.0, self._dry_route_done,
                             args=(len(poses),)).start()
+            return
+        if not self._await_pose(20.0):
+            with self.lock:
+                self.error = ("route: not localized yet — AMCL has no pose "
+                              "(press ⌖ align on the robot's true spot)")
             return
         try:
             client = self._action_client()
@@ -228,6 +234,54 @@ class NavDaemon:
             self.route_done = n
             self.mode, self.driving = "localizing", False
         log.info("nav(dry): route complete")
+
+    def _auto_arm(self, m):
+        """START ROUTE with the stack DOWN: bring Nav2 up on the best-known
+        map and arm AMCL, then let the route proceed — the hub UI treats the
+        route button as 'do what is needed to drive this'. Refuses (with a
+        surfaced error) only when no single obvious map exists. Rationale:
+        v3.5.2 incident — route silently refused in mode 'off' and the user
+        saw 'robot has no action'."""
+        name = self._safe(m.get("map"), "") or self.map
+        if not name:
+            maps = self._local_maps()
+            if len(maps) == 1:
+                name = maps[0]
+            elif maps:
+                with self.lock:
+                    self.error = ("route: several maps saved — press 🎯 nav "
+                                  "on the one you want first")
+                return False
+        if not name:
+            with self.lock:
+                self.error = "route: no saved map on the robot — make one first (🗺)"
+            return False
+        log.info("nav: auto-arming stack on '%s' for route", name)
+        if not self._navctl(["stack-on", name], ok_mode="localizing",
+                            timeout=180):
+            return False
+        with self.lock:
+            self.map = name
+        self._republish_initial_pose(m.get("align_pose") or [0.0, 0.0, 0.0])
+        return True
+
+    def _await_pose(self, timeout=20.0):
+        """Block (worker thread) until the TF map->base pose is live or the
+        deadline passes. A route goal fired while AMCL has no pose would be
+        accepted and then wander blind in the costmap frame."""
+        if self.dry:
+            return True
+        end = time.monotonic() + timeout
+        t0 = time.monotonic()
+        while time.monotonic() < end:
+            pose, _frame = self._pose_sample()
+            if pose is not None:
+                if time.monotonic() - t0 > 1.0:
+                    log.info("nav: pose acquired after %.1fs", time.monotonic() - t0)
+                return True
+            time.sleep(0.5)
+        log.warning("nav: no pose after %.0fs — refusing route", timeout)
+        return False
 
     def _goal_cb(self, fut):
         try:

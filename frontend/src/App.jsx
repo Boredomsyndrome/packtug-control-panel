@@ -537,8 +537,9 @@ function NavPanel({ robotId, status, connected }) {
                 onClick={() => act({ action: 'map_on' })}>🗺 Map</button>
         <button className="navbtn" disabled={!live || mode !== 'mapping'}
                 onClick={() => act({ action: 'map_off' })}>map ⏹</button>
-        <button className="navbtn" disabled={!live || mode === 'route'}
-                onClick={() => act({ action: 'nav_off' })}>nav ⏻</button>
+        <button className="navbtn" disabled={!live || mode === 'off' || mode === 'route'}
+                title="stop the navigation stack"
+                onClick={() => act({ action: 'nav_off' })}>⏹ nav stop</button>
       </div>
       <div className="row">
         <input value={mapName} maxLength={32} placeholder="map name"
@@ -604,7 +605,8 @@ function NavPanel({ robotId, status, connected }) {
 
       <div className="row">
         <button className="routebtn"
-                disabled={!live || mode !== 'localizing' || route.length === 0}
+                disabled={!live || route.length === 0}
+                title="drives the route; starts Nav2 on the selected map automatically if the stack is idle"
                 onClick={() => act({ action: 'route', waypoints: route })}>
           ▶ START ROUTE
         </button>

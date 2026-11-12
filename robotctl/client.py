@@ -74,9 +74,19 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.3.0-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.0-stdlib")
 
-SERVER = os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000").rstrip("/")
+SERVERS = [s.rstrip("/") for s in
+           os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000")
+           .replace(",", " ").replace(";", " ").split() if s.strip()] \
+    or ["http://127.0.0.1:8000"]
+# v3.6: WEBCTL_SERVER may hold a LIST of hub URLs (space/comma separated),
+# e.g. "http://192.168.1.142:8090 http://192.168.42.1:8090" — LAN first, VPN
+# second (or vice versa). The client STICKS to whichever is reachable and
+# rotates one step right on every link failure, so unplugging the VPN (or
+# the LAN cable) self-heals without restarts. SERVER stays the legacy alias
+# of the first entry for banners/old tooling.
+SERVER = SERVERS[0]
 ROBOT_ID = os.getenv("WEBCTL_ROBOT_ID", "")
 ROBOT_TOKEN = os.getenv("WEBCTL_ROBOT_TOKEN", "")
 TRANSPORT = os.getenv("WEBCTL_TRANSPORT", "auto").lower()      # auto|ws|http
@@ -376,6 +386,19 @@ class Client:
         self.scan_ts = 0.0
         self._topics_cache = (0.0, {})  # (checked_at, {"image": [...], "scan": [...]})
         self.navd = None               # NavDaemon when WEBCTL_NAV=1
+        self.server_i = 0              # live index into SERVERS (failover)
+
+    # ---------- server failover ----------
+    def base(self):
+        return SERVERS[self.server_i % len(SERVERS)]
+
+    def _rotate(self, why=""):
+        """Next endpoint on any link failure; single-server configs no-op."""
+        if len(SERVERS) > 1:
+            self.server_i = (self.server_i + 1) % len(SERVERS)
+            log.warning("server failover -> %s (%s)", self.base(), why)
+            return True
+        return False
 
     # ---------- velocity ----------
     def apply(self, vx, wz, estop=False):
@@ -422,7 +445,7 @@ class Client:
 
     # ---------- http ----------
     def _http(self, method, path, body=None, headers=None, timeout=6.0):
-        req = urllib.request.Request(SERVER + path, data=body, method=method,
+        req = urllib.request.Request(self.base() + path, data=body, method=method,
                                      headers={**self.auth_hdr, **(headers or {})})
         try:
             with self.opener.open(req, timeout=timeout) as r:
@@ -430,6 +453,7 @@ class Client:
         except urllib.error.HTTPError as e:
             return e.code, e.read()
         except Exception as e:
+            self._rotate(f"{method} {path}: {e}")
             raise LinkError(str(e)) from e
 
     # ---------- networking (single thread owns the ws) ----------
@@ -443,7 +467,7 @@ class Client:
             now = time.monotonic()
             if self.ws is None and want_ws and (now - last_try) >= min(5.0, 0.5 * (2 ** min(fails, 4))):
                 last_try = now
-                url = (SERVER.replace("http://", "ws://").replace("https://", "wss://")
+                url = (self.base().replace("http://", "ws://").replace("https://", "wss://")
                        + f"/ws/robotctl/{ROBOT_ID}?token={urllib.parse.quote(ROBOT_TOKEN, safe='')}")
                 try:
                     ws = StdWs(url, timeout=5.0)
@@ -461,6 +485,9 @@ class Client:
                     if fails in (1, 2, 5) or fails % 10 == 0:
                         log.warning("ws connect failed (%d): %s%s", fails, e,
                                     " — using HTTP fallback" if TRANSPORT == "auto" else "")
+                    # rotate so the NEXT attempt tries a different endpoint
+                    # (VPN/LAN failover; sticks once one endpoint connects)
+                    self._rotate(f"ws: {e}")
             if self.ws is not None:
                 # unconditional keepalive: busy cmd bursts starve a
                 # timeout-only ping (v3.0.2)
@@ -737,7 +764,7 @@ class Client:
 
     def run(self):
         log.info("robotctl %s client '%s' -> %s (transport=%s watchdog=%.2fs cam=%s)",
-                 VERSION, ROBOT_ID, SERVER, TRANSPORT, WATCHDOG, CAM_MODE)
+                 VERSION, ROBOT_ID, " | ".join(SERVERS), TRANSPORT, WATCHDOG, CAM_MODE)
         log.info("initialising velocity sink (dry_run=%s; first rclpy start "
                  "can take a few seconds)...", DRY_RUN)
         self.sink = self._make_sink()
@@ -1308,5 +1335,5 @@ if __name__ == "__main__":
     # here (bad interpreter/env) — distinguishes wrapper vs client silence.
     print(f"robotctl {VERSION} starting "
           f"(python {sys.version.split()[0]}, id={ROBOT_ID or '(unset -> exits)'}"
-          f", server={SERVER})", flush=True)
+          f", server={'|'.join(SERVERS)})", flush=True)
     Client().run()

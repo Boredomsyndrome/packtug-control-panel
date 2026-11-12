@@ -470,5 +470,57 @@ check("republish stops once amcl_pose seen",
       len(nd4._own_node.pub.msgs) == _n,
       f"{_n} -> {len(nd4._own_node.pub.msgs)}")
 
+# ------------------------------------------------ v3.6: route auto-arm + failover
+import tempfile as _tf
+import os as _os
+import importlib as _il
+
+_mapdir = _tf.mkdtemp()
+for _ext in (".pgm", ".yaml"):
+    open(_os.path.join(_mapdir, "corridor" + _ext), "w").close()
+navd.MAPS_DIR = _mapdir
+
+nd5 = navd.NavDaemon(sink=None, post=None, dry=True, robot_id="shimbot")
+nd5.handle({"rid": 10, "action": "route", "poses": [[1, 1, 0]]})
+s = _wait_nav(nd5, lambda s: s["mode"] == "route", timeout=6.0)
+check("route on an IDLE stack auto-arms Nav2 then drives (v3.6)",
+      s["mode"] == "route" and s["map"] == "corridor",
+      f"mode={s['mode']} map={s['map']}")
+
+open(_os.path.join(_mapdir, "attic.pgm"), "w").close()
+open(_os.path.join(_mapdir, "attic.yaml"), "w").close()
+nd6 = navd.NavDaemon(sink=None, post=None, dry=True, robot_id="shimbot")
+nd6.handle({"rid": 10, "action": "route", "poses": [[1, 1, 0]]})
+_time.sleep(0.6)
+s = nd6.snapshot()
+check("auto-arm refuses AMBIGUOUS map choice with surfaced error",
+      "press" in (s["error"] or "") and s["mode"] == "off", s["error"])
+
+_os.environ["WEBCTL_SERVER"] = "http://lan:8090 http://vpn:8090,"
+_spec = importlib.util.spec_from_file_location("client_v36_reload", str(CLIENT))
+client36 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(client36)          # fresh load with LIST env set
+check("WEBCTL_SERVER list parses (space+comma separated)",
+      client36.SERVERS == ["http://lan:8090", "http://vpn:8090"],
+      str(client36.SERVERS))
+c = client36.Client.__new__(client36.Client)
+c.server_i = 0
+ok1 = c.base() == "http://lan:8090"
+c._rotate("t"); ok2 = c.base() == "http://vpn:8090"
+c._rotate("t"); ok3 = c.base() == "http://lan:8090"
+check("endpoint rotation round-robins", ok1 and ok2 and ok3)
+
+def _boom(req, timeout=None):
+    raise OSError("unreachable")
+c2 = client36.Client.__new__(client36.Client)
+c2.server_i, c2.auth_hdr = 0, {}
+c2.opener = types.SimpleNamespace(open=_boom)
+try:
+    c2._http("GET", "/x")
+    ok4 = False
+except client36.LinkError:
+    ok4 = c2.server_i == 1
+check("_http link failure rotates to next endpoint", ok4)
+
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

@@ -62,7 +62,7 @@ case "$cmd" in
   map-on)
     ensure_tf
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom_combined -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
     for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
       echo "FAILED: slam_toolbox died at startup — tail /tmp/nav_map.log"; exit 1; fi

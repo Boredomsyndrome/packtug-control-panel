@@ -84,7 +84,7 @@ case "$cmd" in
     # slam_toolbox and AMCL both want to own map->odom: hand the TF over.
     pkill -f async_slam_toolbox_node 2>/dev/null
     sleep 2
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 launch wheeltec_nav2 bringup_launch.py slam:=false autostart:=true map:=$MAPS/$name.yaml params_file:=$PARAM" >/tmp/nav_stack.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 launch wheeltec_nav2 bringup_launch.py slam:=False autostart:=true map:=$MAPS/$name.yaml params_file:=$PARAM" >/tmp/nav_stack.log 2>&1 </dev/null &
     sleep 10
     if proc "[b]ringup_launch.py"; then
       echo "nav up (map=$name)"

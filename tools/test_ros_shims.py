@@ -296,7 +296,12 @@ def _wait_nav(nd, pred, timeout=4.0):
     return nd.snapshot()
 
 
+_warm_calls = []
+_orig_wn = navd.NavDaemon._warm_node
+navd.NavDaemon._warm_node = lambda self: (_warm_calls.append(1), _orig_wn(self))
 nd = navd.NavDaemon(sink=None, post=None, dry=True, robot_id="shimbot")
+_time.sleep(0.3)
+check("dry daemon does NOT warm ros2 (v3.6.2)", not _warm_calls)
 _rids = iter(range(1, 200))
 
 
@@ -416,6 +421,10 @@ def _flaky_post(method, path, body=None, headers=None, timeout=None):
     return (200, b'{"ok": true}')
 nd3 = navd.NavDaemon(sink=None, post=_flaky_post, dry=False,
                      robot_id="shimbot")
+_time.sleep(0.5)
+check("real daemon warms ros2 node at startup (v3.6.2)", _warm_calls)
+# later cases need deterministic node ownership: keep warm a no-op for them
+navd.NavDaemon._warm_node = lambda self: None
 ok = nd3._upload_map("corridor")
 check("upload retry rides out one fake link failure",
       ok and _calls["n"] == 2, f"ok={ok} calls={_calls['n']}")

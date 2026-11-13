@@ -93,6 +93,19 @@ def delete_waypoint(robot_id: str, name: str) -> bool:
         return False
 
 
+def clear_waypoints(robot_id: str) -> bool:
+    """Delete ALL saved waypoints of one robot (UI 'clear path'). True only
+    if something actually existed, so a double-tap 404s instead of lying."""
+    with _lock:
+        data = _load()
+        wps = data.get(robot_id, {}).get("waypoints", {})
+        if not wps:
+            return False
+        data[robot_id]["waypoints"] = {}
+        _save(data)
+        return True
+
+
 # ----------------------------------------------------------------- maps ----
 def maps_dir(robot_id: str) -> Path:
     return _root() / "maps" / robot_id

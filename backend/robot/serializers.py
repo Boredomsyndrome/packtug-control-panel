@@ -96,7 +96,7 @@ class NavActionSerializer(serializers.Serializer):
     defensively, and only 'route' with a resolvable pose list can move it."""
     ACTIONS = ("map_on", "map_off", "map_save", "nav_on", "route",
                "nav_cancel", "nav_off", "record", "align",
-               "delete_map", "delete_waypoint")
+               "delete_map", "delete_waypoint", "clear_waypoints")
     action = serializers.ChoiceField(choices=ACTIONS)
     name = serializers.CharField(required=False, max_length=32,
                                  validators=[_NAME_RE])

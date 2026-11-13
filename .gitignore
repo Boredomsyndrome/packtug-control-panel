@@ -14,3 +14,4 @@ db.sqlite3
 __MACOSX/
 .data/
 .itest-nav/
+.robotctl.*.lock

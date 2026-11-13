@@ -574,6 +574,20 @@ try:
     check("waypoint delete", st == 200 and wait_for(
         lambda: "itest-wp" not in json.loads(
             req(API + "/alpha/nav")[2].decode())["waypoints"], 3))
+    # v3.6.2: whole-path delete button ('⌫ clear path')
+    req(API + "/alpha/nav", {"action": "record", "name": "clr-a"})
+    check("clr-a recorded", wait_for(
+        lambda: "clr-a" in json.loads(req(API + "/alpha/nav")[2].decode())["waypoints"], 6))
+    req(API + "/alpha/nav", {"action": "record", "name": "clr-b"})
+    check("clr-b recorded", wait_for(
+        lambda: "clr-b" in json.loads(req(API + "/alpha/nav")[2].decode())["waypoints"], 6))
+    st, _, _ = req(API + "/alpha/nav", {"action": "clear_waypoints"})
+    okc = wait_for(lambda: not json.loads(
+        req(API + "/alpha/nav")[2].decode())["waypoints"], 3)
+    st2, _, _ = req(API + "/alpha/nav", {"action": "clear_waypoints"})
+    check("clear_waypoints wipes the whole drawn path (v3.6.2)",
+          st == 200 and okc, f"st={st} ok={okc}")
+    check("second clear 404s — no phantom success", st2 == 404, f"st2={st2}")
     st, _, _ = req(API + "/alpha/nav", {"action": "delete_map", "map": "itestmap"})
     check("map delete + artifact gone", st == 200 and wait_for(
         lambda: req(BASE + "/api/robot/alpha/maps/itestmap.pgm")[0] == 404, 3))

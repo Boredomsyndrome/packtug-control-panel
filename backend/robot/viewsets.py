@@ -182,6 +182,13 @@ class RobotViewSet(ViewSet):
                 return Response({"ok": False, "error": "nothing deleted"},
                                 status=http_status.HTTP_404_NOT_FOUND)
             rid = None
+        elif a == "clear_waypoints":
+            # hub-local only: waypoints live in the hub store and routes are
+            # built from it, so nothing needs to reach the robot.
+            if not navstore.clear_waypoints(pk):
+                return Response({"ok": False, "error": "nothing deleted"},
+                                status=http_status.HTTP_404_NOT_FOUND)
+            rid = None
         elif a == "map_save":
             rid = hub.push_nav("map_save", name=name or "room1")
         elif a == "nav_on":
@@ -196,7 +203,8 @@ class RobotViewSet(ViewSet):
             rid = hub.push_nav("nav_on", map=map_name, **extra)
         else:                                  # map_on|map_off|nav_cancel|nav_off
             rid = hub.push_nav(a)
-        if rid is None and a not in ("delete_map", "delete_waypoint"):
+        if rid is None and a not in ("delete_map", "delete_waypoint",
+                                     "clear_waypoints"):
             return Response({"ok": False,
                              "error": "robot offline — action NOT queued "
                                       "(it will not fire on reconnect)"},

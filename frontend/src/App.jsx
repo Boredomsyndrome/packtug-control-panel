@@ -590,6 +590,19 @@ function NavPanel({ robotId, status, connected }) {
                     }}>✕</button>
           </div>
         ))}
+        {Object.keys(wps).length > 0 && (
+          <div className="wprow">
+            <span className="dim" />
+            <button className="minibtn" disabled={!live}
+                    title="delete ALL saved waypoints (the whole drawn path)"
+                    onClick={() => {
+                      if (window.confirm('Delete ALL saved waypoints (the whole path)?')) {
+                        act({ action: 'clear_waypoints' })
+                        setRoute([])
+                      }
+                    }}>⌫ clear path</button>
+          </div>
+        )}
       </div>
 
       {route.length > 0 && (

@@ -74,7 +74,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.0-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.2-stdlib")
 
 SERVERS = [s.rstrip("/") for s in
            os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000")
@@ -1327,6 +1327,21 @@ if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"robotctl {VERSION} (stdlib-only: ws + http fallback)")
         sys.exit(0)
+    # Singleton guard (v3.6.2): two live clients for the SAME robot each
+    # consume a random half of the hub's queued commands and double every
+    # ws session — symptoms look like 'nav press does nothing' / link churn.
+    # Per-robot lock file: one box may legally host several robot ids
+    # (integration harness does). _lk lives for process life.
+    import fcntl
+    _lk_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f".robotctl.{ROBOT_ID or 'default'}.lock")
+    _lk = open(_lk_path, "w")
+    try:
+        fcntl.flock(_lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("robotctl: another instance holds the lock — exiting", flush=True)
+        sys.exit(0)
+    _lk.truncate(); _lk.write(str(os.getpid())); _lk.flush()
     logging.basicConfig(
         level=getattr(logging, os.environ.get("WEBCTL_LOG_LEVEL", "INFO").upper(),
                       logging.INFO),

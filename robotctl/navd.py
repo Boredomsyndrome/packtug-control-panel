@@ -85,6 +85,10 @@ class NavDaemon:
         os.makedirs(MAPS_DIR, exist_ok=True)
         threading.Thread(target=self._resync_mode, daemon=True,
                          name="nav-resync").start()   # non-blocking: it shells out
+        if not dry:                       # v3.6.2: pay the rclpy import + DDS
+            threading.Thread(target=self._warm_node, daemon=True,
+                             name="nav-warm").start()  # discovery at startup,
+            # NEVER inside the first button press (see _warm_node).
 
     # ------------------------------------------------------------- client API
     def handle(self, msg):
@@ -375,6 +379,17 @@ class NavDaemon:
                  name, x, y, math.degrees(yaw), frame)
 
     # ---------------------------------------------------------- ROS plumbing
+    def _warm_node(self):
+        """Create the rclpy node/executor while the system is still idle.
+        Doing this lazily inside the first nav command made the rclpy import
+        + DDS discovery burst collide with the ws keepalive threads on the
+        same cores (v3.6.2 incident: 'press nav -> robot disconnects from
+        the server'). Any failure is benign: every user path calls _node()."""
+        try:
+            self._node()
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("nav: ros2 warmup failed (will retry on use): %s", exc)
+
     def _node(self):
         """navd's OWN rclpy node, spun by its own executor thread.
 

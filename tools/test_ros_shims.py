@@ -531,5 +531,58 @@ except client36.LinkError:
     ok4 = c2.server_i == 1
 check("_http link failure rotates to next endpoint", ok4)
 
+# ---- v3.6.3 half-open ws detector --------------------------------------
+# A VPN that dies without RST leaves the ws socket sendable-but-dead: recv
+# only ever returns ("timeout", None), ping "succeeds" into the kernel.
+# net_loop must treat RX starvation past WS_RX_DEADLINE as fatal and force
+# a reconnect/rotate — otherwise a zombie session outlives every redial.
+client36.WS_RX_DEADLINE = 0.5
+
+
+class _ZombieWs:
+    dropped = False
+
+    def ping(self, data=b""):
+        pass
+
+    def recv(self, timeout=0.3):
+        _time.sleep(timeout)
+        return ("timeout", None)
+
+    def close(self):
+        self.dropped = True
+
+
+_zw = _ZombieWs()
+cz = client36.Client.__new__(client36.Client)
+cz.server_i, cz.ws, cz.state, cz.navd = 0, _zw, "ws", None
+cz.publishes = cz.trips = 0
+cz.lock = threading.Lock()
+cz.held = (0.0, 0.0)
+cz.ws_lock = getattr(cz, "ws_lock", threading.Lock())
+_rot = []
+cz._rotate = lambda r: _rot.append(r)
+cz.base = lambda: "http://127.0.0.1:1"
+cz.apply = lambda *a, **k: None
+
+
+def _httpf(method, path, body=None, **kw):
+    raise client36.LinkError("stub")
+
+
+cz._http = _httpf
+_running_old = client36.running
+client36.running = True
+_tnet = threading.Thread(target=cz.net_loop, daemon=True)
+_tnet.start()
+_time.sleep(1.5)
+_ho_ok = (cz.ws is None and _zw.dropped
+          and any("starved" in str(r) for r in _rot))
+client36.running = False
+_tnet.join(3)
+client36.running = _running_old
+check("half-open ws starved -> forced reconnect (v3.6.3)", _ho_ok,
+      f"ws_now={cz.ws} rot0={str(_rot[:1])[:60]}")
+
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

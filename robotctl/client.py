@@ -74,7 +74,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.2-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.3-stdlib")
 
 SERVERS = [s.rstrip("/") for s in
            os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000")
@@ -104,6 +104,11 @@ NAV_LINK_LOST = float(os.getenv("WEBCTL_NAV_LINK_LOST", "15.0"))
 # alive, so it MUST stay well under WATCHDOG (pong updates last_ok)
 WS_PING_S = min(float(os.getenv("WEBCTL_WS_PING_INTERVAL", "0.8")),
                 WATCHDOG / 3.0)
+# Half-open detector: a VPN that dies without RST leaves send() quietly
+# succeeding into the kernel forever. We ping every WS_PING_S, so ANY
+# traffic (pong/welcome/cmd) MUST resume within ~10s of a healthy path;
+# silence past this deadline = zombie socket -> force reconnect.
+WS_RX_DEADLINE = float(os.getenv("WEBCTL_WS_RX_DEADLINE", "15"))
 
 CAM_MODE = os.getenv("WEBCTL_CAM_MODE", "mjpeg" if os.getenv("WEBCTL_CAM_URL") else "auto")
 CAM_URL = os.getenv("WEBCTL_CAM_URL", "")
@@ -185,6 +190,15 @@ class StdWs:
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         try:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
+        # Black-holed TCP (VPN dropped without RST — the common hwdsl2 ESP
+        # death) must abort in ~10 s, not after the kernel's default ~15 min
+        # of silent SYN/ESP retransmits. TCP_USER_TIMEOUT = 37 on Linux.
+        try:
+            s.setsockopt(socket.IPPROTO_TCP,
+                         getattr(socket, "TCP_USER_TIMEOUT", 37),
+                         int(self.timeout * 2000))
         except OSError:
             pass
         if self.secure:
@@ -462,6 +476,7 @@ class Client:
         last_try = 0.0
         fails = 0
         last_ping = 0.0
+        last_rx = 0.0
         seq = None
         while running:
             now = time.monotonic()
@@ -477,6 +492,7 @@ class Client:
                                         "sw": VERSION}))
                     self.ws = ws
                     fails = 0
+                    last_rx = time.monotonic()
                     self.state = "ws"
                     log.info("websocket up -> %s", url.split("?")[0])
                 except Exception as e:
@@ -497,8 +513,31 @@ class Client:
                         self.ws.ping(b"p")
                     except Exception:
                         pass
-                op, payload = self.ws.recv(0.3)
-                if op == "timeout":
+                try:
+                    op, payload = self.ws.recv(0.3)
+                except Exception as e:
+                    log.warning("ws recv error -> reconnect: %s", e)
+                    try:
+                        self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
+                    self._rotate(f"ws recv: {e}")
+                    continue
+                if op != "timeout":
+                    last_rx = time.monotonic()
+                elif time.monotonic() - last_rx > WS_RX_DEADLINE:
+                    # pings going out, ZERO traffic back = half-open zombie
+                    # (VPN died silently, no RST). Kernel TCP may sit on it
+                    # for ~15 min — don't wait for it.
+                    log.warning("websocket RX starved > %.0fs (half-open link)"
+                                " -> reconnect", WS_RX_DEADLINE)
+                    try:
+                        self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
+                    self._rotate("ws rx starved")
                     continue
                 if op == "close":
                     log.warning("websocket dropped -> %s",

@@ -28,6 +28,33 @@ source "$ROS_SRC" 2>/dev/null
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash" 2>/dev/null
 mkdir -p "$MAPS"
 
+# v3.6.5 — FastDDS SHM starves slam's /tf subscription on this loaded Jetson:
+# a FRESH slam dropped every scan ("frame 'laser' ... queue is full") while
+# concurrent tf2_echo probes streamed the same transforms fine — the exact
+# SHM-exhaustion family documented in the v3.4.4 pose saga, now hitting slam
+# itself. Force UDP-only RTPS transport (no SHM) for everything the nav plane
+# launches; setsid children below inherit this env.
+cat > "$NAVHOME/fastdds_udp_only.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>udp_only</transport_id>
+            <type>UDPv4</type>
+        </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="udp_only" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>udp_only</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>
+XML
+export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_udp_only.xml"
+
 has_topic() { timeout 6 ros2 topic list 2>/dev/null | grep -qx "$1"; }
 has_topic_like() { timeout 6 ros2 topic list 2>/dev/null | grep -q "$1"; }
 # ros2 CLI probes need the ros2 daemon — cold daemon = 40s per probe = every

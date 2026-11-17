@@ -579,7 +579,14 @@ class NavDaemon:
                 ["bash", "-lc",
                  f"source {ros} && exec ros2 run tf2_ros tf2_echo "
                  "map base_footprint"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                # THIS ROBOT's humble tf2_echo writes the transform blocks to
+                # STDERR (rclcpp INFO) — stdout+stderr=DEVNULL meant the
+                # reader parsed an EMPTY PIPE forever: every stream "silently
+                # recycled" every 120 s and pose was None in mapping no matter
+                # how healthy the TF tree was. Merge; the parser regex simply
+                # ignores the warning lines.
+                stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True)
         except OSError as e:
             self._tf_open_fail = time.monotonic()

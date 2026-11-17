@@ -27,13 +27,70 @@ function sensorHint(status, kind) {
   return `${kind}: topics visible on robot graph (${list.join(', ')}) but no data — node running? publisher QoS?`
 }
 
-async function post(url, body) {
+async function post(url, body, ms = 8000) {
+  // bounded like every other request: an un-timeouted POST over a flaky VPN
+  // used to pin one of the browser's 6 connections per-host forever, which
+  // starved the OTHER requests behind it (the "UI freezes" symptom).
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {}),
+    signal: AbortSignal.timeout(ms),
   })
   return res.json().catch(() => ({ ok: res.ok }))
+}
+
+async function fetchJson(url, ms = 4000) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(ms) })
+  return res.json()
+}
+
+// ---- polling WITHOUT connection pile-ups --------------------------------
+// setInterval + async fn = unbounded overlap: when the hub takes longer to
+// answer than the tick period (VPN latency), requests stack until the
+// browser's 6-per-host cap is reached and BUTTON POSTs queue behind them.
+// pollLoop is single-flight (skips a tick while one is in flight) and backs
+// off exponentially while errors persist, so a network stall degrades the
+// refresh rate instead of freezing the whole page.
+function pollLoop(fn, ms) {
+  let stop = false, busy = false, fail = 0, timer = null
+  const step = async () => {
+    if (stop || busy) return
+    busy = true
+    try { await fn(); fail = 0 } catch { fail += 1 }
+    finally {
+      busy = false
+      if (!stop) timer = setTimeout(step, Math.min(ms * 2 ** Math.min(fail, 3), ms * 8))
+    }
+  }
+  step()
+  return () => { stop = true; clearTimeout(timer) }
+}
+
+// Shared, single-flight /nav snapshot — ScanView (point overlay) and
+// NavPanel (buttons) used to poll the SAME url each second, doubling the
+// pressure; one poller feeds both, plus poke() for instant post-click refresh.
+const navStore = { robotId: null, data: null, subs: new Set(), loop: null }
+async function navFetchOnce(robotId) {
+  try {
+    const d = await fetchJson(`/api/robot/${encodeURIComponent(robotId)}/nav`)
+    if (d && d.ok) { navStore.data = d; navStore.subs.forEach((f) => f(d)) }
+  } catch { /* hub blip: consumers keep the last snapshot */ }
+}
+function useNavData(robotId) {
+  const [data, setData] = useState(() =>
+    (navStore.robotId === robotId ? navStore.data : null))
+  useEffect(() => {
+    navStore.subs.add(setData)
+    if (navStore.robotId !== robotId) {
+      navStore.loop?.()
+      navStore.robotId = robotId
+      navStore.data = null
+      navStore.loop = pollLoop(() => navFetchOnce(robotId), 1000)
+    } else if (navStore.data) setData(navStore.data)
+    return () => navStore.subs.delete(setData)
+  }, [robotId])
+  return data
 }
 
 export default function App() {
@@ -90,27 +147,20 @@ export default function App() {
   }, [])
 
   // ---- fleet status polling (1 Hz) ----
-  useEffect(() => {
-    let stop = false
-    const tick = async () => {
-      try {
-        const res = await fetch('/api/robot')
-        const d = await res.json()
-        if (stop) return
-        const list = d.robots || []
-        setRobots(list)
-        setSel((cur) => {
-          if (cur && list.some((r) => r.id === cur)) return cur
-          return list.length ? list[0].id : null
-        })
-      } catch {
-        if (!stop) setRobots((prev) => prev.map((r) => ({ ...r, online: false })))
-      }
+  useEffect(() => pollLoop(async () => {
+    try {
+      const d = await fetchJson('/api/robot')
+      const list = d.robots || []
+      setRobots(list)
+      setSel((cur) => {
+        if (cur && list.some((r) => r.id === cur)) return cur
+        return list.length ? list[0].id : null
+      })
+    } catch (e) {
+      setRobots((prev) => prev.map((r) => ({ ...r, online: false })))
+      throw e
     }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => { stop = true; clearInterval(id) }
-  }, [])
+  }, 1000), [])
 
   // keyboard driving (attached once; reads refs so it survives robot switches)
   useEffect(() => {
@@ -156,14 +206,21 @@ export default function App() {
   // Commands only go to the SELECTED robot; offline robots get nothing
   // (their hub-side staleness would zero the cmd anyway).
   useEffect(() => {
+    // one heartbeat POST in flight at a time: an unbounded 10 Hz pile-up on
+    // a slow link was the worst connection-hogger on the page. If a cmd POST
+    // is still pending the hub-side staleness timer keeps the robot safe;
+    // we only ever want the NEWEST cmd, never a replay queue.
+    let hbBusy = false
     const id = setInterval(async () => {
-      if (!sel) return
+      if (!sel || hbBusy) return
       const { vx, wz } = axisValues()
       if (vx !== 0 || wz !== 0) {
         movingRef.current = true
-        await post(api('/cmd'), { vx, wz })
+        hbBusy = true
+        try { await post(api('/cmd'), { vx, wz }, 1500) } finally { hbBusy = false }
       } else if (movingRef.current) {
-        await sendStop()
+        hbBusy = true
+        try { await sendStop() } finally { hbBusy = false }
       }
     }, 100)
     return () => clearInterval(id)
@@ -314,47 +371,29 @@ function ScanView({ robotId, status }) {
   // counterclockwise, 0.0 range = no return (left as a gap).
   const canvasRef = useRef(null)
   const scanRef = useRef(null)
-  const navRef = useRef(null)      // GET /nav snapshot — overlay of saved points
+  const navData = useNavData(robotId)    // shared single-flight /nav snapshot
+  const navRef = useRef(null)            // GET /nav body — overlay of saved points
+  navRef.current = navData
   const [navTick, setNavTick] = useState(0)
+  useEffect(() => setNavTick((n) => n + 1), [navData])
   const [meta, setMeta] = useState({ points: 0, age: null, fresh: false, err: false })
 
-  useEffect(() => {
-    let stop = false
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/robot/${encodeURIComponent(robotId)}/scan`)
-        const d = await res.json()
-        if (stop) return
-        if (d.scan) scanRef.current = d.scan
-        setMeta({ points: d.scan ? d.scan.ranges.length : 0,
-                  age: d.age, fresh: !!d.fresh, err: false })
-      } catch {
-        if (!stop) setMeta((m) => ({ ...m, err: true }))
-      }
+  useEffect(() => pollLoop(async () => {
+    try {
+      const d = await fetchJson(`/api/robot/${encodeURIComponent(robotId)}/scan`)
+      if (d.scan) scanRef.current = d.scan
+      setMeta({ points: d.scan ? d.scan.ranges.length : 0,
+                age: d.age, fresh: !!d.fresh, err: false })
+    } catch (e) {
+      setMeta((m) => ({ ...m, err: true }))
+      throw e
     }
-    tick()
-    const id = setInterval(tick, 300)
-    return () => { stop = true; clearInterval(id) }
-  }, [robotId])
+  }, 300), [robotId])
 
   // Saved waypoints live in the MAP frame. When SLAM/Nav2 reports a pose we
   // transform them into the robot frame and paint them on the lidar sweep —
   // so 'where is P2 from here' is readable at a glance, even mid-mapping.
-  useEffect(() => {
-    let stop = false
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/robot/${encodeURIComponent(robotId)}/nav`)
-        const d = await res.json()
-        if (stop) return
-        navRef.current = d.ok ? d : null
-        setNavTick((n) => n + 1)
-      } catch { /* hub blip: keep the last snapshot */ }
-    }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => { stop = true; clearInterval(id) }
-  }, [robotId])
+  // (the /nav request itself is the shared single-flight store in useNavData)
 
   useEffect(() => {
     const cv = canvasRef.current
@@ -450,7 +489,7 @@ const NAV_LABEL = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', ro
 const SLOT = ['p1', 'p2', 'p3']   // the web UI's fixed point slots
 
 function NavPanel({ robotId, status, connected }) {
-  const [data, setData] = useState(null)   // GET /nav body
+  const data = useNavData(robotId)       // shared single-flight /nav body
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [mapName, setMapName] = useState('room1')
@@ -463,19 +502,8 @@ function NavPanel({ robotId, status, connected }) {
   const wps = data?.waypoints || {}
   const maps = data?.maps || []
 
-  useEffect(() => {
-    let stop = false
-    const tick = async () => {
-      try {
-        const res = await fetch(navUrl)
-        const d = await res.json()
-        if (!stop && d.ok) { setData(d); setErr('') }
-      } catch { /* hub blip: keep last view */ }
-    }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => { stop = true; clearInterval(id) }
-  }, [navUrl])
+  // the /nav fetch itself: shared single-flight store (see useNavData) —
+  // this panel used to poll it again on top of ScanView's poll.
 
   // keep the preview selection pointing at a real map
   useEffect(() => {
@@ -488,7 +516,16 @@ function NavPanel({ robotId, status, connected }) {
     try {
       const d = await post(navUrl, body)
       if (!d.ok) setErr(d.error || (d.errors && JSON.stringify(d.errors)) || 'rejected')
-    } catch { setErr('network') } finally { setBusy(false) }
+    } catch {
+      // POST timed out — the action may STILL have landed hub-side (the
+      // hub answers in ms; the answer just didn't get back). Say so instead
+      // of implying failure: users double-clicked on 'network' and stacked
+      // a dozen identical actions that all executed.
+      setErr('no answer in 8 s — the action may still have landed; check the mode chip (wait 5 s) before clicking again')
+    } finally {
+      setBusy(false)
+      navFetchOnce(robotId)   // refresh NOW instead of waiting a poll tick
+    }
   }
 
   const live = connected && !busy

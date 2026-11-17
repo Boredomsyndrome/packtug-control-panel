@@ -19,7 +19,15 @@ NAVHOME="$HOME/robotctl"
 MAPS="$NAVHOME/maps"
 ROS_SRC="/opt/ros/humble/setup.bash"
 PARAM="$WS/src/wheeltec_robot_nav2/param/wheeltec_param/param_four_wheel_diff_bs.yaml"
-MAPPER="$WS/src/wheeltec_robot_slam/wheeltec_slam_toolbox/config/mapper_params_online_async.yaml"
+# v3.6.5 FINAL: vendor's proven rplidar slam profile (repo copy, not their
+# file — vendor tree stays untouched). THE fix: their chain runs the whole
+# stack on /scan_filtered (box-filtered raw scans), NOT raw /scan. Raw A1/A2
+# scans here are ~64 KB (multi-return, 4x normal) — the exact payload class
+# this Jetson's DDS path chokes on; 'queue is full' was slam drowning in raw
+# /scan. Their own nav2 params + prod_bringup confirm: every consumer uses
+# /scan_filtered via wheeltec_slam_toolbox/scan_box_filter_node.
+MAPPER="$NAVHOME/nav_params/mapper_rplidar_a1.yaml"
+FILTER_PARAMS="$NAVHOME/nav_params/laser_filter.yaml"
 
 cmd="$1"
 [ $# -gt 0 ] && shift
@@ -55,22 +63,11 @@ cat > "$NAVHOME/fastdds_udp_only.xml" <<'XML'
 XML
 export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_udp_only.xml"
 
-# v3.6.5 UNIFIED LAW OF THIS UNIT (proven this session by differential):
-#   short-lived DDS subscribers (tf2_echo probes, CLI echo) ALWAYS receive
-#   /tf; LONG-LIVED ones (slam's /tf listener, navd's persistent tf2_echo
-#   stream) are starved — slam drops 100% scans, navd's stream goes silent.
-#   Precision: it is /tf specifically (35 Hz batched transforms) that gets
-#   starved long-lived — the client's long-lived rclpy /scan subscription
-#   works fine on the same default FastDDS. Root transport suspect: local
-#   SHM path for big /tf batches on this loaded Jetson.
-# Attempted: UDP-only FastRTPS profile (kept, harmless) — did NOT heal slam.
-# Next lever: run slam on a completely different RMW (Cyclone). RTPS wire
-# interops, so Cyclone-slam still hears the FastDDS /scan + /tf publishers.
-if ros2 pkg prefix rmw_cyclonedds_cpp >/dev/null 2>&1; then
-  export HAS_CYCLONE=1
-else
-  export HAS_CYCLONE=0
-fi
+# v3.6.5 NOTE: the "starvation" theory (slam blind to /tf+/scan) is now most
+# likely NOT transport: slam was pointed at RAW /scan (64 KB multi-return
+# A2-class scans) while short-lived probes grabbed one small message at a
+# time. UDP-only profile kept anyway (harmless; vendor-neutral). CycloneDDS
+# experiment dropped — no apt installs, per owner: nav is stock ROS2 here.
 
 has_topic() { timeout 6 ros2 topic list 2>/dev/null | grep -qx "$1"; }
 has_topic_like() { timeout 6 ros2 topic list 2>/dev/null | grep -q "$1"; }
@@ -108,11 +105,25 @@ ensure_tf() {
   sleep 2
 }
 
+ensure_filter() {
+  # vendor's proven pre-slam stage (their prod_bringup launches it "once for
+  # all runtime modes"; every vendor consumer subscribes /scan_filtered).
+  # Binary is in the robot's EXISTING vendor build ($WS/install) — read-only
+  # use, nothing installed, nothing compiled.
+  pgrep -f "[s]can_box_filter_node" >/dev/null && return 0
+  [ -x "$WS/install/wheeltec_slam_toolbox/lib/wheeltec_slam_toolbox/scan_box_filter_node" ] || \
+    [ -f "$FILTER_PARAMS" ] || { echo "WARN: no scan_box_filter_node / $FILTER_PARAMS — slam falls back to RAW /scan"; return 1; }
+  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run wheeltec_slam_toolbox scan_box_filter_node --ros-args -r __node:=scan_box_filter_node --params-file $FILTER_PARAMS" >/tmp/nav_filter.log 2>&1 </dev/null &
+  for t in $(seq 1 10); do sleep 1; pgrep -f "[s]can_box_filter_node" >/dev/null && break; done
+  pgrep -f "[s]can_box_filter_node" >/dev/null && echo "scan filter up (/scan -> /scan_filtered)" || echo "WARN: scan filter failed to start — tail /tmp/nav_filter.log"
+}
+
 case "$cmd" in
   map-on)
     ensure_tf
+    ensure_filter || true
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && if [ \"\$HAS_CYCLONE\" = 1 ]; then export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; fi && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom_combined -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER --remap odom:=odom_combined" >/tmp/nav_map.log 2>&1 </dev/null &
     for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
       echo "FAILED: slam_toolbox died at startup — tail /tmp/nav_map.log"; exit 1; fi
@@ -129,6 +140,7 @@ case "$cmd" in
     ;;
   stack-on)
     ensure_tf
+    ensure_filter || true
     name="${1:-room1}"
     [ -f "$MAPS/$name.yaml" ] || { echo "FAILED: map '$name' not saved"; exit 1; }
     # slam_toolbox and AMCL both want to own map->odom: hand the TF over.
@@ -151,6 +163,7 @@ case "$cmd" in
     pkill -f 'map_saver_cli'          2>/dev/null
     pkill -f 'webctl_navctl_tf'       2>/dev/null
     pkill -f 'webctl_navctl_ekf'     2>/dev/null
+    pkill -f 'scan_box_filter_node'  2>/dev/null
     
     sleep 2
     pkill -9 -f 'bringup_launch.py'   2>/dev/null
@@ -159,6 +172,7 @@ case "$cmd" in
     pkill -9 -f 'map_saver_cli'       2>/dev/null
     pkill -9 -f 'webctl_navctl_tf'    2>/dev/null
     pkill -9 -f 'webctl_navctl_ekf'   2>/dev/null
+    pkill -9 -f 'scan_box_filter_node' 2>/dev/null
     
     sleep 2
     if proc "[a]sync_slam_toolbox_node" || proc "[b]ringup_launch.py"; then

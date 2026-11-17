@@ -67,10 +67,20 @@ def main():
     run(ssh, f"cd ~/robotctl 2>/dev/null && for f in client.py navd.py run_client.sh; do "
              f"[ -f $f ] && cp -a $f $f.bak-{ts}; done; mkdir -p ~/robotctl; echo backed-up")
     sftp = ssh.open_sftp()
-    for name in ("client.py", "navd.py", "run_client.sh"):
+    for name in ("client.py", "navd.py", "run_client.sh", "webctl_tf_repeater.py"):
         sftp.put(f"robotctl/{name}", f"/home/{args.user}/robotctl/{name}")
+    # v3.6.5: the nav plane lives in deploy/ (script) + robotctl/nav_params/
+    # (vendor-proven slam/filter profiles) — deploy them all or the robot
+    # silently runs an old navctl.
+    sftp.put("deploy/navctl.sh", f"/home/{args.user}/robotctl/navctl.sh")
+    run(ssh, "mkdir -p ~/robotctl/nav_params", show=False)
+    import glob
+    for f in sorted(glob.glob("robotctl/nav_params/*.yaml")):
+        sftp.put(f, "/home/%s/robotctl/nav_params/%s" % (args.user, f.rsplit("/", 1)[-1]))
     sftp.chmod(f"/home/{args.user}/robotctl/run_client.sh", 0o755)
-    print("uploaded client.py navd.py run_client.sh")
+    sftp.chmod(f"/home/{args.user}/robotctl/navctl.sh", 0o755)
+    print("uploaded client.py navd.py run_client.sh webctl_tf_repeater.py "
+          "navctl.sh nav_params/*.yaml")
 
     # ---- env merge ON THE ROBOT (token never leaves the robot)
     merge = r'''

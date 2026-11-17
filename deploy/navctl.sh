@@ -55,6 +55,23 @@ cat > "$NAVHOME/fastdds_udp_only.xml" <<'XML'
 XML
 export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_udp_only.xml"
 
+# v3.6.5 UNIFIED LAW OF THIS UNIT (proven this session by differential):
+#   short-lived DDS subscribers (tf2_echo probes, CLI echo) ALWAYS receive
+#   /tf; LONG-LIVED ones (slam's /tf listener, navd's persistent tf2_echo
+#   stream) are starved — slam drops 100% scans, navd's stream goes silent.
+#   Precision: it is /tf specifically (35 Hz batched transforms) that gets
+#   starved long-lived — the client's long-lived rclpy /scan subscription
+#   works fine on the same default FastDDS. Root transport suspect: local
+#   SHM path for big /tf batches on this loaded Jetson.
+# Attempted: UDP-only FastRTPS profile (kept, harmless) — did NOT heal slam.
+# Next lever: run slam on a completely different RMW (Cyclone). RTPS wire
+# interops, so Cyclone-slam still hears the FastDDS /scan + /tf publishers.
+if ros2 pkg prefix rmw_cyclonedds_cpp >/dev/null 2>&1; then
+  export HAS_CYCLONE=1
+else
+  export HAS_CYCLONE=0
+fi
+
 has_topic() { timeout 6 ros2 topic list 2>/dev/null | grep -qx "$1"; }
 has_topic_like() { timeout 6 ros2 topic list 2>/dev/null | grep -q "$1"; }
 # ros2 CLI probes need the ros2 daemon — cold daemon = 40s per probe = every
@@ -70,11 +87,17 @@ proc() { pgrep -f "$1" >/dev/null 2>&1; }
 # scoped to the nav plane: started on map-on/stack-on, killed on stop.
 # webctl_robot_client.py's cmdline contains 'webctl_navctl' too — excluded.
 ensure_tf() {
-  timeout 5 ros2 topic echo /tf_static --once 2>/dev/null \
-    | grep -q "child_frame_id: laser" || \
-  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run tf2_ros static_transform_publisher \
-      --x 0.157 --y 0 --z 0.257 --frame-id base_footprint --child-frame-id laser \
-      --ros-args -r __node:=webctl_navctl_tf" >>/tmp/nav_tf.log 2>&1 </dev/null &
+  # v3.6.5 CRITICAL (the 'queue is full' finale): humble's static_transform_
+  # publisher latches /tf_static ONCE, and this Jetson's DDS never delivers
+  # that latch to slam's late-joining TRANSIENT_LOCAL listener — slam's buffer
+  # never knew frame 'laser', dropped 100% of scans, map frame NEVER existed,
+  # pose=None forever. `--period` (continuous republish) is iron+/rolling only
+  # (humble exits 1 — verified). webctl_tf_repeater.py streams the same
+  # transform on LIVE /tf at 5 Hz, the path tf2_echo proved works. The
+  # trailing 'webctl_navctl_tf' argv marker keeps ensure_tf's guard AND
+  # navctl stop's pkill matching.
+  pgrep -f "webctl_tf_repeater|webctl_navctl_tf" >/dev/null || \
+  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec python3 $NAVHOME/webctl_tf_repeater.py webctl_navctl_tf" >>/tmp/nav_tf.log 2>&1 </dev/null &
   # NOTE (verified 2026-11-09): the vendor mapper params set NO frame ids, so
   # publishes NO TF — we run robot_localization EKF ourselves (odometry-only:
   # the stock config wants /imu/data_raw which the base node never feeds on
@@ -89,7 +112,7 @@ case "$cmd" in
   map-on)
     ensure_tf
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom_combined -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && if [ \"\$HAS_CYCLONE\" = 1 ]; then export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; fi && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER -p odom_frame_id:=odom_combined -p base_frame_id:=base_footprint" >/tmp/nav_map.log 2>&1 </dev/null &
     for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
       echo "FAILED: slam_toolbox died at startup — tail /tmp/nav_map.log"; exit 1; fi

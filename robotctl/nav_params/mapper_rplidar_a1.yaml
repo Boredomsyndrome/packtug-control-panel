@@ -28,7 +28,7 @@ slam_toolbox:
     # TF
     transform_publish_period: 0.02
     transform_timeout: 0.2
-    tf_buffer_duration: 30.0
+    tf_buffer_duration: 300.0
 
     debug_logging: false
     throttle_scans: 1              # xu ly moi scan (khong bo qua scan nao)

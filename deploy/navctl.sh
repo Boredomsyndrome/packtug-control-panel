@@ -36,32 +36,41 @@ source "$ROS_SRC" 2>/dev/null
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash" 2>/dev/null
 mkdir -p "$MAPS"
 
-# v3.6.5 — FastDDS SHM starves slam's /tf subscription on this loaded Jetson:
-# a FRESH slam dropped every scan ("frame 'laser' ... queue is full") while
-# concurrent tf2_echo probes streamed the same transforms fine — the exact
-# SHM-exhaustion family documented in the v3.4.4 pose saga, now hitting slam
-# itself. Force UDP-only RTPS transport (no SHM) for everything the nav plane
-# launches; setsid children below inherit this env.
-cat > "$NAVHOME/fastdds_udp_only.xml" <<'XML'
+# v3.6.5 FINAL transport lever (saga's "SHM size exhaustion" note, made
+# actionable): humble FastDDS ships SHM pool ~14 MB; camera+scan+tf+odom
+# reliable depth-10 pools on this loaded Orin-class Jetson overflow it and
+# long-lived subscribers silently starve (slam: /tf never resolves; fresh
+# short probes unaffected — exactly our symptom table). Give the nav plane
+# a 192 MB SHM file + 4 MB segments; vendor default untouched.
+cat > "$NAVHOME/fastdds_nav.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8" ?>
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
     <transport_descriptors>
         <transport_descriptor>
-            <transport_id>udp_only</transport_id>
+            <transport_id>nav_shm_big</transport_id>
+            <type>SHM</type>
+            <segment_size>4194304</segment_size>
+            <port_queue_capacity>1048576</port_queue_capacity>
+        </transport_descriptor>
+        <transport_descriptor>
+            <transport_id>nav_udp</transport_id>
             <type>UDPv4</type>
         </transport_descriptor>
     </transport_descriptors>
-    <participant profile_name="udp_only" is_default_profile="true">
+    <participant profile_name="nav_shm_big" is_default_profile="true">
         <rtps>
             <userTransports>
-                <transport_id>udp_only</transport_id>
+                <transport_id>nav_shm_big</transport_id>
+                <transport_id>nav_udp</transport_id>
             </userTransports>
+            <!-- builtin OFF: else the default 14 MB SHM transport coexists
+                 and FastDDS may still route local traffic through it -->
             <useBuiltinTransports>false</useBuiltinTransports>
         </rtps>
     </participant>
 </profiles>
 XML
-export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_udp_only.xml"
+export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_nav.xml"
 
 # v3.6.5 NOTE: the "starvation" theory (slam blind to /tf+/scan) is now most
 # likely NOT transport: slam was pointed at RAW /scan (64 KB multi-return
@@ -106,16 +115,15 @@ ensure_tf() {
 }
 
 ensure_filter() {
-  # vendor's proven pre-slam stage (their prod_bringup launches it "once for
-  # all runtime modes"; every vendor consumer subscribes /scan_filtered).
-  # Binary is in the robot's EXISTING vendor build ($WS/install) — read-only
-  # use, nothing installed, nothing compiled.
-  pgrep -f "[s]can_box_filter_node" >/dev/null && return 0
-  [ -x "$WS/install/wheeltec_slam_toolbox/lib/wheeltec_slam_toolbox/scan_box_filter_node" ] || \
-    [ -f "$FILTER_PARAMS" ] || { echo "WARN: no scan_box_filter_node / $FILTER_PARAMS — slam falls back to RAW /scan"; return 1; }
-  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run wheeltec_slam_toolbox scan_box_filter_node --ros-args -r __node:=scan_box_filter_node --params-file $FILTER_PARAMS" >/tmp/nav_filter.log 2>&1 </dev/null &
-  for t in $(seq 1 10); do sleep 1; pgrep -f "[s]can_box_filter_node" >/dev/null && break; done
-  pgrep -f "[s]can_box_filter_node" >/dev/null && echo "scan filter up (/scan -> /scan_filtered)" || echo "WARN: scan filter failed to start — tail /tmp/nav_filter.log"
+  # vendor architecture: slam + costmaps consume /scan_filtered, never raw
+  # /scan (v3.6.5). Robot's vendor build lacks the vendor filter binary and
+  # apt installs are forbidden -> stock-ROS2 equivalent webctl_scan_filter.py
+  # (box mask + RELIABLE republish + odom-timeline restamp, see its header).
+  pgrep -f "[w]ebctl_scan_filter|[s]can_box_filter_node" >/dev/null && return 0
+  [ -f "$NAVHOME/webctl_scan_filter.py" ] || { echo "WARN: no webctl_scan_filter.py — slam falls back to RAW /scan"; return 1; }
+  setsid bash -c "source $ROS_SRC && exec python3 $NAVHOME/webctl_scan_filter.py webctl_navctl_filter_marker" >/tmp/nav_filter.log 2>&1 </dev/null &
+  for t in $(seq 1 10); do sleep 1; pgrep -f "[w]ebctl_scan_filter" >/dev/null && break; done
+  pgrep -f "[w]ebctl_scan_filter" >/dev/null && echo "scan filter up (/scan -> /scan_filtered)" || echo "WARN: scan filter failed — tail /tmp/nav_filter.log"
 }
 
 case "$cmd" in
@@ -123,7 +131,7 @@ case "$cmd" in
     ensure_tf
     ensure_filter || true
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
-    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p params_file:=$MAPPER --remap odom:=odom_combined" >/tmp/nav_map.log 2>&1 </dev/null &
+    setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args --params-file $MAPPER --remap odom:=odom_combined" >/tmp/nav_map.log 2>&1 </dev/null &
     for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
       echo "FAILED: slam_toolbox died at startup — tail /tmp/nav_map.log"; exit 1; fi
@@ -163,7 +171,7 @@ case "$cmd" in
     pkill -f 'map_saver_cli'          2>/dev/null
     pkill -f 'webctl_navctl_tf'       2>/dev/null
     pkill -f 'webctl_navctl_ekf'     2>/dev/null
-    pkill -f 'scan_box_filter_node'  2>/dev/null
+    pkill -f 'webctl_scan_filter'        2>/dev/null
     
     sleep 2
     pkill -9 -f 'bringup_launch.py'   2>/dev/null
@@ -172,9 +180,10 @@ case "$cmd" in
     pkill -9 -f 'map_saver_cli'       2>/dev/null
     pkill -9 -f 'webctl_navctl_tf'    2>/dev/null
     pkill -9 -f 'webctl_navctl_ekf'   2>/dev/null
-    pkill -9 -f 'scan_box_filter_node' 2>/dev/null
+    pkill -9 -f 'webctl_scan_filter'       2>/dev/null
     
     sleep 2
+    rm -f /dev/shm/fastrtps_* /dev/shm/fastdds_* 2>/dev/null || true
     if proc "[a]sync_slam_toolbox_node" || proc "[b]ringup_launch.py"; then
       echo "WARN: nav processes still live after stop"; exit 1
     fi

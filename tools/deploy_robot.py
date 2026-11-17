@@ -67,7 +67,7 @@ def main():
     run(ssh, f"cd ~/robotctl 2>/dev/null && for f in client.py navd.py run_client.sh; do "
              f"[ -f $f ] && cp -a $f $f.bak-{ts}; done; mkdir -p ~/robotctl; echo backed-up")
     sftp = ssh.open_sftp()
-    for name in ("client.py", "navd.py", "run_client.sh", "webctl_tf_repeater.py"):
+    for name in ("client.py", "navd.py", "run_client.sh", "webctl_tf_repeater.py", "webctl_scan_filter.py"):
         sftp.put(f"robotctl/{name}", f"/home/{args.user}/robotctl/{name}")
     # v3.6.5: the nav plane lives in deploy/ (script) + robotctl/nav_params/
     # (vendor-proven slam/filter profiles) — deploy them all or the robot

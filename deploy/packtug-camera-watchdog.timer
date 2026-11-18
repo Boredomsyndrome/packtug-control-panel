@@ -1,0 +1,10 @@
+[Unit]
+Description=Check PackTug camera frame freshness
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+Unit=packtug-camera-watchdog.service
+
+[Install]
+WantedBy=timers.target

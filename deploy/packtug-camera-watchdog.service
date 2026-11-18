@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart PackTug camera if frames are stale
+After=packtug-camera.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/packtug-camera-watchdog

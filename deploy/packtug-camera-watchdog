@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -u
+
+health="$(curl -fsS -m 4 http://127.0.0.1:8080/health 2>/dev/null)" || {
+  systemctl restart packtug-camera.service
+  exit 0
+}
+
+age="$(printf '%s' "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["color"].get("age_sec") or 0)' 2>/dev/null || echo 999)"
+if [ "$age" = "999" ] || python3 -c "import sys; sys.exit(0 if float('$age') > 15 else 1)"; then
+  systemctl restart packtug-camera.service
+fi

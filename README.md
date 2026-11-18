@@ -158,8 +158,13 @@ exits. The unit and installer are in `deploy/`:
 ```bash
 # on the Jetson, from the repo checkout
 sudo ./deploy/setup_camera_service.sh
+sudo ./deploy/setup_camera_watchdog.sh   # restarts the bridge if frames freeze
 sudo ./deploy/setup_arm_link.sh eth0     # 169.254.200.1/16, 100 Mb/s full
 ```
+
+If `lsusb` has no `Intel ... Depth Camera 455` and the log says
+`No RealSense devices were found`, the D455 USB link is physically disconnected;
+reseat it before expecting camera frames.
 
 The bridge owns `realsense2_camera` and can switch between RGB and depth from
 the page:

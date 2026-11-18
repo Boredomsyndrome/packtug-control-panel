@@ -22,7 +22,7 @@
  *   GET    /api/metrics/throughput         -> ThroughputPoint[]
  *   POST   /api/auth/login                 -> { token, user }
  *
- * ── Arm bridge (Niryo Ned2, `server/arm_server.py`) ─────────────────────────
+ * ── Arm bridge (Niryo Ned1, `server/arm_server.py`) ─────────────────────────
  *   GET    /api/arm/status                 -> ArmStatus (cached + live refresh)
  *   POST   /api/arm/connect                -> ArmStatus  { ip }
  *   POST   /api/arm/disconnect             -> ArmStatus
@@ -41,6 +41,8 @@
  *   POST   /api/arm/fault/clear            -> ArmStatus  (acknowledge after inspection)
  *   POST   /api/arm/calibrate              -> ArmStatus  { confirm: true } (auto sweep)
  *   GET    /api/camera/stream              -> MJPEG proxy from the Jetson
+ *   POST   /api/vision/qr                  -> QR detection in a camera ROI
+ *   GET    /api/vehicle                    -> live pull-mode AGV status
  *   GET    /api/arm/poses                  -> { poses: ArmPosePreset[] }
  *   POST   /api/arm/poses                  -> { pose, poses }  { name, joints_deg? }
  *   DELETE /api/arm/poses/:name            -> { poses }
@@ -61,7 +63,8 @@
  *   Publishes  : /cmd_vel, /mission/command, /mission/feedback
  *   Robot s/w  : wheeltec_ros2 / turn_on_wheeltec_robot launch stack
  *
- * Set VITE_API_BASE and VITE_MOCK=false in .env to switch off mock mode.
+ * Set VITE_API_BASE and VITE_MOCK=false in .env to switch off mock mode for
+ * the panel business APIs. Arm/camera/vehicle endpoints are always live.
  */
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
@@ -88,10 +91,10 @@ export const ENDPOINTS: EndpointSpec[] = [
   { method: 'GET', path: '/api/metrics/throughput', description: 'Historical throughput and utilisation', status: 'implemented-mock' },
   { method: 'WS', path: '/ws/telemetry', description: 'Live AGV / cage / mission telemetry stream', status: 'planned' },
   { method: 'POST', path: '/api/auth/login', description: 'RBAC login', status: 'implemented-mock' },
-  { method: 'GET', path: '/api/arm/status', description: 'Ned2 joints, pose, calibration and speed', status: 'implemented-live' },
-  { method: 'POST', path: '/api/arm/connect', description: 'Open a PyNiryo TCP session to the Ned2', status: 'implemented-live' },
-  { method: 'POST', path: '/api/arm/disconnect', description: 'Close the Ned2 session', status: 'implemented-live' },
-  { method: 'POST', path: '/api/arm/jog', description: 'Nudge one joint by ≤15° at 5% speed', status: 'implemented-live' },
+  { method: 'GET', path: '/api/arm/status', description: 'Ned1 joints, pose, calibration and speed', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/connect', description: 'Open a PyNiryo TCP session to the Ned1', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/disconnect', description: 'Close the Ned1 session', status: 'implemented-live' },
+  { method: 'POST', path: '/api/arm/jog', description: 'Nudge one joint by ≤60° at the current speed cap', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/joint', description: 'Move one joint to a dragged absolute angle (≤60°)', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/joints', description: 'Move all joints to absolute targets (≤60° each)', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/learning', description: 'Release motors for manual posing / re-engage', status: 'implemented-live' },
@@ -107,6 +110,8 @@ export const ENDPOINTS: EndpointSpec[] = [
   { method: 'POST', path: '/api/arm/fault/clear', description: 'Acknowledge a motion fault after inspection', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/calibrate', description: 'Auto-calibrate the arm (full-range sweep)', status: 'implemented-live' },
   { method: 'GET', path: '/api/camera/stream', description: 'MJPEG proxy from the Jetson RealSense bridge', status: 'implemented-live' },
+  { method: 'POST', path: '/api/vision/qr', description: 'Detect a QR code in a clicked/dragged camera ROI', status: 'implemented-live' },
+  { method: 'GET', path: '/api/vehicle', description: 'Live pull-mode AGV online/battery/transport status', status: 'implemented-live' },
   { method: 'GET', path: '/api/arm/poses', description: 'List saved joint poses', status: 'implemented-live' },
   { method: 'POST', path: '/api/arm/poses', description: 'Save the current pose under a name (upsert)', status: 'implemented-live' },
   { method: 'DELETE', path: '/api/arm/poses/:name', description: 'Delete a saved pose', status: 'implemented-live' },

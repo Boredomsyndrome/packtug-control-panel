@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""HTTP bridge between the PackTug control panel and a Niryo Ned2 arm.
+"""HTTP bridge between the PackTug control panel and a Niryo Ned1 arm.
 
 Runs in the ``ned`` conda env (pyniryo 1.1.2) and serves:
 
   * ``/api/arm/*`` — small, rate-limited joint control surface
   * ``../dist``    — the built Vite control panel (SPA fallback)
 
-The Ned2 has no hardware E-stop in this kit, so the bridge deliberately
+The Ned1 has no hardware E-stop in this kit, so the bridge deliberately
 limits moves: each request may change a joint by at most ``MAX_REQUEST_DEG``
 (executed in ``MAX_STEP_DEG`` segments) and the arm speed is capped at
 ``MAX_VELOCITY`` percent. Motions are performed with PyNiryo's blocking
@@ -34,9 +34,12 @@ import math
 import os
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -67,6 +70,11 @@ CAMERA_MODE_URL = os.getenv(
     "CAMERA_MODE_URL",
     "http://100.73.98.69:8080/mode",
 )
+CAMERA_SNAPSHOT_URL = os.getenv(
+    "CAMERA_SNAPSHOT_URL",
+    CAMERA_STREAM_URL.rsplit("/", 1)[0] + "/snapshot",
+)
+WHEELTEC_WEBCTL_URL = os.getenv("WHEELTEC_WEBCTL_URL", "http://127.0.0.1:8090")
 MAX_STEP_DEG = 60.0       # internal segment size; one segment per manual command
 MAX_REQUEST_DEG = 60.0    # largest joint change accepted per manual command
 MAX_POSE_DEG = 180.0      # largest joint change when recalling a saved pose
@@ -74,6 +82,7 @@ MAX_VELOCITY = 5
 MAX_VELOCITY_LIMIT = 20
 POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
 SEQUENCES_FILE = Path(__file__).resolve().parent / "arm_sequences.json"
+VISION_CALIBRATION_FILE = Path(__file__).resolve().parent / "vision_calibration.json"
 HOME_TRANSIT = "__home__"   # built-in safe transit: pyniryo move_to_home_pose()
 CONNECTION_ERRORS = {"HostNotReachableException", "ClientNotConnectedException"}
 READ_TIMEOUT_S = 5.0        # status/telemetry calls must not block forever
@@ -133,7 +142,7 @@ def _joint_rot(q: float) -> np.ndarray:
 
 
 def fk_tip(joints_deg: list[float]) -> tuple[float, float, float]:
-    """Ned2 URDF forward kinematics for the gripper tip (base frame, metres)."""
+    """Ned1 URDF forward kinematics for the gripper tip (base frame, metres)."""
     if len(joints_deg) != 6:
         raise ValueError("exactly 6 joint angles are required")
     q = [math.radians(float(v)) for v in joints_deg]
@@ -177,6 +186,28 @@ JOINT_LIMITS_DEG = [
 log = logging.getLogger("arm-server")
 
 
+class QrIn(BaseModel):
+    x: float
+    y: float
+    radius: int = Field(default=60, ge=40, le=160)
+    roi_x: float | None = None
+    roi_y: float | None = None
+    roi_w: float | None = None
+    roi_h: float | None = None
+
+
+class VisionPointIn(BaseModel):
+    px: float
+    py: float
+    arm_x: float
+    arm_y: float
+
+
+class VisionPixelIn(BaseModel):
+    x: float
+    y: float
+
+
 class ConnectIn(BaseModel):
     ip: str = Field(default=DEFAULT_HOST, min_length=1)
 
@@ -205,6 +236,15 @@ class VelocityIn(BaseModel):
 
 class ReachIn(BaseModel):
     max_reach_m: float = Field(ge=MIN_REACH_M, le=MAX_REACH_M)
+
+
+class PoseIn(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
 
 
 class ApplyPoseIn(BaseModel):
@@ -382,7 +422,7 @@ class ArmController:
 
             from pyniryo import NiryoRobot
 
-            log.info("connecting to Ned2 at %s ...", host)
+            log.info("connecting to Ned1 at %s ...", host)
             robot = NiryoRobot(host)
             sock = getattr(robot, "_NiryoRobot__client_socket", None)
             if sock is not None:
@@ -423,7 +463,7 @@ class ArmController:
                 except Exception:
                     pass
                 raise
-            log.info("Ned2 connected at %s", host)
+            log.info("Ned1 connected at %s", host)
             return self.snapshot()
 
     def disconnect(self) -> dict[str, Any]:
@@ -781,6 +821,50 @@ class ArmController:
             target[joint - 1] = angle_deg
             return self._move_locked(target, current)
 
+    def move_pose(self, pose: PoseIn) -> dict[str, Any]:
+        values = (pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw)
+        if not all(math.isfinite(v) for v in values):
+            raise HTTPException(400, "pose values must be finite")
+        if math.hypot(pose.x, pose.y) > self.max_reach_m + 1e-6:
+            raise HTTPException(
+                400,
+                f"horizontal reach {math.hypot(pose.x, pose.y):.3f} m exceeds max "
+                f"{self.max_reach_m:.3f} m",
+            )
+        with self._motion:
+            self._check_motion_locked()
+            with self._state:
+                self.busy = True
+            try:
+                if self.mock:
+                    time.sleep(0.2)
+                    with self._state:
+                        self.pose = {
+                            "x": pose.x, "y": pose.y, "z": pose.z,
+                            "roll": pose.roll, "pitch": pose.pitch, "yaw": pose.yaw,
+                        }
+                        self.updated_at = time.time()
+                else:
+                    target = SimpleNamespace(**pose.model_dump())
+                    with self._socket_timeout(MOTION_TIMEOUT_S):
+                        self._send_linear_pose(target)
+                    self._read_locked()
+                with self._state:
+                    self.last_error = None
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.exception("pose motion failed")
+                with self._state:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
+                raise HTTPException(502, self.last_error) from exc
+            finally:
+                with self._state:
+                    self.busy = False
+        return self.snapshot()
+
     def jog(self, joint: int, delta_deg: float) -> dict[str, Any]:
         if abs(delta_deg) < 1e-6:
             return self.snapshot()
@@ -1072,7 +1156,7 @@ class ArmController:
         return self.snapshot()
 
     def _send_linear_pose(self, pose_obj: Any) -> None:
-        """Older Ned2 firmware expects MOVE_LINEAR_POSE with 6 params (no frame).
+        """Older Ned1 firmware expects MOVE_LINEAR_POSE with 6 params (no frame).
 
         pyniryo's public move_linear_pose() appends an empty frame name, so the
         robot rejects it with "6 parameters expected but 7 given".
@@ -1103,7 +1187,7 @@ class ArmController:
                 elif close:
                     # grasp/release use the robot's parameterless tool commands.
                     # open_gripper()/close_gripper() send 3 params that older
-                    # Ned2 firmware rejects with "1 parameters expected".
+                    # Ned1 firmware rejects with "1 parameters expected".
                     with self._socket_timeout(TOOL_TIMEOUT_S):
                         self._robot.grasp_with_tool()
                 else:
@@ -1492,6 +1576,188 @@ class ArmController:
         return {"sequences": remaining}
 
 
+def _detect_qr_roi(
+    image: Any,
+    x: float,
+    y: float,
+    radius: int,
+    roi: tuple[float, float, float, float] | None = None,
+) -> dict[str, Any]:
+    """Detect a QR code around a clicked pixel or inside a dragged ROI.
+
+    The D455 RGB view is only 640x480 and the tag is small, so a full-frame
+    detector is unreliable. The operator's click or box gives us a useful ROI;
+    we upscale and threshold that ROI before asking OpenCV for the corners.
+    """
+    try:
+        import cv2
+    except ImportError as exc:  # pragma: no cover - depends on the runtime env
+        raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
+
+    h, w = image.shape[:2]
+    best: dict[str, Any] | None = None
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        boxes = [
+            (
+                max(0, int(rx)),
+                max(0, int(ry)),
+                min(w, int(rx + rw)),
+                min(h, int(ry + rh)),
+            )
+        ]
+    else:
+        boxes = []
+        for r in (radius, min(220, radius * 2)):
+            boxes.append(
+                (
+                    max(0, int(x) - r),
+                    max(0, int(y) - r),
+                    min(w, int(x) + r),
+                    min(h, int(y) + r),
+                )
+            )
+    for x0, y0, x1, y1 in boxes:
+        if x1 - x0 < 24 or y1 - y0 < 24:
+            continue
+        crop = image[y0:y1, x0:x1]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        for scale in (4, 6, 8):
+            scaled = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            variants = (
+                scaled,
+                cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                cv2.adaptiveThreshold(
+                    scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
+                ),
+            )
+            for variant in variants:
+                result = cv2.QRCodeDetector().detect(variant)
+                if not result or not result[0] or result[1] is None:
+                    continue
+                points = np.asarray(result[1], dtype=np.float32).reshape(-1, 2)
+                if len(points) != 4:
+                    continue
+                full = points / scale + np.array([x0, y0], dtype=np.float32)
+                margin = 3.0
+                if (
+                    np.min(full[:, 0]) <= x0 + margin
+                    or np.max(full[:, 0]) >= x1 - margin
+                    or np.min(full[:, 1]) <= y0 + margin
+                    or np.max(full[:, 1]) >= y1 - margin
+                ):
+                    # A candidate touching the ROI edge is usually a cage bar /
+                    # arm edge, not the tag. Reject it instead of returning a
+                    # plausible-looking false positive.
+                    continue
+                sides = np.linalg.norm(full - np.roll(full, 1, axis=0), axis=1)
+                if float(sides.min()) < 8.0 or float(sides.max() / sides.min()) > 2.8:
+                    continue
+                area = 0.5 * abs(
+                    float(
+                        np.dot(full[:, 0], np.roll(full[:, 1], -1))
+                        - np.dot(full[:, 1], np.roll(full[:, 0], -1))
+                    )
+                )
+                if area < 200.0 or area > 6000.0:
+                    continue
+                center = full.mean(axis=0)
+                angle = float(cv2.minAreaRect(full.astype(np.float32))[2])
+                candidate = {
+                    "ok": True,
+                    "frame": {"w": w, "h": h},
+                    "roi": {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0},
+                    "center": {"x": round(float(center[0]), 2), "y": round(float(center[1]), 2)},
+                    "corners": [
+                        {"x": round(float(p[0]), 2), "y": round(float(p[1]), 2)}
+                        for p in full
+                    ],
+                    "angle_deg": round(angle, 2),
+                    "area_px": round(area, 1),
+                }
+                if best is None or candidate["area_px"] > best["area_px"]:
+                    best = candidate
+        if best is not None:
+            break
+    return best or {"ok": False, "frame": {"w": w, "h": h}, "error": "QR code not found near click"}
+
+
+def _load_vision_calibration() -> dict[str, Any]:
+    if not VISION_CALIBRATION_FILE.exists():
+        return {"points": [], "homography": None, "rmse_m": None}
+    try:
+        data = json.loads(VISION_CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"points": [], "homography": None, "rmse_m": None}
+    if not isinstance(data, dict):
+        return {"points": [], "homography": None, "rmse_m": None}
+    data.setdefault("points", [])
+    data.setdefault("homography", None)
+    data.setdefault("rmse_m", None)
+    return data
+
+
+def _save_vision_calibration(data: dict[str, Any]) -> None:
+    VISION_CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = VISION_CALIBRATION_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(VISION_CALIBRATION_FILE)
+
+
+def _solve_vision_calibration(points: list[dict[str, float]]) -> tuple[list[list[float]], float]:
+    try:
+        import cv2
+    except ImportError as exc:  # pragma: no cover
+        raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
+    if len(points) < 6:
+        raise HTTPException(409, "at least six 2D-spread vision points are required")
+    src = np.asarray([[p["px"], p["py"]] for p in points], dtype=np.float32)
+    dst = np.asarray([[p["arm_x"], p["arm_y"]] for p in points], dtype=np.float32)
+    px_span, py_span = np.ptp(src, axis=0)
+    ax_span, ay_span = np.ptp(dst, axis=0)
+    if px_span < 80 or py_span < 20 or ax_span < 0.04 or ay_span < 0.04:
+        raise HTTPException(
+            422,
+            "calibration points are too collinear/concentrated; spread them in a 2D grid",
+        )
+    homography, _ = cv2.findHomography(src, dst, 0)
+    if homography is None:
+        raise HTTPException(422, "vision points are degenerate")
+    projected = cv2.perspectiveTransform(src.reshape(-1, 1, 2), homography).reshape(-1, 2)
+    rmse = float(np.sqrt(np.mean(np.sum((projected - dst) ** 2, axis=1))))
+    return homography.tolist(), rmse
+
+
+def _webctl_call(
+    path: str,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    timeout: float = 8.0,
+) -> Any:
+    """Proxy the pull-mode S200 server (copied from the teammate repo)."""
+    base = WHEELTEC_WEBCTL_URL.rstrip("/")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        base + path,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else {"ok": True}
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = payload.get("error") or payload.get("detail") or str(payload)
+        except Exception:
+            detail = str(exc)
+        raise HTTPException(exc.code, detail) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"vehicle backend unavailable: {exc}") from exc
+
+
 def create_app(controller: ArmController) -> FastAPI:
     app = FastAPI(
         title="PackTug Arm Bridge",
@@ -1577,6 +1843,88 @@ def create_app(controller: ArmController) -> FastAPI:
             raise HTTPException(502, payload.get("error", "camera mode switch failed"))
         return payload
 
+    @app.get("/api/vehicle")
+    def vehicle_fleet() -> Any:
+        return _webctl_call("/api/robot")
+
+    @app.get("/api/vehicle/{robot_id}")
+    def vehicle_robot(robot_id: str) -> Any:
+        return _webctl_call(f"/api/robot/{urllib.parse.quote(robot_id, safe='')}")
+
+    @app.get("/api/vehicle/{robot_id}/camera")
+    def vehicle_camera(robot_id: str):
+        suffix = f"/cam/{urllib.parse.quote(robot_id, safe='')}"
+        return _proxy_camera(WHEELTEC_WEBCTL_URL.rstrip("/") + suffix, "vehicle camera")
+
+    @app.post("/api/vision/qr")
+    def vision_qr(body: QrIn) -> dict[str, Any]:
+        """Detect the QR tag near a click in the current RGB snapshot."""
+        try:
+            with urllib.request.urlopen(CAMERA_SNAPSHOT_URL, timeout=6) as response:
+                payload = response.read()
+        except Exception as exc:
+            raise HTTPException(502, f"camera snapshot unavailable: {exc}") from exc
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover
+            raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
+        image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise HTTPException(502, "camera snapshot was not a valid image")
+        roi_values = (body.roi_x, body.roi_y, body.roi_w, body.roi_h)
+        roi = None
+        if any(value is not None for value in roi_values):
+            if any(value is None for value in roi_values):
+                raise HTTPException(400, "ROI needs x, y, w and h")
+            rx, ry, rw, rh = (float(value) for value in roi_values if value is not None)
+            if rw < 20 or rh < 20:
+                raise HTTPException(400, "ROI must be at least 20x20 pixels")
+            roi = (rx, ry, rw, rh)
+        return _detect_qr_roi(image, body.x, body.y, body.radius, roi)
+
+    @app.get("/api/vision/calibration")
+    def vision_calibration() -> dict[str, Any]:
+        return {**_load_vision_calibration(), "needed": 6}
+
+    @app.post("/api/vision/calibration/point")
+    def add_vision_calibration_point(body: VisionPointIn) -> dict[str, Any]:
+        data = _load_vision_calibration()
+        data["points"].append(body.model_dump())
+        data["homography"] = None
+        data["rmse_m"] = None
+        _save_vision_calibration(data)
+        return {**data, "needed": 6}
+
+    @app.post("/api/vision/calibration/solve")
+    def solve_vision_calibration() -> dict[str, Any]:
+        data = _load_vision_calibration()
+        homography, rmse = _solve_vision_calibration(data["points"])
+        data["homography"] = homography
+        data["rmse_m"] = round(rmse, 6)
+        _save_vision_calibration(data)
+        return {**data, "needed": 6}
+
+    @app.delete("/api/vision/calibration")
+    def reset_vision_calibration() -> dict[str, Any]:
+        data = {"points": [], "homography": None, "rmse_m": None}
+        _save_vision_calibration(data)
+        return {**data, "needed": 6}
+
+    @app.post("/api/vision/map")
+    def map_vision_pixel(body: VisionPixelIn) -> dict[str, Any]:
+        data = _load_vision_calibration()
+        homography = data.get("homography")
+        if not homography:
+            raise HTTPException(409, "vision calibration is not solved")
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover
+            raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
+        matrix = np.asarray(homography, dtype=np.float64)
+        pixel = np.asarray([[[body.x, body.y]]], dtype=np.float64)
+        mapped = cv2.perspectiveTransform(pixel, matrix).reshape(-1)
+        return {"ok": True, "x": round(float(mapped[0]), 6), "y": round(float(mapped[1]), 6)}
+
     @app.get("/api/arm/status")
     def arm_status() -> dict[str, Any]:
         return controller.status()
@@ -1609,6 +1957,10 @@ def create_app(controller: ArmController) -> FastAPI:
     @app.post("/api/arm/joint")
     def arm_joint(body: JointIn) -> dict[str, Any]:
         return controller.move_joint(body.joint, body.angle_deg)
+
+    @app.post("/api/arm/pose")
+    def arm_pose(body: PoseIn) -> dict[str, Any]:
+        return controller.move_pose(body)
 
     @app.post("/api/arm/motors/enable")
     def arm_enable_motors() -> dict[str, Any]:
@@ -1714,10 +2066,10 @@ def create_app(controller: ArmController) -> FastAPI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ned2 arm bridge + control-panel server")
+    parser = argparse.ArgumentParser(description="Ned1 arm bridge + control-panel server")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP listen address (use 0.0.0.0 to expose on LAN)")
     parser.add_argument("--port", type=int, default=8020, help="HTTP listen port")
-    parser.add_argument("--arm-host", default=DEFAULT_HOST, help="Ned2 IP (10.10.10.10 WiFi / 169.254.200.200 Ethernet)")
+    parser.add_argument("--arm-host", default=DEFAULT_HOST, help="Ned1 IP (10.10.10.10 WiFi / 169.254.200.200 Ethernet)")
     parser.add_argument("--mock", action="store_true", help="simulate the arm (no hardware)")
     parser.add_argument("--auto-connect", action="store_true", help="connect to the arm at startup")
     args = parser.parse_args()

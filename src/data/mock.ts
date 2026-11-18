@@ -9,12 +9,12 @@ import type {
   Zone,
 } from '../types'
 
-// Final cage — reach-matched to Ned2 (side placement, standard gripper):
+// Final cage — reach-matched to Ned1 (side placement, standard gripper):
 // internal 550 (W) x 250 (D) x 400 (H) mm, floor level with the arm base plane.
 export const CAGE_BIN = { w: 550, d: 250, h: 400, maxWeight: 20 }
 
-// Demo goods sized for the Ned2: every carton fits the 550x250x400 cage and
-// weighs <= 0.3 kg (Ned2 payload).
+// Demo goods sized for the Ned1: every carton fits the 550x250x400 cage and
+// weighs <= 0.3 kg (Ned1 payload).
 export const SKUS: Sku[] = [
   { id: 'SKU-1001', name: 'Frozen Dim Sum Box', category: 'Frozen dim sum', size: { w: 200, d: 120, h: 100 }, weight: 0.18 },
   { id: 'SKU-1002', name: 'Frozen Bun Tray', category: 'Frozen dim sum', size: { w: 180, d: 150, h: 120 }, weight: 0.2 },
@@ -24,9 +24,19 @@ export const SKUS: Sku[] = [
   { id: 'SKU-1006', name: 'Fish Fillet Tray', category: 'Frozen seafood', size: { w: 150, d: 120, h: 100 }, weight: 0.15 },
   { id: 'SKU-1007', name: 'Pizza Carton', category: 'Frozen bakery', size: { w: 200, d: 160, h: 90 }, weight: 0.17 },
   { id: 'SKU-1008', name: 'Dessert Cup Tray', category: 'Frozen dessert', size: { w: 120, d: 100, h: 70 }, weight: 0.1 },
+  { id: 'DEMO-BOX', name: 'Stack demo box', category: 'Stack demo', size: { w: 152, d: 85, h: 110 }, weight: 0.2 },
 ]
 
 export const ORDERS: Order[] = [
+  {
+    id: 'ORD-STACK-5',
+    branch: 'STACK DEMO · five boxes',
+    priority: 'high',
+    status: 'pending',
+    createdAt: '2026-11-18T09:00:00+08:00',
+    dueAt: '2026-11-18T10:00:00+08:00',
+    items: [{ skuId: 'DEMO-BOX', qty: 5 }],
+  },
   {
     id: 'ORD-24001',
     branch: 'Fairwood · Tsuen Wan',

@@ -8,3 +8,8 @@ dist-ssr
 server/*.tmp
 __pycache__/
 *.pyc
+
+server/vision_calibration.json
+
+# teammate pull-mode source is its own nested git repo
+wheeltec-webctl/

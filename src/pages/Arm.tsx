@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, type ArmPosePreset, type ArmSequence, type ArmStatus } from '../services/api'
+import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import {
+  api,
+  type ArmPosePreset,
+  type ArmSequence,
+  type ArmStatus,
+  type QrDetection,
+  type VisionCalibration,
+} from '../services/api'
 import { Badge, Card, PageHeader } from '../components/ui'
 import { clock } from '../lib/format'
 
@@ -15,6 +22,7 @@ const JOINTS = [
 const HOSTS = [
   { label: 'WiFi hotspot', ip: '10.10.10.10' },
   { label: 'Ethernet', ip: '169.254.200.200' },
+  { label: 'Jetson relay', ip: '127.0.0.1' },
 ]
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -56,6 +64,15 @@ export function Arm() {
   const [camSwitching, setCamSwitching] = useState(false)
   const [camTargetMode, setCamTargetMode] = useState<'rgb' | 'depth' | null>(null)
   const [depthStats, setDepthStats] = useState<DepthStats | null>(null)
+  const [qr, setQr] = useState<QrDetection | null>(null)
+  const [qrPending, setQrPending] = useState(false)
+  const [qrError, setQrError] = useState<string | null>(null)
+  const [visionCalib, setVisionCalib] = useState<VisionCalibration | null>(null)
+  const [visionPending, setVisionPending] = useState(false)
+  const [visionMessage, setVisionMessage] = useState<string | null>(null)
+  const [dragRect, setDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const cameraImgRef = useRef<HTMLImageElement | null>(null)
   const stopSequenceRef = useRef(false)
 
   useEffect(() => {
@@ -122,6 +139,14 @@ export function Arm() {
       })
       .catch(() => {
         // Sequence list is optional too.
+      })
+    api
+      .getVisionCalibration()
+      .then((calibration) => {
+        if (alive) setVisionCalib(calibration)
+      })
+      .catch(() => {
+        // Vision calibration is optional until the operator starts it.
       })
     return () => {
       alive = false
@@ -296,6 +321,163 @@ export function Arm() {
 
   function setReach(maxReachM: number) {
     void run(`Max reach ${maxReachM.toFixed(2)} m`, () => api.setArmReach(maxReachM))
+  }
+
+  function imagePoint(event: PointerEvent<HTMLImageElement>) {
+    const image = cameraImgRef.current ?? event.currentTarget
+    const rect = image.getBoundingClientRect()
+    const width = image.naturalWidth || 640
+    const height = image.naturalHeight || 480
+    return {
+      x: Math.max(0, Math.min(width, ((event.clientX - rect.left) / rect.width) * width)),
+      y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height)),
+    }
+  }
+
+  function normalisedRect(a: { x: number; y: number }, b: { x: number; y: number }) {
+    return {
+      x: Math.min(a.x, b.x),
+      y: Math.min(a.y, b.y),
+      w: Math.abs(a.x - b.x),
+      h: Math.abs(a.y - b.y),
+    }
+  }
+
+  async function runQrDetection(
+    x: number,
+    y: number,
+    roi?: { x: number; y: number; w: number; h: number },
+  ) {
+    setQrPending(true)
+    setQrError(null)
+    setQr(null)
+    try {
+      const result = await api.detectQr(x, y, 60, roi)
+      setQr(result)
+      if (result.ok) {
+        addLog(
+          `QR ${result.center?.x.toFixed(1)},${result.center?.y.toFixed(1)} px · ${result.angle_deg?.toFixed(1)}°`,
+          'info',
+        )
+      } else {
+        setQrError(result.error ?? 'QR not found near selection')
+      }
+    } catch (err) {
+      setQrError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setQrPending(false)
+    }
+  }
+
+  function startQrDrag(event: PointerEvent<HTMLImageElement>) {
+    if (camMode !== 'rgb' || camSwitching) return
+    event.preventDefault()
+    const point = imagePoint(event)
+    dragStartRef.current = point
+    setDragRect({ x: point.x, y: point.y, w: 0, h: 0 })
+    setQr(null)
+    setQrError(null)
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Pointer capture is optional; the drag still works while inside the image.
+    }
+  }
+
+  function moveQrDrag(event: PointerEvent<HTMLImageElement>) {
+    if (!dragStartRef.current) return
+    const point = imagePoint(event)
+    setDragRect(normalisedRect(dragStartRef.current, point))
+  }
+
+  function finishQrDrag(event: PointerEvent<HTMLImageElement>) {
+    const start = dragStartRef.current
+    if (!start) return
+    const point = imagePoint(event)
+    const rect = normalisedRect(start, point)
+    dragStartRef.current = null
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      // Already released.
+    }
+    if (rect.w >= 20 && rect.h >= 20) {
+      setDragRect(rect)
+      void runQrDetection(rect.x + rect.w / 2, rect.y + rect.h / 2, rect)
+    } else {
+      setDragRect(null)
+      void runQrDetection(point.x, point.y)
+    }
+  }
+
+  function cancelQrDrag() {
+    dragStartRef.current = null
+    setDragRect(null)
+  }
+
+  async function captureVisionPoint() {
+    if (!qr?.ok || !qr.center) {
+      setVisionMessage('Click the QR tag in the RGB view first.')
+      return
+    }
+    if (!status?.pose) {
+      setVisionMessage('Arm pose is not available; connect and move the arm first.')
+      return
+    }
+    setVisionPending(true)
+    setVisionMessage(null)
+    try {
+      const calibration = await api.addVisionCalibrationPoint({
+        px: qr.center.x,
+        py: qr.center.y,
+        arm_x: status.pose.x,
+        arm_y: status.pose.y,
+      })
+      setVisionCalib(calibration)
+      setVisionMessage(`Captured ${calibration.points.length}/${calibration.needed} points.`)
+      addLog(
+        `Vision point ${calibration.points.length}: px ${qr.center.x.toFixed(1)},${qr.center.y.toFixed(1)} -> arm ${status.pose.x.toFixed(3)},${status.pose.y.toFixed(3)}`,
+        'info',
+      )
+    } catch (err) {
+      setVisionMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setVisionPending(false)
+    }
+  }
+
+  async function solveVisionCalibration() {
+    setVisionPending(true)
+    setVisionMessage(null)
+    try {
+      const calibration = await api.solveVisionCalibration()
+      setVisionCalib(calibration)
+      setVisionMessage(
+        calibration.rmse_m != null
+          ? `Calibration solved; RMSE ${(calibration.rmse_m * 1000).toFixed(1)} mm.`
+          : 'Calibration solved.',
+      )
+      addLog('Vision calibration solved', 'success')
+    } catch (err) {
+      setVisionMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setVisionPending(false)
+    }
+  }
+
+  async function resetVisionCalibration() {
+    if (!window.confirm('Reset all vision calibration points?')) return
+    setVisionPending(true)
+    setVisionMessage(null)
+    try {
+      const calibration = await api.resetVisionCalibration()
+      setVisionCalib(calibration)
+      setVisionMessage('Vision calibration cleared.')
+    } catch (err) {
+      setVisionMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setVisionPending(false)
+    }
   }
 
   async function savePose() {
@@ -500,7 +682,7 @@ export function Arm() {
     <>
       <PageHeader
         title="Arm Control"
-        desc="Niryo Ned2 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command."
+        desc="Niryo Ned1 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command."
         actions={
           <>
             {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}
@@ -564,13 +746,85 @@ export function Arm() {
           </div>
         ) : (
           <>
-            <img
-              key={`${camMode}-${camKey}`}
-              className="camera-feed"
-              src={`${camMode === 'rgb' ? '/api/camera/stream' : '/api/camera/depth'}?t=${camKey}`}
-              alt={camMode === 'rgb' ? 'RealSense RGB camera' : 'RealSense colorized depth'}
-              onError={() => setCamError(true)}
-            />
+            <div className="camera-stage">
+              <img
+                key={`${camMode}-${camKey}`}
+                ref={cameraImgRef}
+                className="camera-feed"
+                src={`${camMode === 'rgb' ? '/api/camera/stream' : '/api/camera/depth'}?t=${camKey}`}
+                alt={camMode === 'rgb' ? 'RealSense RGB camera' : 'RealSense colorized depth'}
+                title={
+                  camMode === 'rgb'
+                    ? 'Click the QR tag, or drag a box around it when it is small'
+                    : undefined
+                }
+                style={{ cursor: camMode === 'rgb' ? 'crosshair' : 'default' }}
+                draggable={false}
+                onPointerDown={startQrDrag}
+                onPointerMove={moveQrDrag}
+                onPointerUp={finishQrDrag}
+                onPointerCancel={cancelQrDrag}
+                onError={() => setCamError(true)}
+              />
+              {camMode === 'rgb' &&
+                (dragRect || (qr?.ok && qr.frame && qr.center && qr.corners)) && (
+                  <svg
+                    className="camera-overlay"
+                    viewBox={`0 0 ${qr?.frame?.w ?? 640} ${qr?.frame?.h ?? 480}`}
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    {dragRect && (
+                      <rect
+                        x={dragRect.x}
+                        y={dragRect.y}
+                        width={dragRect.w}
+                        height={dragRect.h}
+                        fill="rgba(251, 191, 36, 0.08)"
+                        stroke="var(--amber)"
+                        strokeWidth="1.5"
+                        strokeDasharray="6 4"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    )}
+                    {qr?.ok && qr.corners && qr.center && (
+                      <>
+                        <polygon
+                          points={qr.corners.map((point) => `${point.x},${point.y}`).join(' ')}
+                          fill="rgba(34, 211, 238, 0.14)"
+                          stroke="var(--accent)"
+                          strokeWidth="2"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                        <circle
+                          cx={qr.center.x}
+                          cy={qr.center.y}
+                          r="5"
+                          fill="var(--accent)"
+                          stroke="#0a0e14"
+                          strokeWidth="1"
+                        />
+                      </>
+                    )}
+                  </svg>
+                )}
+            </div>
+            {camMode === 'rgb' && (
+              <div className="camera-stats">
+                {qrPending ? (
+                  'Detecting QR in selection…'
+                ) : qrError ? (
+                  <span style={{ color: 'var(--amber)' }}>{qrError}</span>
+                ) : qr?.ok && qr.center ? (
+                  <span className="mono">
+                    QR center {qr.center.x.toFixed(1)}, {qr.center.y.toFixed(1)} px · angle{' '}
+                    {qr.angle_deg?.toFixed(1) ?? '—'}° · area {qr.area_px ?? '—'} px²
+                  </span>
+                ) : (
+                  'Click the QR tag, or drag a box around it if it is too small to click accurately.'
+                )}
+              </div>
+            )}
             {camMode === 'depth' && (
               <div className="camera-stats mono">
                 nearest valid depth: {depthStats?.nearest_m != null ? `${depthStats.nearest_m.toFixed(3)} m` : '—'}
@@ -580,6 +834,48 @@ export function Arm() {
             )}
           </>
         )}
+      </Card>
+
+      <Card title="Vision calibration" hint="Manual 6-point pixel → arm XY mapping">
+        <div className="stack">
+          <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>
+            Put the block at six positions covering a 2D grid (left/right and near/far). At each position, jog the
+            tool tip directly over the QR center, select the QR in the RGB view (click or drag a box), then capture
+            the current arm pose.
+          </p>
+          <div className="row between">
+            <span className="muted">Points</span>
+            <span className="mono">
+              {visionCalib?.points.length ?? 0}/{visionCalib?.needed ?? 6}
+            </span>
+          </div>
+          <div className="row between">
+            <span className="muted">Residual</span>
+            <span className="mono">
+              {visionCalib?.rmse_m != null ? `${(visionCalib.rmse_m * 1000).toFixed(1)} mm` : '—'}
+            </span>
+          </div>
+          <div className="row">
+            <button
+              className="btn primary"
+              onClick={() => void captureVisionPoint()}
+              disabled={!qr?.ok || !status?.pose || visionPending}
+            >
+              {visionPending ? 'Working…' : 'Capture current point'}
+            </button>
+            <button
+              className="btn"
+              onClick={() => void solveVisionCalibration()}
+              disabled={(visionCalib?.points.length ?? 0) < (visionCalib?.needed ?? 6) || visionPending}
+            >
+              Solve
+            </button>
+            <button className="btn danger" onClick={() => void resetVisionCalibration()} disabled={visionPending}>
+              Reset
+            </button>
+          </div>
+          {visionMessage && <span className="faint">{visionMessage}</span>}
+        </div>
       </Card>
 
       {status?.fault && (
@@ -644,7 +940,7 @@ export function Arm() {
         <Card title="Connection" hint="PyNiryo TCP :40001 · one client at a time">
           <div className="stack">
             <div className="field">
-              <label>Ned2 address</label>
+              <label>Ned1 address</label>
               <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="10.10.10.10" spellCheck={false} />
             </div>
             <div className="row">
@@ -658,6 +954,11 @@ export function Arm() {
                 </button>
               ))}
             </div>
+            {host === '127.0.0.1' && (
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                Requires an SSH tunnel on the control machine: local :40001 → Jetson → arm :40001.
+              </span>
+            )}
             <div className="row">
               <button className="btn primary" onClick={connect} disabled={pending || !!status?.connected}>
                 {pending ? 'Working…' : 'Connect'}

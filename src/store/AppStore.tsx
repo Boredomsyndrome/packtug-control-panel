@@ -24,6 +24,7 @@ import type {
   Zone,
 } from '../types'
 import { AGVS, CAGES, CAGE_BIN, MISSIONS, ORDERS, SKUS, THROUGHPUT, ZONES } from '../data/mock'
+import { DEMO_ORDER_ID, DEMO_STACK_PLAN } from '../data/demoStack'
 import { api } from '../services/api'
 import type { PackBox } from '../lib/packing'
 
@@ -182,8 +183,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const order = orders.find((o) => o.id === orderId)
       if (!order) return undefined
       pushActivity(`Running 3D packing for ${orderId}…`)
-      const boxes = expandOrder(order, skuMap)
-      const plan = await api.packOrder({ orderId, boxes, bin: CAGE_BIN })
+      const plan =
+        orderId === DEMO_ORDER_ID
+          ? { ...DEMO_STACK_PLAN, generatedAt: nowIso() }
+          : await api.packOrder({
+              orderId,
+              boxes: expandOrder(order, skuMap),
+              bin: CAGE_BIN,
+            })
       setPlans((prev) => ({ ...prev, [orderId]: plan }))
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId && o.status === 'pending' ? { ...o, status: 'planned' } : o)),

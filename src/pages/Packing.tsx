@@ -176,8 +176,9 @@ export function Packing() {
                     style={{ marginTop: 10, padding: 0 }}
                   />
                   <p className="faint" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
-                    Order: bottom-up, deepest-first. The arm places cartons <b>from the side</b> through the opening
-                    (cyan dashed face); top-down is only used where reachable.
+                    {plan?.algorithm === 'demo-stack'
+                      ? 'Demo order: back row → top → front row. The top box is placed before the front row so the arm never reaches over a completed row.'
+                      : 'Order: bottom-up, deepest-first. The arm places cartons from the side through the opening (cyan dashed face); top-down is only used where reachable.'}
                   </p>
                 </>
               ) : (

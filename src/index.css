@@ -244,13 +244,34 @@ button {
   color: var(--text-faint);
 }
 
-.camera-feed {
-  display: block;
+.camera-stage {
+  position: relative;
   width: 100%;
-  max-height: 420px;
-  object-fit: contain;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
   border-radius: var(--radius-sm);
   background: #000;
+}
+
+.camera-stage .camera-feed {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+  background: #000;
+  touch-action: none;
+  user-select: none;
+}
+
+.camera-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .camera-error {

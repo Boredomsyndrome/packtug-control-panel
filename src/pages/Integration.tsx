@@ -24,7 +24,7 @@ export function Integration() {
     <>
       <PageHeader
         title="Integration"
-        desc="Reserved interfaces between this panel, the Django backend and the WHEELTEC S200 / ROS 2 stack."
+        desc="Live and planned interfaces between this panel, the pull-mode AGV server, the arm bridge and the ROS 2 stack."
       />
 
       <div className="grid cols-4">
@@ -60,7 +60,7 @@ export function Integration() {
         </Card>
       </div>
 
-      <Card title="REST endpoints" hint="arm endpoints are live via server/arm_server.py; AGV endpoints remain mock">
+      <Card title="REST endpoints" hint="arm/camera/vehicle status live; panel business APIs still mock">
         <table className="data">
           <thead>
             <tr>
@@ -135,8 +135,12 @@ ros2 topic echo /battery_state
 ros2 topic echo /odom`}</pre>
           <div className="stack" style={{ marginTop: 12, fontSize: 12.5 }}>
             <div className="row between">
-              <span className="muted">Default user</span>
-              <span className="mono">wheeltec / dongguan</span>
+              <span className="muted">SSH user</span>
+              <span className="mono">wheeltec</span>
+            </div>
+            <div className="row between">
+              <span className="muted">Password</span>
+              <span className="faint">team vault only</span>
             </div>
             <div className="row between">
               <span className="muted">Robot IP</span>
@@ -151,8 +155,9 @@ ros2 topic echo /odom`}</pre>
       </div>
 
       <div className="stale-warning">
-        ⚠ AGV fleet, cages and missions are still simulated at 1 Hz. The Ned2 arm channel is live when the
-        arm bridge is running; open <span className="mono">/arm</span> to connect.
+        ⚠ AGV online/battery status is live from the pull-mode server; cages, missions and panel orders are
+        still simulated. The Ned1 arm channel is live when the bridge is running; open{' '}
+        <span className="mono">/arm</span> to connect.
       </div>
     </>
   )

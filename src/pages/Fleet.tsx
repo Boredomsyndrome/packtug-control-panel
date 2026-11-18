@@ -1,23 +1,72 @@
+import { useEffect, useState } from 'react'
 import { useApp } from '../store/AppStore'
+import { vehicleApi, type LiveRobot } from '../services/vehicle'
 import { Badge, Card, PageHeader, Progress } from '../components/ui'
 import { AGV_STATUS, CAGE_STATE } from '../components/status'
 import { kg, pct, volumeLitres } from '../lib/format'
 
 export function Fleet() {
   const { agvs, cages } = useApp()
-  const connected = agvs.filter((a) => a.status !== 'offline').length
+  const [live, setLive] = useState<LiveRobot | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    let busy = false
+    async function poll() {
+      if (busy) return
+      busy = true
+      try {
+        const fleet = await vehicleApi.getFleet()
+        if (alive) setLive(fleet.robots[0] ?? null)
+      } catch {
+        if (alive) setLive(null)
+      } finally {
+        busy = false
+      }
+    }
+    void poll()
+    const timer = window.setInterval(poll, 1000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
 
   return (
     <>
       <PageHeader
         title="Fleet & Cages"
         desc="WHEELTEC S200 platforms and roll cages."
-        actions={<Badge tone={connected ? 'green' : 'red'} dot>{connected} units connected</Badge>}
+        actions={
+          <Badge tone={live?.online ? 'green' : 'red'} dot>
+            {live ? `${live.id} · ${live.online ? 'online' : 'offline'}` : 'AGV server offline'}
+          </Badge>
+        }
       />
 
+      <Card title="AGV control" hint="teammate pull-mode console · robotctl">
+        <div className="row between" style={{ gap: 18, flexWrap: 'wrap' }}>
+          <div>
+            <p style={{ margin: '0 0 4px' }}>Drive the S200 with the teammate’s fleet console.</p>
+            <p className="faint" style={{ margin: 0, fontSize: 12 }}>
+              {live
+                ? `${live.id} · ${live.online ? 'online' : 'offline'} · ${live.battery_v != null ? `${live.battery_v.toFixed(1)} V` : 'battery —'} · transport ${live.transport ?? 'none'}`
+                : 'Waiting for the pull-mode AGV server…'}
+            </p>
+          </div>
+          <a
+            className="btn primary"
+            href={`http://${window.location.hostname}:8090/`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open AGV control ↗
+          </a>
+        </div>
+      </Card>
+
       <div className="stale-warning">
-        ⚠ Hardware not connected. AGV telemetry (pose, battery) is disabled until the test map is modelled and the
-        S200 ROS 2 bridge is online — the fleet below shows last-known records only.
+        Records below are mock/last-known. Live AGV driving is handled by the teammate’s pull-mode console above.
       </div>
 
       <div className="grid split">

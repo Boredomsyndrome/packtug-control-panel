@@ -17,7 +17,7 @@ const DROP_MS = 720
 const APPROACH_Y = 260
 const APPROACH_Z = 26
 
-// Industrial arm (Ned2-like) placed outside the opening, reaching in sideways.
+// Industrial arm (Ned1-like) placed outside the opening, reaching in sideways.
 const ARM_STANDOFF = 200
 const SHOULDER_Z = 180
 const L1 = 250

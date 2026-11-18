@@ -82,6 +82,37 @@ export interface ArmStatus {
   updated_at: number | null
 }
 
+export interface QrDetection {
+  ok: boolean
+  frame: { w: number; h: number }
+  roi?: { x: number; y: number; w: number; h: number }
+  center?: { x: number; y: number }
+  corners?: Array<{ x: number; y: number }>
+  angle_deg?: number
+  area_px?: number
+  error?: string
+}
+
+export interface VisionCalibrationPoint {
+  px: number
+  py: number
+  arm_x: number
+  arm_y: number
+}
+
+export interface VisionCalibration {
+  points: VisionCalibrationPoint[]
+  homography: number[][] | null
+  rmse_m: number | null
+  needed: number
+}
+
+export interface VisionMapping {
+  ok: boolean
+  x: number
+  y: number
+}
+
 export interface ArmPosePreset {
   name: string
   joints_deg: number[]
@@ -304,7 +335,7 @@ export const api = {
     }
   },
 
-  // ---------- Ned2 arm bridge (live via server/arm_server.py) ----------
+  // ---------- Ned1 arm bridge (live via server/arm_server.py) ----------
 
   async getArmStatus(): Promise<ArmStatus> {
     if (MOCK_MODE) {
@@ -312,6 +343,40 @@ export const api = {
       return mockArmStatus()
     }
     return jsonRequest<ArmStatus>('/arm/status')
+  },
+
+  async detectQr(
+    x: number,
+    y: number,
+    radius = 60,
+    roi?: { x: number; y: number; w: number; h: number },
+  ): Promise<QrDetection> {
+    return jsonRequest<QrDetection>('/vision/qr', {
+      x,
+      y,
+      radius,
+      ...(roi ? { roi_x: roi.x, roi_y: roi.y, roi_w: roi.w, roi_h: roi.h } : {}),
+    })
+  },
+
+  async getVisionCalibration(): Promise<VisionCalibration> {
+    return jsonRequest<VisionCalibration>('/vision/calibration')
+  },
+
+  async addVisionCalibrationPoint(point: VisionCalibrationPoint): Promise<VisionCalibration> {
+    return jsonRequest<VisionCalibration>('/vision/calibration/point', point)
+  },
+
+  async solveVisionCalibration(): Promise<VisionCalibration> {
+    return jsonRequest<VisionCalibration>('/vision/calibration/solve', {})
+  },
+
+  async resetVisionCalibration(): Promise<VisionCalibration> {
+    return jsonRequest<VisionCalibration>('/vision/calibration', undefined, 'DELETE')
+  },
+
+  async mapVisionPixel(x: number, y: number): Promise<VisionMapping> {
+    return jsonRequest<VisionMapping>('/vision/map', { x, y })
   },
 
   async connectArm(ip: string): Promise<ArmStatus> {

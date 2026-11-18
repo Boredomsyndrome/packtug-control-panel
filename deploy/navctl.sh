@@ -36,42 +36,12 @@ source "$ROS_SRC" 2>/dev/null
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash" 2>/dev/null
 mkdir -p "$MAPS"
 
-# v3.6.5 FINAL transport lever (saga's "SHM size exhaustion" note, made
-# actionable): humble FastDDS ships SHM pool ~14 MB; camera+scan+tf+odom
-# reliable depth-10 pools on this loaded Orin-class Jetson overflow it and
-# long-lived subscribers silently starve (slam: /tf never resolves; fresh
-# short probes unaffected — exactly our symptom table). Give the nav plane
-# a 192 MB SHM file + 4 MB segments; vendor default untouched.
-cat > "$NAVHOME/fastdds_nav.xml" <<'XML'
-<?xml version="1.0" encoding="UTF-8" ?>
-<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
-    <transport_descriptors>
-        <transport_descriptor>
-            <transport_id>nav_shm_big</transport_id>
-            <type>SHM</type>
-            <segment_size>4194304</segment_size>
-            <port_queue_capacity>1048576</port_queue_capacity>
-        </transport_descriptor>
-        <transport_descriptor>
-            <transport_id>nav_udp</transport_id>
-            <type>UDPv4</type>
-        </transport_descriptor>
-    </transport_descriptors>
-    <participant profile_name="nav_shm_big" is_default_profile="true">
-        <rtps>
-            <userTransports>
-                <transport_id>nav_shm_big</transport_id>
-                <transport_id>nav_udp</transport_id>
-            </userTransports>
-            <!-- builtin OFF: else the default 14 MB SHM transport coexists
-                 and FastDDS may still route local traffic through it -->
-            <useBuiltinTransports>false</useBuiltinTransports>
-        </rtps>
-    </participant>
-</profiles>
-XML
-export FASTRTPS_DEFAULT_PROFILES_FILE="$NAVHOME/fastdds_nav.xml"
-
+# v3.6.5 POST-MORTEM (do NOT reintroduce any FASTRTPS_DEFAULT_PROFILES_FILE):
+# a custom profile file — even a 'bigger SHM' one — partitions this robot's
+# DDS plane: navctl-spawned processes went invisible to the vendor stack
+# after reboot (their TX reached nobody; only camera/odom/lidar flowed).
+# Env diff of one island vs healthy vendor process had EXACTLY one line:
+# FASTRTPS_DEFAULT_PROFILES_FILE=fastdds_nav.xml. Stock profile only.
 # v3.6.5 NOTE: the "starvation" theory (slam blind to /tf+/scan) is now most
 # likely NOT transport: slam was pointed at RAW /scan (64 KB multi-return
 # A2-class scans) while short-lived probes grabbed one small message at a

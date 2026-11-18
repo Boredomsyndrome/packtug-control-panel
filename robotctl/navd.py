@@ -577,8 +577,9 @@ class NavDaemon:
         try:
             proc = subprocess.Popen(
                 ["bash", "-lc",
-                 f"source {ros} && exec ros2 run tf2_ros tf2_echo "
-                 "map base_footprint"],
+                 f"source {ros} && if [ -x /opt/ros/humble/lib/tf2_ros/tf2_echo ]; "
+                 "then exec /opt/ros/humble/lib/tf2_ros/tf2_echo map base_footprint; "
+                 "else exec ros2 run tf2_ros tf2_echo map base_footprint; fi"],
                 stdout=subprocess.PIPE,
                 # THIS ROBOT's humble tf2_echo writes the transform blocks to
                 # STDERR (rclcpp INFO) — stdout+stderr=DEVNULL meant the

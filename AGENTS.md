@@ -31,7 +31,8 @@
   `ssh -N -L 40001:169.254.200.200:40001 wheeltec@100.73.98.69`
 - The UI connection preset **Jetson relay · 127.0.0.1** uses this tunnel. The **Ethernet** preset is for an arm server running on the Jetson (or direct arm Ethernet).
 - Before restarting `arm_server.py`, call `POST /api/arm/disconnect` or it may leave a stale arm TCP session. `HostNotReachableException` after a restart usually means the arm service has a stale session; power-cycle the arm controller if a normal reconnect does not clear it.
-- If the arm link stays up but ping loss/`HostNotReachableException` returns, reset the NetworkManager connection (`nmcli con down arm-link && nmcli con up arm-link`). This restored 0% loss and fast motor-enable in the current setup; toggling EEE made it worse. The `arm-link` profile is 169.254.200.1/16 on eth0 and autoconnects.
+- If the arm link stays up but ping loss/`HostNotReachableException` returns, reset the NetworkManager connection (`nmcli con down arm-link && nmcli con up arm-link`). The `arm-link` profile is 169.254.200.1/16 on eth0 and autoconnects.
+- The UGREEN/arm link must be **100 Mb/s full duplex**, not 1 Gb/s autoneg. At 1 Gb/s it showed 50-75% packet loss and `HostNotReachableException`; forcing 100 Mb/s restored 0% loss and a stable PyNiryo session. Use `deploy/setup_arm_link.sh`; do not toggle EEE as a fix (it made the link worse).
 - Tailscale is currently Mac `100.86.19.104` and Jetson `100.73.98.69`; it may use a DERP relay instead of a direct path.
 
 ## Fleet / AGV integration
@@ -72,10 +73,8 @@
 - The S200 SBC is a **Jetson Orin Nano**, host `wheeltec`, Ubuntu 22.04 `tegra` + ROS 2 Humble. Current Tailscale node: `100.73.98.69` (verify with `tailscale status`; DHCP can change).
 - HKU `Wi-Fi.HK via HKU` has client isolation; use Tailscale, not direct SSH over that SSID.
 - Default WHEELTEC credentials/AP are in `../WHEELTEC ROS2 S200 Brushless Mobile Robot.pdf`: AP `WHEELTEC_ORINNANO_HUMBLE`, robot `192.168.0.100`. Do not put passwords in this repo.
-- The arm link through the UGREEN RTL8153 is currently configured manually and is not persistent across a Jetson reboot:
-  `sudo ip link set eth0 up && sudo ip addr replace 169.254.200.1/16 dev eth0`
-  Confirm the interface with `ip -br link`; it may swap between `eth0` and `eth1`.
-- Camera bridge runs on the Jetson, not the Mac, as the enabled systemd service **`packtug-camera.service`** (D455 RGB, port 8080; auto-starts at boot and restarts on failure). Check with `systemctl status packtug-camera.service`; manual fallback:
+- The arm link through the UGREEN RTL8153 is a persistent NetworkManager profile named `arm-link` (169.254.200.1/16, 100 Mb/s full duplex, autoconnect). Install/repair it with `sudo deploy/setup_arm_link.sh eth0` (run on the Jetson; the repo copy is the source). Confirm with `ip -br link`; the interface may swap between `eth0` and `eth1`.
+- Camera bridge runs on the Jetson, not the Mac, as the enabled systemd service **`packtug-camera.service`** (D455 RGB, port 8080; auto-starts at boot and restarts on failure). The unit is in this repo at `deploy/packtug-camera.service`; install with `sudo deploy/setup_camera_service.sh`. Check with `systemctl status packtug-camera.service`; manual fallback:
   `source /opt/ros/humble/setup.bash && python3 ~/camera_stream.py --manage-camera --mode rgb --port 8080`.
   It owns the `realsense2_camera` child process; do not also launch a separate realsense node.
 - The service can stay `active` while its frame stream is frozen. Check `curl http://127.0.0.1:8080/health`: if `color.age_sec` grows beyond a few seconds, restart `packtug-camera.service`; QR/vision will otherwise keep detecting on a stale snapshot. A pause/resume of the realsense child can leave it in this state.

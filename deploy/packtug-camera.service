@@ -1,0 +1,19 @@
+[Unit]
+Description=PackTug D455 RGB MJPEG bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wheeltec
+Group=wheeltec
+Environment=HOME=/home/wheeltec
+WorkingDirectory=/home/wheeltec
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/wheeltec/camera_stream.py --manage-camera --mode rgb --port 8080'
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -153,8 +153,16 @@ remain mock. Other pages remain on mock data.
 The arm page also shows a live RGB feed. The camera runs on the Jetson, not on
 the control laptop. It is installed as the enabled systemd service
 `packtug-camera.service`, so it starts automatically at boot and restarts if it
-exits. The bridge owns `realsense2_camera` and can switch between RGB and depth
-from the page:
+exits. The unit and installer are in `deploy/`:
+
+```bash
+# on the Jetson, from the repo checkout
+sudo ./deploy/setup_camera_service.sh
+sudo ./deploy/setup_arm_link.sh eth0     # 169.254.200.1/16, 100 Mb/s full
+```
+
+The bridge owns `realsense2_camera` and can switch between RGB and depth from
+the page:
 
 ```bash
 # on the Jetson (manual fallback; the service normally runs this)

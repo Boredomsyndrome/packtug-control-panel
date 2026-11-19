@@ -1551,6 +1551,11 @@ class ArmController:
             with self._state:
                 if not self.connected:
                     raise HTTPException(409, "arm is not connected")
+                pre_calibration = (
+                    list(self.joints_deg) if self.joints_deg is not None else None
+                )
+                if pre_calibration is not None:
+                    self.last_good_joints = list(pre_calibration)
             with self._state:
                 self.busy = True
             try:
@@ -1572,13 +1577,29 @@ class ArmController:
                     with self._socket_timeout(MOTION_TIMEOUT_S):
                         self._robot.calibrate_auto()
                     self._read_locked()
+                    with self._state:
+                        needs_calibration = bool(self.calibration_needed)
+                        learning = bool(self.learning_mode)
+                    if needs_calibration or learning:
+                        raise RuntimeError(
+                            "auto-calibration ended with calibration still required "
+                            "or motors released; clear the arm and inspect it"
+                        )
                 with self._state:
+                    self.last_good_joints = (
+                        list(self.joints_deg)
+                        if self.joints_deg is not None
+                        else None
+                    )
                     self.last_error = None
             except HTTPException:
                 raise
             except Exception as exc:
-                with self._state:
-                    self.last_error = f"{type(exc).__name__}: {exc}"
+                actual = self._read_after_fault_locked()
+                if pre_calibration is not None:
+                    with self._state:
+                        self.last_good_joints = list(pre_calibration)
+                self._record_motion_fault_locked(exc, actual)
                 raise HTTPException(502, self.last_error) from exc
             finally:
                 with self._state:
@@ -2246,6 +2267,7 @@ def _solve_vision_calibration(points: list[dict[str, float]]) -> tuple[list[list
 
 # ── Dry-run pick path planning (cage frame avoidance) ────────────────────────
 PATH_SAMPLE_M = 0.005  # 5 mm sampling along each path segment
+MIN_RETRACT_RADIUS_M = 0.18  # do not pull back into the base/singular zone
 
 
 def _cage_to_world(cage: CageIn, local: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -2653,7 +2675,7 @@ def _plan_retract_path(
     """
     x, y, z = start["x"], start["y"], start["z"]
     radius = math.hypot(x, y)
-    target_radius = max(0.05, radius - retract_m)
+    target_radius = max(MIN_RETRACT_RADIUS_M, radius - retract_m)
     if radius <= target_radius + 1e-6:
         return (
             [

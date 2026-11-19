@@ -15,6 +15,7 @@ import {
 } from '../services/api'
 import { Badge, Card, PageHeader } from '../components/ui'
 import { clock } from '../lib/format'
+import { ARM_TARGET_STORAGE_KEY, type ArmTargetFromPacking } from '../lib/digitalTwin'
 
 const JOINTS = [
   { id: 'J1', name: 'base' },
@@ -248,6 +249,7 @@ export function Arm() {
   const [pathResult, setPathResult] = useState<PickPathResult | null>(null)
   const [pathPending, setPathPending] = useState(false)
   const [pathError, setPathError] = useState<string | null>(null)
+  const [twinTargetNote, setTwinTargetNote] = useState<string | null>(null)
   const [execSpeed, setExecSpeed] = useState(5)
   const [execRetract, setExecRetract] = useState(0.08)
   const [execHomeLift, setExecHomeLift] = useState(0.08)
@@ -291,6 +293,21 @@ export function Arm() {
       // Ignore storage errors (private mode or quota exceeded).
     }
   }, [cageCorners, cageIgnored, pathCage, cageFit, lastStart, pathHome, homeRecorded])
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(ARM_TARGET_STORAGE_KEY)
+      if (!raw) return
+      const target = JSON.parse(raw) as ArmTargetFromPacking
+      setPathTarget((current) => ({ ...current, x: target.x, y: target.y, z: target.z }))
+      setTwinTargetNote(
+        `Packing box #${target.placementSeq} (${target.reference}) → target ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; orientation unchanged`,
+      )
+      localStorage.removeItem(ARM_TARGET_STORAGE_KEY)
+    } catch {
+      setTwinTargetNote(null)
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -1485,6 +1502,11 @@ export function Arm() {
           </div>
           {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
           <PoseEditor title="Grasp target" pose={pathTarget} onChange={setPathTarget} />
+          {twinTargetNote && (
+            <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
+              {twinTargetNote}
+            </p>
+          )}
           <div className="row" style={{ gap: 6 }}>
             <button className="btn sm" onClick={setTargetToCageCentre}>
               Target = cage floor centre

@@ -1,12 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useApp } from '../store/AppStore'
 import { Badge, Card, Empty, KpiCard, PageHeader, Progress } from '../components/ui'
 import { Cage3DView } from '../components/Cage3DView'
 import { hueForSku, kg, pct, volumeLitres } from '../lib/format'
+import {
+  ARM_TARGET_STORAGE_KEY,
+  CAGE_STORAGE_KEY,
+  placementToArmTarget,
+  placementToLocalTarget,
+  type ArmTargetFromPacking,
+  type TargetReference,
+} from '../lib/digitalTwin'
+import type { CageGeometry } from '../services/api'
 
 export function Packing() {
   const { orderId } = useParams()
+  const navigate = useNavigate()
   const { orders, plans, runPacking, skuMap } = useApp()
   const [selected, setSelected] = useState<string>(
     orderId ?? orders.find((o) => o.status === 'pending')?.id ?? orders[0]?.id ?? '',
@@ -16,6 +26,19 @@ export function Packing() {
   const [step, setStep] = useState(0)
   const [playing, setPlaying] = useState(true)
   const [speed, setSpeed] = useState(1)
+  const [twinCage, setTwinCage] = useState<CageGeometry | null>(null)
+  const [twinSeq, setTwinSeq] = useState<number | null>(null)
+  const [twinReference, setTwinReference] = useState<TargetReference>('web')
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CAGE_STORAGE_KEY)
+      const parsed = raw ? (JSON.parse(raw) as { cage?: CageGeometry }) : null
+      if (parsed?.cage) setTwinCage(parsed.cage)
+    } catch {
+      setTwinCage(null)
+    }
+  }, [])
 
   useEffect(() => {
     if (orderId && orderId !== selected) setSelected(orderId)
@@ -39,6 +62,12 @@ export function Packing() {
   const cage = plan?.cages[Math.min(cageIdx, (plan?.cages.length ?? 1) - 1)]
   const total = cage?.placements.length ?? 0
   const minSupport = cage && cage.placements.length ? Math.min(...cage.placements.map((p) => p.support)) : 1
+  const twinPlacement = cage?.placements.find((p) => p.seq === twinSeq) ?? cage?.placements[0] ?? null
+  const twinLocal = twinPlacement ? placementToLocalTarget(twinPlacement, twinReference) : null
+  const twinTarget = useMemo(
+    () => (twinPlacement && twinCage ? placementToArmTarget(twinPlacement, twinCage, twinReference) : null),
+    [twinPlacement, twinCage, twinReference],
+  )
 
   // restart playback whenever the order, cage tab or plan changes
   useEffect(() => {
@@ -72,6 +101,18 @@ export function Packing() {
   function nudge(delta: number) {
     setPlaying(false)
     setStep((s) => Math.max(0, Math.min(total, s + delta)))
+  }
+
+  function sendTwinTarget() {
+    if (!twinPlacement || !twinTarget) return
+    const payload: ArmTargetFromPacking = {
+      ...twinTarget,
+      placementSeq: twinPlacement.seq,
+      skuId: twinPlacement.skuId,
+      reference: twinReference,
+    }
+    localStorage.setItem(ARM_TARGET_STORAGE_KEY, JSON.stringify(payload))
+    navigate('/arm')
   }
 
   return (
@@ -304,6 +345,68 @@ export function Packing() {
                     </tbody>
                   </table>
                 </div>
+              </Card>
+
+              <Card title="Digital twin target" hint="one box · start pose stays manual">
+                {!cage || !twinPlacement ? (
+                  <p className="faint">Select a packed cage first.</p>
+                ) : !twinCage ? (
+                  <p className="faint">
+                    No cage geometry saved. Open Arm, record/teach the cage geometry first, then come
+                    back here.
+                  </p>
+                ) : (
+                  <div className="stack" style={{ fontSize: 12.5 }}>
+                    <div className="row between">
+                      <span className="muted">Test box</span>
+                      <select
+                        value={twinPlacement.seq}
+                        onChange={(event) => setTwinSeq(Number(event.target.value))}
+                        style={{ width: 150 }}
+                      >
+                        {cage.placements.map((p) => (
+                          <option key={p.seq} value={p.seq}>
+                            #{p.seq} · {p.skuId}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="row between">
+                      <span className="muted">Target reference</span>
+                      <select
+                        value={twinReference}
+                        onChange={(event) => setTwinReference(event.target.value as TargetReference)}
+                        style={{ width: 150 }}
+                      >
+                        <option value="web">Gripper web</option>
+                        <option value="center">Box centre</option>
+                      </select>
+                    </div>
+                    <div className="grid cols-2" style={{ gap: 10 }}>
+                      <div>
+                        <div className="faint">Cage local (mm)</div>
+                        <div className="mono">
+                          {twinLocal ? `${twinLocal.x.toFixed(0)}, ${twinLocal.y.toFixed(0)}, ${twinLocal.z.toFixed(0)}` : '—'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="faint">Arm base target (m)</div>
+                        <div className="mono">
+                          {twinTarget
+                            ? `${twinTarget.x.toFixed(3)}, ${twinTarget.y.toFixed(3)}, ${twinTarget.z.toFixed(3)}`
+                            : '—'}
+                        </div>
+                      </div>
+                    </div>
+                    <button className="btn primary" onClick={sendTwinTarget} disabled={!twinTarget}>
+                      Send target to Arm →
+                    </button>
+                    <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
+                      The arm target is converted with the cage origin/yaw saved in Arm. Start and tool
+                      orientation must still be recorded manually.
+                    </p>
+                  </div>
+                )}
               </Card>
             </div>
           </div>

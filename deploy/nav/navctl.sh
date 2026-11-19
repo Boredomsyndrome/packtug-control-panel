@@ -29,9 +29,38 @@ PARAM="$PARAM_SRC"
 if [ -f "$PARAM_SRC" ]; then
   PARAM_OVERRIDE="$NAVHOME/nav_params/param_four_wheel_diff_bs_filtered.yaml"
   mkdir -p "$(dirname "$PARAM_OVERRIDE")"
-  sed -e 's|^    scan_topic: scan|    scan_topic: /scan_filtered|' \
-      -e 's|^          topic: /scan|          topic: /scan_filtered|' \
-      "$PARAM_SRC" > "$PARAM_OVERRIDE"
+  python3 - "$PARAM_SRC" "$PARAM_OVERRIDE" <<'PY'
+import re
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src, encoding="utf-8").read()
+# scans: AMCL + both costmaps must consume the re-stamped filtered stream
+s = s.replace("    scan_topic: scan", "    scan_topic: /scan_filtered")
+s = s.replace("          topic: /scan", "          topic: /scan_filtered")
+# towed-cage tuning: slower, no reverse, more clearance. Allow v=0 so the
+# controller can stop / make the small final yaw correction instead of
+# circling and tripping the progress checker.
+s = s.replace("max_vel_x: 0.3", "max_vel_x: 0.2")
+s = s.replace("max_vel_theta: 0.5", "max_vel_theta: 0.35")
+s = s.replace("min_vel_x: -0.3", "min_vel_x: 0.0")
+s = s.replace("inflation_radius: 0.45", "inflation_radius: 0.65")
+# goal: vendor 0.25 xy; loose yaw so a trailer does not circle at the point
+s = s.replace("yaw_goal_tolerance: 0.25", "yaw_goal_tolerance: 0.5")
+# do not abort just because the final alignment is slow
+s = s.replace("required_movement_radius: 0.5", "required_movement_radius: 0.25")
+s = s.replace("movement_time_allowance: 10.0", "movement_time_allowance: 30.0")
+# no backup/spin recoveries: use the repo BT that only clears and waits
+s = s.replace("bt_navigator:\n  ros__parameters:\n",
+              "bt_navigator:\n  ros__parameters:\n"
+              "    default_nav_to_pose_bt_xml: "
+              "\"/home/wheeltec/robotctl/nav_params/navigate_no_spin_backup.xml\"\n", 1)
+# footprint covers car + towed cage (cage end ~45 cm behind the car rear)
+s = re.sub(r'footprint:\s*"[^"]*"',
+           'footprint: "[ [-0.98, -0.50],[-0.98, 0.50],'
+           '[0.13, 0.50],[0.13, -0.50] ]"', s)
+open(dst, "w", encoding="utf-8").write(s)
+PY
   PARAM="$PARAM_OVERRIDE"
 fi
 # v3.6.5 FINAL: vendor's proven rplidar slam profile (repo copy, not their
@@ -119,6 +148,13 @@ ensure_tf() {
   # navctl stop's pkill matching.
   pgrep -f "webctl_tf_repeater|webctl_navctl_tf" >/dev/null || \
   setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec python3 $NAVHOME/webctl_tf_repeater.py webctl_navctl_tf" >>/tmp/nav_tf.log 2>&1 </dev/null &
+  # Standalone odom TF: started by navctl BEFORE the SLAM/Nav2 stack so the
+  # C++ TF listeners inside slam_toolbox/Nav2 discover it (the client's
+  # in-process relay is not reliably discovered by later C++ processes on
+  # this Jetson). Republish the last /odom at 20 Hz so the TF survives when
+  # the base is stationary.
+  pgrep -f "webctl_odom_relay|webctl_navctl_odom" >/dev/null || \
+  setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec python3 $NAVHOME/webctl_odom_relay.py webctl_navctl_odom" >>/tmp/nav_odom_tf.log 2>&1 </dev/null &
   # NOTE (2026-11-18): odom_combined->base_footprint now comes from
   # client.py's /odom relay. The separate robot_localization EKF cannot
   # discover the base /odom topic from a later DDS participant on this
@@ -142,14 +178,19 @@ ensure_filter() {
 
 case "$cmd" in
   map-on)
-    # One owner only: stop any Nav2 container before starting SLAM, or both
-    # fight over map->odom and a second stack reappears.
+    # A live SLAM owns the helpers; don't churn them. If SLAM is down, stop
+    # the Nav2 owner AND restart the helpers together with the SLAM — a new
+    # SLAM does not reliably discover helper processes left over from the
+    # previous navigation stack (map frame/pose stays None).
+    if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
     pkill -f 'bringup_launch.py' 2>/dev/null
     pkill -f 'component_container' 2>/dev/null
+    pkill -f 'webctl_tf_repeater' 2>/dev/null
+    pkill -f 'webctl_odom_relay' 2>/dev/null
+    pkill -f 'webctl_scan_filter' 2>/dev/null
     sleep 2
     ensure_tf
     ensure_filter || true
-    if proc "[a]sync_slam_toolbox_node"; then echo "mapping already up"; exit 0; fi
     setsid bash -c "source $ROS_SRC && source $WS/install/setup.bash && exec ros2 run slam_toolbox async_slam_toolbox_node --ros-args --params-file $MAPPER --remap odom:=odom_combined" >/tmp/nav_map.log 2>&1 </dev/null &
     for t in $(seq 1 20); do sleep 1; proc "[a]sync_slam_toolbox_node" && break; done
     if proc "[a]sync_slam_toolbox_node"; then echo "mapping up"; else
@@ -190,9 +231,13 @@ case "$cmd" in
     ;;
   stack-on)
     # Never stack a second Nav2 on top of a live one (repeated route/nav
-    # presses used to create two containers and rejected goals).
+    # presses used to create two containers and rejected goals). Restart the
+    # helpers with the stack for the same discovery-order reason as map-on.
     pkill -f 'bringup_launch.py' 2>/dev/null
     pkill -f 'component_container' 2>/dev/null
+    pkill -f 'webctl_tf_repeater' 2>/dev/null
+    pkill -f 'webctl_odom_relay' 2>/dev/null
+    pkill -f 'webctl_scan_filter' 2>/dev/null
     sleep 2
     ensure_tf
     ensure_filter || true
@@ -217,6 +262,7 @@ case "$cmd" in
     pkill -f 'async_slam_toolbox_node' 2>/dev/null
     pkill -f 'map_saver_cli'          2>/dev/null
     pkill -f 'webctl_navctl_tf'       2>/dev/null
+    pkill -f 'webctl_odom_relay'      2>/dev/null
     pkill -f 'webctl_navctl_ekf'     2>/dev/null
     pkill -f 'webctl_scan_filter'        2>/dev/null
 
@@ -226,6 +272,7 @@ case "$cmd" in
     pkill -9 -f 'async_slam_toolbox_node' 2>/dev/null
     pkill -9 -f 'map_saver_cli'       2>/dev/null
     pkill -9 -f 'webctl_navctl_tf'    2>/dev/null
+    pkill -9 -f 'webctl_odom_relay'   2>/dev/null
     pkill -9 -f 'webctl_navctl_ekf'   2>/dev/null
     pkill -9 -f 'webctl_scan_filter'       2>/dev/null
 

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import {
   api,
+  ARM_SEQUENCE_GRIPPER_CLOSE,
+  ARM_SEQUENCE_GRIPPER_OPEN,
   type ArmPose,
   type ArmPosePreset,
   type ArmSequence,
@@ -15,9 +17,8 @@ import {
 } from '../services/api'
 import { Badge, Card, PageHeader } from '../components/ui'
 import { clock } from '../lib/format'
-import { ARM_TARGET_STORAGE_KEY, type ArmTargetFromPacking } from '../lib/digitalTwin'
+import { ARM_TARGET_STORAGE_KEY, placementOrientation, type ArmTargetFromPacking } from '../lib/digitalTwin'
 import { CAGE_BIN } from '../data/mock'
-import taughtFinal from '../data/taughtFinalPose.json'
 
 const JOINTS = [
   { id: 'J1', name: 'base' },
@@ -35,6 +36,16 @@ const HOSTS = [
 ]
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const isGripperStep = (step: string) =>
+  step === ARM_SEQUENCE_GRIPPER_OPEN || step === ARM_SEQUENCE_GRIPPER_CLOSE
+
+const sequenceStepLabel = (step: string) =>
+  step === ARM_SEQUENCE_GRIPPER_OPEN
+    ? 'Gripper: open'
+    : step === ARM_SEQUENCE_GRIPPER_CLOSE
+      ? 'Gripper: close'
+      : step
 
 const POSE_FIELDS: Array<{ key: keyof ArmPose; label: string; step: number }> = [
   { key: 'x', label: 'X (m)', step: 0.01 },
@@ -182,7 +193,7 @@ export function Arm() {
   const [draftSteps, setDraftSteps] = useState<string[]>([])
   const [stepToAdd, setStepToAdd] = useState('')
   const [sequenceRun, setSequenceRun] = useState<
-    { name: string; step: number; total: number; phase: 'transit' | 'pose' } | null
+    { name: string; step: number; total: number; phase: 'transit' | 'pose' | 'gripper' } | null
   >(null)
   const [sequenceStopping, setSequenceStopping] = useState(false)
   const [linearPath, setLinearPath] = useState(true)
@@ -237,7 +248,7 @@ export function Arm() {
         yaw: 0,
       },
   )
-  const [, setPathTarget] = useState<ArmPose>({
+  const [pathTarget, setPathTarget] = useState<ArmPose>({
     x: 0.40,
     y: -0.10,
     z: 0.10,
@@ -301,9 +312,15 @@ export function Arm() {
       const raw = localStorage.getItem(ARM_TARGET_STORAGE_KEY)
       if (!raw) return
       const target = JSON.parse(raw) as ArmTargetFromPacking
-      setPathTarget((current) => ({ ...current, x: target.x, y: target.y, z: target.z }))
+      setPathTarget((current) => ({
+        ...current,
+        x: target.x,
+        y: target.y,
+        z: target.z,
+        ...placementOrientation(pathCage),
+      }))
       setTwinTargetNote(
-        `Packing box #${target.placementSeq} (${target.reference}) → target ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; level placement aligned with cage`,
+        `Packing box #${target.placementSeq} (${target.reference}) → front-face centre ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; level placement aligned with cage`,
       )
       localStorage.removeItem(ARM_TARGET_STORAGE_KEY)
     } catch {
@@ -434,7 +451,12 @@ export function Arm() {
   const hasGripper = !!status?.tool?.includes('GRIPPER')
   const canUseGripper =
     !!status?.connected && !status.learning_mode && !status.busy && !status.fault && !pending && hasGripper
-  const addablePose = poses.some((p) => p.name === stepToAdd) ? stepToAdd : (poses[0]?.name ?? '')
+  const addableStep =
+    stepToAdd === ARM_SEQUENCE_GRIPPER_OPEN ||
+    stepToAdd === ARM_SEQUENCE_GRIPPER_CLOSE ||
+    poses.some((p) => p.name === stepToAdd)
+      ? stepToAdd
+      : (poses[0]?.name ?? ARM_SEQUENCE_GRIPPER_CLOSE)
   const speedOptions = Array.from(new Set([5, 10, 15, 20, status?.max_velocity ?? 5])).sort(
     (a, b) => a - b,
   )
@@ -782,8 +804,7 @@ export function Arm() {
         start: useCurrentStart ? null : pathStart,
         ...(useVia ? { via: pathVia } : {}),
         ...(useHome ? { home: pathHome } : {}),
-        target: taughtFinal.pose,
-        use_taught_final: true,
+        target: pathTarget,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
         cage: pathCage,
@@ -852,8 +873,7 @@ export function Arm() {
         return
       }
       const result = await api.executeArmPick({
-        target: taughtFinal.pose,
-        use_taught_final: true,
+        target: pathTarget,
         home: pathHome,
         home_lift_m: execHomeLift,
         retract_m: execRetract,
@@ -1048,9 +1068,9 @@ export function Arm() {
     )
   }
 
-  function addDraftStep() {
-    if (!addablePose) return
-    setDraftSteps((steps) => [...steps, addablePose])
+  function addDraftStep(step = addableStep) {
+    if (!step) return
+    setDraftSteps((steps) => [...steps, step])
   }
 
   function removeDraftStep(index: number) {
@@ -1074,7 +1094,7 @@ export function Arm() {
       return
     }
     if (!draftSteps.length) {
-      setError('Add at least one pose step.')
+      setError('Add at least one step.')
       return
     }
     setPending(true)
@@ -1130,6 +1150,11 @@ export function Arm() {
       setError('Connect the arm and clear calibration / learning faults before running a sequence.')
       return
     }
+    const needsGripper = sequence.poses.some(isGripperStep)
+    if (needsGripper && !canUseGripper) {
+      setError('This sequence contains gripper steps; connect a working gripper first.')
+      return
+    }
     stopSequenceRef.current = false
     setSequenceStopping(false)
     setPending(true)
@@ -1143,8 +1168,9 @@ export function Arm() {
           stopped = true
           break
         }
-        const pose = sequence.poses[i]
-        if (sequence.transit && sequence.transit !== pose) {
+        const kind = sequence.poses[i]
+        const gripperStep = isGripperStep(kind)
+        if (!gripperStep && sequence.transit && sequence.transit !== kind) {
           setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'transit' })
           addLog(`Transit → ${sequence.transit === '__home__' ? 'Home / fold' : sequence.transit}`, 'info')
           const transitSnapshot =
@@ -1157,9 +1183,18 @@ export function Arm() {
             break
           }
         }
-        setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'pose' })
-        addLog(`Step ${i + 1}/${sequence.poses.length}: ${pose}`, 'info')
-        const snapshot = await api.applyArmPose(pose, linearPath)
+        setSequenceRun({
+          name: sequence.name,
+          step: i + 1,
+          total: sequence.poses.length,
+          phase: gripperStep ? 'gripper' : 'pose',
+        })
+        addLog(`Step ${i + 1}/${sequence.poses.length}: ${sequenceStepLabel(kind)}`, 'info')
+        const snapshot = gripperStep
+          ? kind === ARM_SEQUENCE_GRIPPER_OPEN
+            ? await api.openArmGripper()
+            : await api.closeArmGripper()
+          : await api.applyArmPose(kind, linearPath)
         applySnapshot(snapshot)
         if (stopSequenceRef.current) {
           stopped = true
@@ -1190,7 +1225,7 @@ export function Arm() {
     if (!sequenceRun) return
     stopSequenceRef.current = true
     setSequenceStopping(true)
-    addLog(`Stop requested: ${sequenceRun.name} (after the current pose)`, 'warn')
+    addLog(`Stop requested: ${sequenceRun.name} (after the current step)`, 'warn')
   }
 
   const connectionText = !status?.connected
@@ -1503,10 +1538,10 @@ export function Arm() {
             </label>
           </div>
           {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
-          <p>Final target: {taughtFinal.pose.x.toFixed(4)}, {taughtFinal.pose.y.toFixed(4)}, {taughtFinal.pose.z.toFixed(4)} m · saved manual teaching</p>
+          <p>Placement target: {pathTarget.x.toFixed(4)}, {pathTarget.y.toFixed(4)}, {pathTarget.z.toFixed(4)} m · box front-face centre</p>
           <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
-            Final attitude locked: Roll {taughtFinal.pose.roll.toFixed(2)}° · Pitch {taughtFinal.pose.pitch.toFixed(2)}° · Yaw {taughtFinal.pose.yaw.toFixed(2)}°
-            {' '}from manual teaching. Attitude is checked before release (2° tolerance).
+            Gripper attitude: Roll {placementOrientation(pathCage).roll.toFixed(1)}° · Pitch {placementOrientation(pathCage).pitch.toFixed(1)}° · Yaw {placementOrientation(pathCage).yaw.toFixed(1)}°
+            {' '}(horizontal, aligned with cage depth). Attitude is verified before release (2° tolerance).
           </p>
           {twinTargetNote && (
             <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
@@ -2037,7 +2072,7 @@ export function Arm() {
         <div className="stale-warning">
           <span>
             Running sequence <b>{sequenceRun.name}</b> — step {sequenceRun.step}/{sequenceRun.total}{' '}
-            ({sequenceRun.phase === 'transit' ? 'transit pose' : 'pose'}). Stop takes effect after the current pose
+            ({sequenceRun.phase === 'transit' ? 'transit pose' : sequenceRun.phase === 'gripper' ? 'gripper' : 'pose'}). Stop takes effect after the current step
             finishes.
           </span>
           <button className="btn sm danger" onClick={stopSequence} disabled={sequenceStopping}>
@@ -2397,7 +2432,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
 
       <Card
         title="Sequences"
-        hint={`ordered pose playback · ≤${status?.max_pose_deg ?? 180}° per step · runs in this browser`}
+        hint={`ordered pose + gripper playback · ≤${status?.max_pose_deg ?? 180}° per step · runs in this browser`}
       >
         <div className="stack">
           <div className="row">
@@ -2466,30 +2501,48 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
 
           <div className="row">
             <select
-              value={addablePose}
+              value={addableStep}
               onChange={(e) => setStepToAdd(e.target.value)}
-              disabled={!poses.length || pending || status?.busy || !!sequenceRun}
+              disabled={pending || status?.busy || !!sequenceRun}
               style={{ maxWidth: 220 }}
             >
-              {poses.length === 0 ? (
-                <option value="">no poses saved</option>
-              ) : (
-                poses.map((pose) => (
-                  <option key={pose.name} value={pose.name}>
-                    {pose.name}
-                  </option>
-                ))
+              <optgroup label="Gripper">
+                <option value={ARM_SEQUENCE_GRIPPER_CLOSE}>Gripper: close</option>
+                <option value={ARM_SEQUENCE_GRIPPER_OPEN}>Gripper: open</option>
+              </optgroup>
+              {poses.length > 0 && (
+                <optgroup label="Poses">
+                  {poses.map((pose) => (
+                    <option key={pose.name} value={pose.name}>
+                      {pose.name}
+                    </option>
+                  ))}
+                </optgroup>
               )}
             </select>
             <button
               className="btn"
-              onClick={addDraftStep}
-              disabled={!poses.length || pending || status?.busy || !!sequenceRun}
+              onClick={() => addDraftStep()}
+              disabled={pending || status?.busy || !!sequenceRun}
             >
               Add step
             </button>
+            <button
+              className="btn sm"
+              onClick={() => addDraftStep(ARM_SEQUENCE_GRIPPER_CLOSE)}
+              disabled={pending || status?.busy || !!sequenceRun}
+            >
+              + Close
+            </button>
+            <button
+              className="btn sm"
+              onClick={() => addDraftStep(ARM_SEQUENCE_GRIPPER_OPEN)}
+              disabled={pending || status?.busy || !!sequenceRun}
+            >
+              + Open
+            </button>
             <span className="faint" style={{ fontSize: 12 }}>
-              Build A → B → C with the order buttons, then save.
+              Gripper steps act at the current pose; transit is skipped for them.
             </span>
           </div>
 
@@ -2500,7 +2553,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
               <thead>
                 <tr>
                   <th style={{ width: 60 }}>#</th>
-                  <th>Pose</th>
+                  <th>Step</th>
                   <th style={{ width: 230 }}>Order</th>
                 </tr>
               </thead>
@@ -2508,7 +2561,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 {draftSteps.map((step, index) => (
                   <tr key={`${step}-${index}`}>
                     <td className="mono">{index + 1}</td>
-                    <td className="mono">{step}</td>
+                    <td className="mono">{sequenceStepLabel(step)}</td>
                     <td>
                       <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
                         <button
@@ -2601,8 +2654,9 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
-            The transit pose is applied before every step; use a raised/centre pose to avoid sweeping low across the
-            table. Stop is checked between steps; the current blocking move always finishes.
+            The transit pose is applied before pose steps only; gripper steps act at the current pose. Use a
+            raised/centre transit to avoid sweeping low across the table. Stop is checked between steps; the current
+            blocking move always finishes.
           </p>
         </div>
       </Card>

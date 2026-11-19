@@ -86,6 +86,9 @@ POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
 SEQUENCES_FILE = Path(__file__).resolve().parent / "arm_sequences.json"
 VISION_CALIBRATION_FILE = Path(__file__).resolve().parent / "vision_calibration.json"
 HOME_TRANSIT = "__home__"   # built-in safe transit: pyniryo move_to_home_pose()
+SEQUENCE_GRIPPER_OPEN = "__gripper_open__"
+SEQUENCE_GRIPPER_CLOSE = "__gripper_close__"
+SEQUENCE_ACTION_STEPS = {SEQUENCE_GRIPPER_OPEN, SEQUENCE_GRIPPER_CLOSE}
 CONNECTION_ERRORS = {"HostNotReachableException", "ClientNotConnectedException"}
 READ_TIMEOUT_S = 5.0        # status/telemetry calls must not block forever
 MOTION_TIMEOUT_S = 120.0    # long moves at low speed
@@ -97,6 +100,7 @@ MAX_REACH_M = 0.50
 RECOVERY_VELOCITY = 2       # percent; slow retract after a collision/fault
 RECOVERY_TOLERANCE_DEG = 0.5
 JOINT_VERIFY_TOLERANCE_DEG = 2.0  # blocked/stalled move detection after a segment
+MOTION_FAULT_ENABLED = os.getenv("ARM_MOTION_FAULT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 COLLISION_MARKERS = (
     "collision",
     "overload",
@@ -277,7 +281,6 @@ class CageIn(BaseModel):
 
 
 class PickPathIn(BaseModel):
-    use_taught_final: bool = False
     """Dry-run Cartesian pick path request."""
 
     start: PoseIn | None = None
@@ -302,15 +305,12 @@ class CageFitIn(BaseModel):
 
 
 class ExecutePickIn(BaseModel):
-    use_taught_final: bool = False
     """Blocking pick/place: close, pull back, lower, safe-home, place, open."""
 
     target: PoseIn
     home: PoseIn | None = None
     home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
     retract_m: float = Field(default=0.08, ge=0.0, le=0.20)
-    # Legacy request field: placement is always level, regardless of this value.
-    preserve_orientation: bool = True
     fold_j2_to_min: bool = False
     approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
@@ -706,7 +706,7 @@ class ArmController:
         return any(marker in lowered for marker in COLLISION_MARKERS)
 
     def _record_motion_fault_locked(self, exc: BaseException, actual: list[float] | None = None) -> None:
-        """Latch a motion fault and remember the last known-safe joint position."""
+        """Record a failed move; latching is temporarily disabled for demos."""
         text = str(exc).strip() or type(exc).__name__
         detected = self._query_collision_flag_locked()
         collision = bool(detected) or self._is_collision_text(text)
@@ -716,21 +716,30 @@ class ArmController:
         with self._state:
             if actual is not None:
                 self.joints_deg = [float(v) for v in actual]
-            target = list(self.last_good_joints) if self.last_good_joints is not None else None
-            current = self.joints_deg
-            self.fault = text
-            self.collision = collision
-            self.recovery_target_deg = target
-            self.recovery_available = bool(
-                target is not None
-                and current is not None
-                and max(abs(a - b) for a, b in zip(current, target)) > RECOVERY_TOLERANCE_DEG
-            )
             self.last_error = text
             self.updated_at = time.time()
+            if MOTION_FAULT_ENABLED:
+                target = list(self.last_good_joints) if self.last_good_joints is not None else None
+                current = self.joints_deg
+                self.fault = text
+                self.collision = collision
+                self.recovery_target_deg = target
+                self.recovery_available = bool(
+                    target is not None
+                    and current is not None
+                    and max(abs(a - b) for a, b in zip(current, target)) > RECOVERY_TOLERANCE_DEG
+                )
+            else:
+                self.fault = None
+                self.collision = False
+                self.recovery_available = False
+                self.recovery_target_deg = None
         if detected:
             self._clear_collision_flag_locked()
-        log.error("arm motion fault%s: %s", " (collision)" if collision else "", text)
+        if MOTION_FAULT_ENABLED:
+            log.error("arm motion fault%s: %s", " (collision)" if collision else "", text)
+        else:
+            log.warning("arm motion error (fault latch frozen): %s", text)
 
     def _read_after_fault_locked(self) -> list[float] | None:
         """Best-effort read of the real joints after a failed motion."""
@@ -756,7 +765,7 @@ class ArmController:
                 raise HTTPException(409, "calibration required — run ned_calibrate.py --go")
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
-            if self.fault:
+            if MOTION_FAULT_ENABLED and self.fault:
                 raise HTTPException(
                     409,
                     "arm is in a motion fault state — press Recover to retract to the "
@@ -769,7 +778,7 @@ class ArmController:
                 raise HTTPException(409, "arm is not connected")
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
-            if self.fault:
+            if MOTION_FAULT_ENABLED and self.fault:
                 raise HTTPException(409, "arm is in a motion fault state — recover first")
             tool = self.tool
         if not self.mock and (not tool or "GRIPPER" not in tool):
@@ -1124,9 +1133,9 @@ class ArmController:
                 cage = payload.cage
                 fit_meta = None
                 cage_source = "dimensions"
-            # Placement orientation is mandatory, including for legacy clients
-            # sending preserve_orientation=True.
-            target = _taught_final_pose() if payload.use_taught_final else _level_placement_pose(cage, target)
+            # The packing target is the centre of the box front face; the
+            # placement attitude is always horizontal and cage-aligned.
+            target = _level_placement_pose(cage, target)
             if payload.fold_j2_to_min:
                 raise HTTPException(422, "J2 folding is not supported during level placement")
             if payload.home is None:
@@ -1301,7 +1310,6 @@ class ArmController:
                 PickPathIn(
                     start=PoseIn(**home_pose),
                     target=PoseIn(**target),
-                    use_taught_final=payload.use_taught_final,
                     approach_m=payload.approach_m,
                     gate_clearance_m=payload.gate_clearance_m,
                     cage=payload.cage,
@@ -2090,7 +2098,7 @@ class ArmController:
             transit = None
         with self._poses_lock:
             pose_names = {p["name"] for p in self._load_poses_locked()}
-        missing = [p for p in poses if p not in pose_names]
+        missing = [p for p in poses if p not in pose_names and p not in SEQUENCE_ACTION_STEPS]
         if transit is not None and transit != HOME_TRANSIT and transit not in pose_names:
             missing.append(transit)
         if missing:
@@ -2839,11 +2847,6 @@ def _cage_target_issues(cage: CageIn, target: dict[str, float]) -> list[str]:
     return []
 
 
-def _taught_final_pose() -> dict[str, float]:
-    record = json.loads((ROOT / "src/data/taughtFinalPose.json").read_text(encoding="utf-8-sig"))
-    return _pose_dict(record["pose"])
-
-
 def _level_placement_pose(cage: CageIn, pose: dict[str, float]) -> dict[str, float]:
     # Ned side-entry convention already used by the panel: roll=180, pitch=0.
     # Tool forward points along cage +Y, hence cage yaw + 90 degrees.
@@ -2891,7 +2894,7 @@ def plan_pick_path(
 
     via = _pose_dict(payload.via.model_dump()) if payload.via is not None else None
     home = _pose_dict(payload.home.model_dump()) if payload.home is not None else None
-    target = _taught_final_pose() if payload.use_taught_final else _level_placement_pose(cage, _pose_dict(payload.target.model_dump()))
+    target = _level_placement_pose(cage, _pose_dict(payload.target.model_dump()))
 
     w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
     target_local = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
@@ -2917,7 +2920,7 @@ def plan_pick_path(
     )
 
     warnings: list[str] = []
-    warnings.append("placement attitude locked to taught final pose" if payload.use_taught_final else "placement attitude locked: roll 180°, pitch 0°, yaw aligned with cage depth")
+    warnings.append("placement attitude locked: roll 180°, pitch 0°, yaw aligned with cage depth")
     if fit_meta:
         warnings.extend(fit_meta.get("warnings", []))
     if start_inside:
@@ -3370,14 +3373,12 @@ def create_app(controller: ArmController) -> FastAPI:
         fit.update(meta)
         return {"ok": True, "cage": cage.model_dump(), "fit": fit}
 
-    @app.post("/api/arm/taught_pick_path")
     @app.post("/api/arm/pick_path")
     def arm_pick_path(body: PickPathIn) -> dict[str, Any]:
         """Dry-run Cartesian path with cage frame clearance checks (no motion)."""
         snapshot = controller.snapshot()
         return plan_pick_path(body, snapshot["pose"], float(snapshot["max_reach_m"]))
 
-    @app.post("/api/arm/execute_taught_pick")
     @app.post("/api/arm/execute_pick")
     def arm_execute_pick(body: ExecutePickIn) -> dict[str, Any]:
         """Close at the current pose, home, place at target, open (blocking)."""

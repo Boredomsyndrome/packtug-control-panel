@@ -157,7 +157,6 @@ export interface CageFitResult {
 }
 
 export interface PickPathRequest {
-  use_taught_final?: boolean
   /** null = use the current arm pose */
   start?: ArmPose | null
   /** omitted = no via point */
@@ -232,7 +231,6 @@ export interface ExecutePickResult {
 }
 
 export interface ExecutePickRequest {
-  use_taught_final?: boolean
   target: ArmPose
   /** recorded home pose; execution moves to home + home_lift_m */
   home?: ArmPose
@@ -259,6 +257,9 @@ export interface ArmPosePreset {
   created_at: string | null
   updated_at: string | null
 }
+
+export const ARM_SEQUENCE_GRIPPER_OPEN = '__gripper_open__'
+export const ARM_SEQUENCE_GRIPPER_CLOSE = '__gripper_close__'
 
 export interface ArmSequence {
   name: string
@@ -523,7 +524,7 @@ export const api = {
    * Always live: the planner needs the bridge's current pose and limits.
    */
   async planArmPickPath(request: PickPathRequest): Promise<PickPathResult> {
-    return jsonRequest<PickPathResult>(request.use_taught_final ? '/arm/taught_pick_path' : '/arm/pick_path', request)
+    return jsonRequest<PickPathResult>('/arm/pick_path', request)
   },
 
   /** Fit an ideal cage box to eight taught corners (no motion). */
@@ -541,7 +542,7 @@ export const api = {
 
   /** Blocking pick/place: close at start, home, place at target, open. */
   async executeArmPick(request: ExecutePickRequest): Promise<ExecutePickResult> {
-    return jsonRequest<ExecutePickResult>(request.use_taught_final ? '/arm/execute_taught_pick' : '/arm/execute_pick', request)
+    return jsonRequest<ExecutePickResult>('/arm/execute_pick', request)
   },
 
   async connectArm(ip: string): Promise<ArmStatus> {
@@ -811,7 +812,7 @@ export const api = {
     const via = transit?.trim() || null
     if (MOCK_MODE) {
       await delay(120)
-      const missing = poses.filter((p) => !mockPoses.some((known) => known.name === p))
+      const missing = poses.filter((p) => p !== ARM_SEQUENCE_GRIPPER_OPEN && p !== ARM_SEQUENCE_GRIPPER_CLOSE && !mockPoses.some((known) => known.name === p))
       if (via && via !== '__home__' && !mockPoses.some((known) => known.name === via)) missing.push(via)
       if (missing.length) throw new Error(`unknown pose(s): ${missing.join(', ')}`)
       const now = new Date().toISOString()

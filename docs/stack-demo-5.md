@@ -38,25 +38,33 @@ The top box bridges the **9 mm gap** between the two back base boxes; its
 support is about 94% of its footprint. It is centered on the back row, not
 hanging over the opening.
 
-## Gripper target positions
+## Arm placement target
 
-The gripper enters each front face from `-Y` and clamps the central `10 mm`
-web. Target the tool center at the web's depth center:
+For digital-twin pick/place planning, assume the gripper end is at the
+**centre of the carton front face**, at mid-height. For a placement
+`(x, y, z, w, d, h)`, the packing-frame target is:
 
-- web depth center: front face `Y + 20 mm`
-- hole center height from box bottom: `Z = 87.5 mm` (new 110 mm face layout)
+```
+(x + w/2, y, z + h/2)
+```
 
-| Place | Gripper X | Gripper Y | Gripper Z |
+The software keeps the gripper end horizontal (`roll 180`, `pitch 0`,
+`yaw = cage yaw + 90`). The physical demo block still has its gripper web at
+the hole centre; the front-face target is the planning convention and may
+need a fixture or TCP offset for the real tool.
+
+| Place | Target X | Target Y | Target Z |
 |---|---:|---:|---:|
-| back left | 195 | 180 | 87.5 |
-| back right | 356 | 180 | 87.5 |
-| top (back-center) | 275 | 180 | 197.5 |
-| front left | 195 | 85 | 87.5 |
-| front right | 356 | 85 | 87.5 |
+| back left | 195 | 160 | 55 |
+| back right | 356 | 160 | 55 |
+| top (back-center) | 275 | 160 | 165 |
+| front left | 195 | 65 | 55 |
+| front right | 356 | 65 | 55 |
 
-Safe outside approach: keep the same X/Z and start at `Y = -60 mm`, then move
-to the target Y. Release by opening the gripper, then retract to `Y = -60 mm`.
-Use a slow approach and keep the gripper/jaws horizontal.
+The target Y is the front face plane; the carton extends from that plane into
+the cage. A safe outside approach starts at `Y = -60 mm` at the same X/Z, then
+moves to the target Y. Release by opening the gripper, then retract to
+`Y = -60 mm`. Use a slow approach and keep the gripper/jaws horizontal.
 
 These are **cage-frame Cartesian targets**, not arm joint angles. Apply the
 camera-to-tool/arm transform and IK before sending them to the physical arm.

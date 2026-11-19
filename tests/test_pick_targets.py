@@ -17,7 +17,7 @@ class PickTargetTests(unittest.TestCase):
     def test_demo_targets_enter_through_gate(self):
         for yaw in (0, 90, -90, 37, 180):
             cage = CageIn(x=0, y=0, z=0.02, yaw=yaw)
-            for local in ((-.080, .18, .0875), (.081, .18, .0875), (0, .18, .1975), (-.080, .085, .0875), (.081, .085, .0875)):
+            for local in ((-.080, .160, .055), (.081, .160, .055), (0, .160, .165), (-.080, .065, .055), (.081, .065, .055)):
                 plan = plan_pick_path(PickPathIn(
                     start=self.pose(cage, (local[0], -.08, local[2])),
                     target=self.pose(cage, local), cage=cage,
@@ -53,7 +53,7 @@ class PickTargetTests(unittest.TestCase):
     def test_tilted_input_levels_before_entry_and_only_releases_when_verified(self):
         cage = CageIn(x=.2, y=0, z=.02)
         start = PoseIn(x=.2, y=-.1, z=.1, roll=140, pitch=25, yaw=12)
-        target = self.pose(cage, (0, .18, .0875)).model_copy(update={'roll': 30, 'pitch': 45})
+        target = self.pose(cage, (0, .18, .055)).model_copy(update={'roll': 30, 'pitch': 45})
         for drift in (False, True):
             arm = ArmController(mock=True)
             arm._check_motion_locked = Mock()
@@ -81,20 +81,20 @@ class PickTargetTests(unittest.TestCase):
                 self.assertEqual((arm.pose['roll'], arm.pose['pitch'], arm.pose['yaw']), (180, 0, 90))
                 self.assertAlmostEqual(arm.pose['y'], start.y)
 
-    def test_taught_final_overrides_requested_coordinates_and_attitude(self):
-        from server.arm_server import _taught_final_pose
-        taught = _taught_final_pose()
+    def test_requested_front_face_target_is_kept(self):
         cage = CageIn(x=.2, y=-.1, z=0)
+        target = PoseIn(x=.3, y=0, z=.2, roll=180, pitch=0, yaw=90)
         request = PickPathIn(
             start=PoseIn(x=.2, y=-.2, z=.1, roll=0, pitch=0, yaw=0),
-            target=PoseIn(x=.3, y=0, z=.2, roll=180, pitch=0, yaw=90),
-            cage=cage, use_taught_final=True,
+            target=target,
+            cage=cage,
         )
         plan = plan_pick_path(request, None, .47)
-        self.assertEqual(plan['points'][-1]['pose'], taught)
+        self.assertEqual(plan['points'][-1]['pose'], target.model_dump())
         for point in plan['points'][1:]:
-            for key in ('roll', 'pitch', 'yaw'):
-                self.assertEqual(point['pose'][key], taught[key])
+            self.assertEqual(point['pose']['roll'], 180)
+            self.assertEqual(point['pose']['pitch'], 0)
+            self.assertEqual(point['pose']['yaw'], 90)
 
     def test_linear_abort_cannot_fallback_during_level_placement(self):
         arm = ArmController(mock=False)

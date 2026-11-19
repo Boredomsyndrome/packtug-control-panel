@@ -30,7 +30,7 @@ export function Packing() {
   const [twinCage, setTwinCage] = useState<CageGeometry | null>(null)
   const [teachingIssue, setTeachingIssue] = useState<string | null>(null)
   const [twinSeq, setTwinSeq] = useState<number | null>(null)
-  const [twinReference, setTwinReference] = useState<TargetReference>('web')
+  const twinReference: TargetReference = 'front'
 
   useEffect(() => {
     try {
@@ -383,8 +383,8 @@ export function Packing() {
                         Taught cage: {(twinCage.width * 1000).toFixed(1)} × {(twinCage.depth * 1000).toFixed(1)} × {(twinCage.height * 1000).toFixed(1)} mm
                       </div>
                       {dimensionsDiffer && <p role="alert">
-                        Packing and taught dimensions differ. Targets use the taught front-left floor
-                        corner without scaling; each box is checked against the taught dimensions.
+                        Packing and taught dimensions differ. Targets use the taught cage origin and
+                        width without scaling; each box is checked against the taught dimensions.
                       </p>}
                     <div className="row between">
                       <span className="muted">Test box</span>
@@ -398,17 +398,6 @@ export function Packing() {
                             #{p.seq} · {p.skuId}
                           </option>
                         ))}
-                      </select>
-                    </div>
-                    <div className="row between">
-                      <span className="muted">Target reference</span>
-                      <select
-                        value={twinReference}
-                        onChange={(event) => setTwinReference(event.target.value as TargetReference)}
-                        style={{ width: 150 }}
-                      >
-                        <option value="web">Gripper web</option>
-                        <option value="center">Box centre</option>
                       </select>
                     </div>
                     <div className="grid cols-2" style={{ gap: 10 }}>
@@ -433,9 +422,9 @@ export function Packing() {
                     </button>
                     <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
                       Packing coordinates start at the front-left floor corner; the saved Arm origin
-                      is the opening floor centre. Start
-                      position must still be recorded manually. Final attitude is level and aligned
-                      with the cage opening. Box-centre targets are geometric references, not calibrated grasp offsets.
+                      is the opening floor centre. The default target is the centre of the box front
+                      face, which is the assumed gripper contact point. The gripper is kept level and
+                      aligned with the cage opening.
                     </p>
                   </div>
                 )}

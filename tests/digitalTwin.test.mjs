@@ -14,14 +14,14 @@ const cage = { x: 0.1, y: -0.1, z: 0.02, yaw: 0, width: 0.55, depth: 0.25, heigh
 const box = { skuId: 'DEMO-BOX', x: 119, y: 160, z: 0, w: 152, d: 85, h: 110 }
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`)
 
-test('demo targets use the opening centre for every cage rotation', () => {
+test('demo targets use the front-face centre for every cage rotation', () => {
   for (const yaw of [0, 90, -90, 37, 180]) {
     for (const [x, y, z, expectedX, expectedY, expectedZ] of [
-      [119, 160, 0, -0.080, 0.180, 0.0875],
-      [280, 160, 0, 0.081, 0.180, 0.0875],
-      [199, 160, 110, 0, 0.180, 0.1975],
-      [119, 65, 0, -0.080, 0.085, 0.0875],
-      [280, 65, 0, 0.081, 0.085, 0.0875],
+      [119, 160, 0, -0.080, 0.160, 0.055],
+      [280, 160, 0, 0.081, 0.160, 0.055],
+      [199, 160, 110, 0, 0.160, 0.165],
+      [119, 65, 0, -0.080, 0.065, 0.055],
+      [280, 65, 0, 0.081, 0.065, 0.055],
     ]) {
       const placement = { ...box, x, y, z }
       const target = placementToArmTarget(placement, { ...cage, yaw })
@@ -43,10 +43,11 @@ test('box centre reference and taught width are honoured', () => {
   near(target.z, 0.075)
 })
 
-test('out-of-bounds boxes and insufficient target clearance are rejected', () => {
+test('out-of-bounds boxes, targets and front-plane targets are rejected', () => {
   assert.ok(placementTargetIssues(box, { ...cage, depth: 0.17 }).length)
   assert.ok(placementTargetIssues({ ...box, x: 500 }, cage).length)
-  assert.ok(placementTargetIssues({ ...box, y: 205 }, cage).some(issue => issue.includes('clearance')))
+  assert.ok(placementTargetIssues({ ...box, y: 230 }, cage).length)
+  assert.ok(placementTargetIssues({ ...box, y: 0 }, cage).some(issue => issue.includes('front face')))
 })
 
 test('level attitude follows the cage depth, including wrapped yaw', () => {
@@ -56,12 +57,6 @@ test('level attitude follows the cage depth, including wrapped yaw', () => {
     assert.equal(pose.pitch, 0)
     near(Math.cos(pose.yaw * Math.PI / 180), -Math.sin(yaw * Math.PI / 180))
     near(Math.sin(pose.yaw * Math.PI / 180), Math.cos(yaw * Math.PI / 180))
-  }
-})
-
-test('demo web offsets cannot be used for other cartons or rotated demo boxes', () => {
-  for (const placement of [{ ...box, skuId: 'SKU-1001' }, { ...box, w: 85, d: 152 }]) {
-    assert.ok(placementTargetIssues(placement, cage).some(issue => issue.includes('only')))
   }
 })
 

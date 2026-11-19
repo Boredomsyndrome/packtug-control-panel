@@ -78,6 +78,8 @@ WHEELTEC_WEBCTL_URL = os.getenv("WHEELTEC_WEBCTL_URL", "http://127.0.0.1:8090")
 MAX_STEP_DEG = 60.0       # internal segment size; one segment per manual command
 MAX_REQUEST_DEG = 60.0    # largest joint change accepted per manual command
 MAX_POSE_DEG = 180.0      # largest joint change when recalling a saved pose
+MIN_POSE_Z_M = 0.02       # lowest tool z accepted for a Cartesian target
+MAX_POSE_Z_M = 0.50       # highest tool z accepted for a Cartesian target
 MAX_VELOCITY = 5
 MAX_VELOCITY_LIMIT = 20
 POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
@@ -245,6 +247,75 @@ class PoseIn(BaseModel):
     roll: float
     pitch: float
     yaw: float
+
+
+class Vec3In(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
+class CageIn(BaseModel):
+    """Cage pose in the arm base frame plus the outer box dimensions.
+
+    The local cage frame is centred on the opening: X = width (-W/2..+W/2),
+    Y = depth (0..D, +Y into the cage) and Z = height (0..H). The opening is
+    the Y = 0 face, so the arm enters along +Y. ``front_top_open`` drops the
+    front-top edge (the real cage has no bar there).
+    """
+
+    x: float = 0.35
+    y: float = 0.0
+    z: float = 0.0
+    yaw: float = 0.0
+    width: float = Field(default=0.55, gt=0.05, le=2.0)
+    depth: float = Field(default=0.25, gt=0.05, le=2.0)
+    height: float = Field(default=0.40, gt=0.05, le=2.0)
+    opening_margin: float = Field(default=0.02, ge=0.0, le=0.2)
+    clearance_m: float = Field(default=0.03, ge=0.005, le=0.2)
+    front_top_open: bool = True
+
+
+class PickPathIn(BaseModel):
+    """Dry-run Cartesian pick path request."""
+
+    start: PoseIn | None = None
+    via: PoseIn | None = None
+    home: PoseIn | None = None
+    target: PoseIn
+    approach_m: float = Field(default=0.06, ge=0.0, le=0.25)
+    gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    cage: CageIn = Field(default_factory=CageIn)
+    # Eight taught corners; when present they override the box pose/size.
+    corners: list[Vec3In] | None = None
+    # Corner indices to ignore (currently the two back-top corners, 6 and 7).
+    ignored_corners: list[int] = Field(default_factory=list)
+
+
+class CageFitIn(BaseModel):
+    points: list[Vec3In]
+    opening_margin: float = Field(default=0.02, ge=0.0, le=0.2)
+    clearance_m: float = Field(default=0.03, ge=0.005, le=0.2)
+    front_top_open: bool = True
+    ignored_corners: list[int] = Field(default_factory=list)
+
+
+class ExecutePickIn(BaseModel):
+    """Blocking pick/place: close, pull back, lower, safe-home, place, open."""
+
+    target: PoseIn
+    home: PoseIn | None = None
+    home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
+    retract_m: float = Field(default=0.08, ge=0.0, le=0.20)
+    preserve_orientation: bool = True
+    fold_j2_to_min: bool = False
+    approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
+    gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    cage: CageIn = Field(default_factory=CageIn)
+    corners: list[Vec3In] | None = None
+    ignored_corners: list[int] = Field(default_factory=list)
+    speed_percent: int = Field(default=5, ge=1, le=10)
+    return_home_after: bool = False
 
 
 class ApplyPoseIn(BaseModel):
@@ -865,6 +936,443 @@ class ArmController:
                     self.busy = False
         return self.snapshot()
 
+    def move_pose_deg(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> dict[str, Any]:
+        """Linear Cartesian move with degrees converted to radians.
+
+        ``move_pose`` above is inherited from upstream and sends degrees raw;
+        the pick/place executor uses this correctly-converted variant.
+        """
+        values = (x, y, z, roll_deg, pitch_deg, yaw_deg)
+        if not all(math.isfinite(v) for v in values):
+            raise HTTPException(400, "pose values must be finite")
+        if math.hypot(x, y) > self.max_reach_m + 1e-6:
+            raise HTTPException(
+                400,
+                f"horizontal reach {math.hypot(x, y):.3f} m exceeds max "
+                f"{self.max_reach_m:.3f} m",
+            )
+        with self._state:
+            current_z = (
+                float(self.pose["z"])
+                if self.pose is not None and "z" in self.pose
+                else None
+            )
+        at_current_height = current_z is not None and abs(z - current_z) <= 1e-3
+        if not (MIN_POSE_Z_M <= z <= MAX_POSE_Z_M) and not at_current_height:
+            raise HTTPException(
+                400,
+                f"z={z:.3f} m outside [{MIN_POSE_Z_M:.2f}, {MAX_POSE_Z_M:.2f}] m",
+            )
+        with self._motion:
+            self._check_motion_locked()
+            with self._state:
+                self.busy = True
+                if self.joints_deg is not None:
+                    self.last_good_joints = list(self.joints_deg)
+            log.info(
+                "linear target x=%.3f y=%.3f z=%.3f roll=%.1f pitch=%.1f yaw=%.1f",
+                x,
+                y,
+                z,
+                roll_deg,
+                pitch_deg,
+                yaw_deg,
+            )
+            try:
+                if self.mock:
+                    time.sleep(0.15)
+                    with self._state:
+                        self.pose = {
+                            "x": x,
+                            "y": y,
+                            "z": z,
+                            "roll": roll_deg,
+                            "pitch": pitch_deg,
+                            "yaw": yaw_deg,
+                        }
+                        self.updated_at = time.time()
+                else:
+                    target = SimpleNamespace(
+                        x=float(x),
+                        y=float(y),
+                        z=float(z),
+                        roll=math.radians(roll_deg),
+                        pitch=math.radians(pitch_deg),
+                        yaw=math.radians(yaw_deg),
+                    )
+                    with self._socket_timeout(MOTION_TIMEOUT_S):
+                        self._send_linear_pose(target)
+                    if self._query_collision_flag_locked():
+                        raise RuntimeError(
+                            "robot reported a collision during the linear move"
+                        )
+                    self._read_locked()
+                with self._state:
+                    self.last_error = None
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.exception("executor linear move failed")
+                collision = self._query_collision_flag_locked()
+                if collision or self._is_collision_text(str(exc)):
+                    actual = self._read_after_fault_locked()
+                    self._record_motion_fault_locked(exc, actual)
+                    with self._state:
+                        self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                else:
+                    with self._state:
+                        self.last_error = f"{type(exc).__name__}: {exc}"
+                        if type(exc).__name__ in CONNECTION_ERRORS:
+                            self.connected = False
+                raise HTTPException(502, self.last_error) from exc
+            finally:
+                with self._state:
+                    self.busy = False
+        return self.snapshot()
+
+    def execute_pick_place(self, payload: "ExecutePickIn") -> dict[str, Any]:
+        """Close, retract, move above home, orient, then place at target.
+
+        The safe-home point is ``home + home_lift_m``. The tool is rotated to
+        the placement attitude at that clear point, so the final approach is a
+        translation-only path. J2 folding is optional and happens after the
+        safe home point.
+        """
+        steps: list[dict[str, Any]] = []
+        try:
+            self._check_motion_locked()
+            with self._state:
+                tool = self.tool or ""
+            if "GRIPPER" not in tool:
+                raise HTTPException(409, "a gripper tool is required")
+
+            snapshot = self.snapshot()
+            start_pose = snapshot.get("pose")
+            if start_pose is None:
+                raise HTTPException(502, "current pose is unavailable")
+            start = _pose_dict(start_pose)
+            target = _pose_dict(payload.target.model_dump())
+            if payload.preserve_orientation:
+                target["roll"] = start["roll"]
+                target["pitch"] = start["pitch"]
+                target["yaw"] = start["yaw"]
+
+            if payload.corners is not None:
+                prepared, corner_meta = _prepare_cage_corners(
+                    payload.corners, payload.ignored_corners
+                )
+                cage, fit_meta = _fit_cage_corners(
+                    prepared,
+                    payload.cage.opening_margin,
+                    payload.cage.clearance_m,
+                    payload.cage.front_top_open,
+                )
+                fit_meta.update(corner_meta)
+                cage_source = "corners"
+            else:
+                cage = payload.cage
+                fit_meta = None
+                cage_source = "dimensions"
+            frame_segments = _cage_frame_segments(cage)
+
+            # Find a horizontal pull-back path that avoids the cage frame.
+            (
+                retract_points,
+                retract_segments,
+                retract_ok,
+                retract_warnings,
+            ) = _plan_retract_path(
+                cage,
+                frame_segments,
+                start,
+                payload.retract_m,
+                payload.gate_clearance_m,
+            )
+            warnings: list[str] = list(retract_warnings)
+            start_local = _world_to_cage(
+                cage, (start["x"], start["y"], start["z"])
+            )
+            if 0.0 < start_local[1] < cage.depth:
+                warnings.append(
+                    "start is inside the cage; the retract path must exit "
+                    "through the opening"
+                )
+            retract_plan = {
+                "ok": retract_ok,
+                "dry_run": True,
+                "cage_source": cage_source,
+                "cage_fit": fit_meta,
+                "points": retract_points,
+                "segments": retract_segments,
+                "warnings": warnings,
+            }
+            steps.append({"step": "retract_check", "ok": retract_plan["ok"]})
+            if not retract_plan["ok"]:
+                log.warning(
+                    "execution retract blocked: start=%s retract_m=%.3f "
+                    "warnings=%s",
+                    start,
+                    payload.retract_m,
+                    retract_warnings,
+                )
+                for segment in retract_segments:
+                    if segment["collision"]:
+                        log.warning(
+                            "blocked retract segment %s -> %s: %s",
+                            segment["from"],
+                            segment["to"],
+                            segment["issues"],
+                        )
+                return {
+                    "ok": False,
+                    "stage": "retract",
+                    "steps": steps,
+                    "plan": retract_plan,
+                    "error": "retract path is blocked; arm has not moved",
+                }
+
+            self.set_velocity(payload.speed_percent)
+            steps.append(
+                {"step": "speed", "ok": True, "percent": payload.speed_percent}
+            )
+
+            self._gripper_action(True)
+            steps.append({"step": "close_gripper", "ok": True})
+
+            for point in retract_points[1:]:
+                pose = point["pose"]
+                self.move_pose_deg(
+                    pose["x"],
+                    pose["y"],
+                    pose["z"],
+                    pose["roll"],
+                    pose["pitch"],
+                    pose["yaw"],
+                )
+                steps.append(
+                    {
+                        "step": f"move:{point['kind']}",
+                        "ok": True,
+                        "pose": pose,
+                    }
+                )
+
+            if payload.home is None:
+                raise HTTPException(
+                    409,
+                    "record the home pose first: Home / fold, then Home = current",
+                )
+            home_base = _pose_dict(payload.home.model_dump())
+            safe_home_z = min(
+                MAX_POSE_Z_M, home_base["z"] + payload.home_lift_m
+            )
+            retract_last = retract_points[-1]["pose"]
+            lower = {
+                "x": retract_last["x"],
+                "y": retract_last["y"],
+                "z": safe_home_z,
+                "roll": start["roll"],
+                "pitch": start["pitch"],
+                "yaw": start["yaw"],
+            }
+            self.move_pose_deg(
+                lower["x"],
+                lower["y"],
+                lower["z"],
+                lower["roll"],
+                lower["pitch"],
+                lower["yaw"],
+            )
+            steps.append({"step": "lower", "ok": True, "pose": lower})
+
+            safe_home_xy = {
+                "x": home_base["x"],
+                "y": home_base["y"],
+                "z": safe_home_z,
+                "roll": start["roll"],
+                "pitch": start["pitch"],
+                "yaw": start["yaw"],
+            }
+            self.move_pose_deg(
+                safe_home_xy["x"],
+                safe_home_xy["y"],
+                safe_home_xy["z"],
+                safe_home_xy["roll"],
+                safe_home_xy["pitch"],
+                safe_home_xy["yaw"],
+            )
+            steps.append(
+                {"step": "safe_home_xy", "ok": True, "pose": safe_home_xy}
+            )
+
+            safe_home = {
+                "x": home_base["x"],
+                "y": home_base["y"],
+                "z": safe_home_z,
+                "roll": start["roll"] if payload.preserve_orientation else target["roll"],
+                "pitch": start["pitch"] if payload.preserve_orientation else target["pitch"],
+                "yaw": start["yaw"] if payload.preserve_orientation else target["yaw"],
+            }
+            if not payload.preserve_orientation:
+                self.move_pose_deg(
+                    safe_home["x"],
+                    safe_home["y"],
+                    safe_home["z"],
+                    safe_home["roll"],
+                    safe_home["pitch"],
+                    safe_home["yaw"],
+                )
+                steps.append({"step": "orient", "ok": True, "pose": safe_home})
+
+            if payload.fold_j2_to_min:
+                j2_min = JOINT_LIMITS_DEG[1][0]
+                with self._state:
+                    current_joints = (
+                        list(self.joints_deg)
+                        if self.joints_deg is not None
+                        else None
+                    )
+                if current_joints is None:
+                    self.move_joint(2, j2_min)
+                    steps.append(
+                        {
+                            "step": "fold_j2_min",
+                            "ok": True,
+                            "angle_deg": j2_min,
+                        }
+                    )
+                else:
+                    probe = list(current_joints)
+                    safe_j2 = probe[1]
+                    angle = probe[1]
+                    while angle > j2_min + 1e-6:
+                        angle = max(j2_min, angle - 2.0)
+                        probe[1] = angle
+                        if tip_radius(probe) > self.max_reach_m + 1e-6:
+                            break
+                        safe_j2 = angle
+
+                    moves = 0
+                    current_j2 = current_joints[1]
+                    while abs(safe_j2 - current_j2) > 0.5 and moves < 6:
+                        step = max(-55.0, min(55.0, safe_j2 - current_j2))
+                        self.move_joint(2, current_j2 + step)
+                        current_j2 += step
+                        moves += 1
+
+                    if safe_j2 > j2_min + 0.5:
+                        warnings.append(
+                            f"J2 clamped to {safe_j2:.1f}° "
+                            f"(requested {j2_min:.1f}°) by max horizontal reach"
+                        )
+                    steps.append(
+                        {
+                            "step": "fold_j2_min",
+                            "ok": True,
+                            "angle_deg": safe_j2,
+                            "requested_deg": j2_min,
+                            "substeps": moves,
+                        }
+                    )
+
+            snapshot = self.snapshot()
+            home_pose = snapshot.get("pose")
+            if home_pose is None:
+                raise HTTPException(502, "home pose is unavailable")
+
+            plan = plan_pick_path(
+                PickPathIn(
+                    start=PoseIn(**home_pose),
+                    target=payload.target,
+                    approach_m=payload.approach_m,
+                    gate_clearance_m=payload.gate_clearance_m,
+                    cage=payload.cage,
+                    corners=payload.corners,
+                    ignored_corners=payload.ignored_corners,
+                ),
+                home_pose,
+                float(snapshot["max_reach_m"]),
+            )
+            plan["cage_source"] = cage_source
+            plan["cage_fit"] = fit_meta
+            plan["warnings"] = list(plan.get("warnings", [])) + warnings
+            steps.append({"step": "plan", "ok": plan["ok"]})
+            if not plan["ok"]:
+                log.warning(
+                    "execution plan blocked after home: home=%s target=%s warnings=%s",
+                    home_pose,
+                    target,
+                    plan.get("warnings"),
+                )
+                for segment in plan.get("segments", []):
+                    if segment.get("collision"):
+                        log.warning(
+                            "blocked segment %s -> %s: %s",
+                            segment["from"],
+                            segment["to"],
+                            segment["issues"],
+                        )
+                return {
+                    "ok": False,
+                    "stage": "plan",
+                    "steps": steps,
+                    "plan": plan,
+                    "error": "home-to-target path is blocked; arm stays at home",
+                }
+
+            for point in plan["points"][1:]:
+                pose = point["pose"]
+                self.move_pose_deg(
+                    pose["x"],
+                    pose["y"],
+                    pose["z"],
+                    pose["roll"],
+                    pose["pitch"],
+                    pose["yaw"],
+                )
+                steps.append(
+                    {"step": f"move:{point['kind']}", "ok": True, "pose": pose}
+                )
+
+            self._gripper_action(False)
+            steps.append({"step": "open_gripper", "ok": True})
+
+            if payload.return_home_after:
+                self.move_pose_deg(
+                    safe_home["x"],
+                    safe_home["y"],
+                    safe_home["z"],
+                    safe_home["roll"],
+                    safe_home["pitch"],
+                    safe_home["yaw"],
+                )
+                steps.append(
+                    {"step": "return_safe_home", "ok": True, "pose": safe_home}
+                )
+
+            return {
+                "ok": True,
+                "stage": "done",
+                "steps": steps,
+                "retract": retract_plan,
+                "plan": plan,
+            }
+        except HTTPException as exc:
+            return {"ok": False, "stage": "error", "steps": steps, "error": exc.detail}
+        except Exception as exc:
+            log.exception("pick/place execution failed")
+            with self._state:
+                error = self.fault or f"{type(exc).__name__}: {exc}"
+            return {"ok": False, "stage": "error", "steps": steps, "error": error}
+
     def jog(self, joint: int, delta_deg: float) -> dict[str, Any]:
         if abs(delta_deg) < 1e-6:
             return self.snapshot()
@@ -890,6 +1398,14 @@ class ArmController:
                     with self._state:
                         self.joints_deg = [0.0, -15.0, 20.0, 0.0, 0.0, 0.0]
                         self.last_good_joints = list(self.joints_deg)
+                        self.pose = {
+                            "x": 0.1294,
+                            "y": 0.0,
+                            "z": 0.1752,
+                            "roll": -0.58,
+                            "pitch": 59.56,
+                            "yaw": 0.0,
+                        }
                         self.updated_at = time.time()
                 else:
                     with self._socket_timeout(MOTION_TIMEOUT_S):
@@ -1728,6 +2244,801 @@ def _solve_vision_calibration(points: list[dict[str, float]]) -> tuple[list[list
     return homography.tolist(), rmse
 
 
+# ── Dry-run pick path planning (cage frame avoidance) ────────────────────────
+PATH_SAMPLE_M = 0.005  # 5 mm sampling along each path segment
+
+
+def _cage_to_world(cage: CageIn, local: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Cage-local (X width, Y depth, Z height) -> arm base frame."""
+    yaw = math.radians(cage.yaw)
+    x, y, z = local
+    return (
+        cage.x + x * math.cos(yaw) - y * math.sin(yaw),
+        cage.y + x * math.sin(yaw) + y * math.cos(yaw),
+        cage.z + z,
+    )
+
+
+def _world_to_cage(cage: CageIn, point: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Arm base frame -> cage-local coordinates."""
+    yaw = math.radians(cage.yaw)
+    dx = point[0] - cage.x
+    dy = point[1] - cage.y
+    return (
+        dx * math.cos(yaw) + dy * math.sin(yaw),
+        -dx * math.sin(yaw) + dy * math.cos(yaw),
+        point[2] - cage.z,
+    )
+
+
+def _prepare_cage_corners(
+    points: list[Vec3In],
+    ignored: list[int],
+) -> tuple[list[Vec3In], dict[str, Any]]:
+    """Normalise the taught corners before fitting.
+
+    - BR/BL bottom are swapped automatically when their width edge runs the
+      opposite way to the front edge (a common teaching-order mistake).
+    - The unreachable back-top corners (6, 7) are derived from the back-bottom
+      corners plus the average front height vector.
+    """
+    if len(points) != 8:
+        raise HTTPException(422, "exactly 8 cage corners are required")
+    ignored_set = {int(index) for index in ignored}
+    if not ignored_set.issubset({6, 7}):
+        raise HTTPException(
+            422, "only the back-top corners (indices 6 and 7) can be ignored"
+        )
+    p = [(float(v.x), float(v.y), float(v.z)) for v in points]
+
+    def add(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def dot(a, b):
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    reordered: list[int] = []
+    width_front = sub(p[1], p[0])
+    width_back = sub(p[2], p[3])
+    if dot(width_front, width_back) < 0.0:
+        # The two back-bottom corners were taught in the opposite order.
+        p[2], p[3] = p[3], p[2]
+        p[6], p[7] = p[7], p[6]
+        reordered = [2, 3]
+
+    height = (
+        (p[4][0] - p[0][0] + p[5][0] - p[1][0]) * 0.5,
+        (p[4][1] - p[0][1] + p[5][1] - p[1][1]) * 0.5,
+        (p[4][2] - p[0][2] + p[5][2] - p[1][2]) * 0.5,
+    )
+    if 6 in ignored_set:
+        p[6] = add(p[2], height)
+    if 7 in ignored_set:
+        p[7] = add(p[3], height)
+
+    out = [Vec3In(x=q[0], y=q[1], z=q[2]) for q in p]
+    return out, {
+        "ignored_corners": sorted(ignored_set),
+        "reconstructed_corners": sorted(ignored_set),
+        "reordered_corners": reordered,
+    }
+
+
+def _fit_cage_corners(
+    points: list[Vec3In],
+    margin: float,
+    clearance: float,
+    front_top_open: bool,
+) -> tuple[CageIn, dict[str, Any]]:
+    """Fit an ideal box to eight taught corners, in the arm base frame.
+
+    Corner order (viewed from the arm, opening first):
+      0 front-left-bottom, 1 front-right-bottom,
+      2 back-right-bottom, 3 back-left-bottom,
+      4 front-left-top,    5 front-right-top,
+      6 back-right-top,    7 back-left-top.
+    """
+    if len(points) != 8:
+        raise HTTPException(422, "exactly 8 cage corners are required")
+    p = [(float(v.x), float(v.y), float(v.z)) for v in points]
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def add(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    def mul(v, s):
+        return (v[0] * s, v[1] * s, v[2] * s)
+
+    def dot(a, b):
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    def cross(a, b):
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    def length(v):
+        return math.sqrt(dot(v, v))
+
+    def unit(v):
+        n = length(v)
+        if n < 1e-9:
+            raise HTTPException(422, "cage corners are degenerate")
+        return (v[0] / n, v[1] / n, v[2] / n)
+
+    p0, p1, p2, p3, p4, p5, _, _ = p
+
+    # Fit the floor rectangle from the four bottom corners, then use the two
+    # front vertical edges only for the height. The top corners are often
+    # unreachable and would otherwise skew the width/depth.
+    front_center = mul(add(p0, p1), 0.5)
+    back_center = mul(add(p2, p3), 0.5)
+    center_bottom = mul(add(add(p0, p1), add(p2, p3)), 0.25)
+
+    width_front = sub(p1, p0)
+    width_back = sub(p2, p3)
+    width = unit(add(width_front, width_back))
+    depth_raw = sub(back_center, front_center)
+    depth = unit(depth_raw)
+    depth = unit(sub(depth, mul(width, dot(depth, width))))
+    height = unit(cross(width, depth))
+    if height[2] < 0.0:
+        height = mul(height, -1.0)
+
+    w = (length(width_front) + length(width_back)) * 0.5
+    d = length(depth_raw)
+    h = (
+        abs(dot(sub(p4, p0), height)) + abs(dot(sub(p5, p1), height))
+    ) * 0.5
+    if h < 0.02:
+        h = abs(max(q[2] for q in p) - min(q[2] for q in p))
+
+    origin = sub(center_bottom, mul(depth, d * 0.5))
+    yaw = math.degrees(math.atan2(-depth[0], depth[1]))
+    center = add(origin, add(mul(depth, d * 0.5), mul(height, h * 0.5)))
+
+    cage = CageIn(
+        x=origin[0],
+        y=origin[1],
+        z=origin[2],
+        yaw=yaw,
+        width=w,
+        depth=d,
+        height=h,
+        opening_margin=margin,
+        clearance_m=clearance,
+        front_top_open=front_top_open,
+    )
+
+    width_edges = ((0, 1), (2, 3))
+    depth_edges = ((0, 3), (1, 2))
+    height_edges = ((0, 4), (1, 5))
+
+    def edge_spread(edges) -> float:
+        lengths = [length(sub(p[b], p[a])) for a, b in edges]
+        return max(lengths) - min(lengths)
+
+    spreads = {
+        "width_m": edge_spread(width_edges),
+        "depth_m": edge_spread(depth_edges),
+        "height_m": edge_spread(height_edges),
+    }
+    orthogonality = abs(dot(unit(width_front), unit(depth_raw)))
+    warnings: list[str] = []
+    for name, spread in spreads.items():
+        if spread > 0.03:
+            warnings.append(f"{name.replace('_m', '')} edges differ by {spread * 1000:.0f} mm")
+    if orthogonality > 0.15:
+        warnings.append(f"floor axes are not orthogonal (dot {orthogonality:.2f})")
+
+    fit = {
+        "width_m": round(w, 4),
+        "depth_m": round(d, 4),
+        "height_m": round(h, 4),
+        "yaw_deg": round(yaw, 2),
+        "origin": {"x": origin[0], "y": origin[1], "z": origin[2]},
+        "center": {"x": center[0], "y": center[1], "z": center[2]},
+        "edge_spread_m": {name: round(value, 4) for name, value in spreads.items()},
+        "orthogonality": round(orthogonality, 4),
+        "fit_method": "bottom_corners_plus_height",
+        "warnings": warnings,
+    }
+    return cage, fit
+
+
+def _corner_edge_segments(
+    points: list[Vec3In],
+    front_top_open: bool,
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    """The 11 physical cage edges (front-top edge dropped when it is open)."""
+    if len(points) != 8:
+        raise HTTPException(422, "exactly 8 cage corners are required")
+    p = [(float(v.x), float(v.y), float(v.z)) for v in points]
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+    if front_top_open:
+        edges = [edge for edge in edges if edge != (4, 5)]
+    return [(p[a], p[b]) for a, b in edges]
+
+
+def _cage_frame_segments(
+    cage: CageIn,
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    """Outer edges plus the opening frame; front-top edge is optional."""
+    w, d, h = cage.width, cage.depth, cage.height
+    half = w / 2.0
+    corners = [
+        (-half, 0.0, 0.0),
+        (half, 0.0, 0.0),
+        (half, d, 0.0),
+        (-half, d, 0.0),
+        (-half, 0.0, h),
+        (half, 0.0, h),
+        (half, d, h),
+        (-half, d, h),
+    ]
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+    if cage.front_top_open:
+        edges = [edge for edge in edges if edge != (4, 5)]
+    segments = [
+        (_cage_to_world(cage, corners[a]), _cage_to_world(cage, corners[b]))
+        for a, b in edges
+    ]
+    margin = cage.opening_margin
+    x0, x1 = -half + margin, half - margin
+    z0 = margin
+    z1 = h if cage.front_top_open else h - margin
+    if x1 > x0 and z1 > z0:
+        opening = [
+            (x0, 0.0, z0),
+            (x1, 0.0, z0),
+            (x1, 0.0, z1),
+            (x0, 0.0, z1),
+        ]
+        opening_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        if cage.front_top_open:
+            opening_edges = [(0, 1), (1, 2), (3, 0)]
+        segments += [
+            (_cage_to_world(cage, opening[a]), _cage_to_world(cage, opening[b]))
+            for a, b in opening_edges
+        ]
+    return segments
+
+
+def _point_segment_distance(
+    point: tuple[float, float, float],
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> float:
+    ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+    ap = (point[0] - a[0], point[1] - a[1], point[2] - a[2])
+    denom = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2
+    if denom <= 1e-12:
+        return math.dist(point, a)
+    t = (ab[0] * ap[0] + ab[1] * ap[1] + ab[2] * ap[2]) / denom
+    t = max(0.0, min(1.0, t))
+    closest = (a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t)
+    return math.dist(point, closest)
+
+
+def _lerp3(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+    t: float,
+) -> tuple[float, float, float]:
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+
+
+def _shell_crossing_issues(
+    p0: tuple[float, float, float],
+    p1: tuple[float, float, float],
+    cage: CageIn,
+) -> list[str]:
+    """Treat the cage as a closed box with one opening on the Y=0 face."""
+    issues: list[str] = []
+    w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
+    half = w / 2.0
+
+    def crosses(a: float, b: float, plane: float) -> bool:
+        return (a - plane) * (b - plane) < 0.0
+
+    def crossing(index: int, plane: float) -> tuple[float, float, float]:
+        t = (plane - p0[index]) / (p1[index] - p0[index])
+        return _lerp3(p0, p1, t)
+
+    if crosses(p0[1], p1[1], 0.0):
+        x, _, z = crossing(1, 0.0)
+        z_hi = h if cage.front_top_open else h - margin
+        if not (-half + margin <= x <= half - margin and margin <= z <= z_hi):
+            issues.append("crosses the front frame outside the opening")
+    if crosses(p0[1], p1[1], d):
+        x, _, z = crossing(1, d)
+        if -half <= x <= half and 0.0 <= z <= h:
+            issues.append("crosses the back frame")
+    if crosses(p0[0], p1[0], -half):
+        _, y, z = crossing(0, -half)
+        if 0.0 <= y <= d and 0.0 <= z <= h:
+            issues.append("crosses the left frame")
+    if crosses(p0[0], p1[0], half):
+        _, y, z = crossing(0, half)
+        if 0.0 <= y <= d and 0.0 <= z <= h:
+            issues.append("crosses the right frame")
+    if crosses(p0[2], p1[2], h):
+        x, y, _ = crossing(2, h)
+        if -half <= x <= half and 0.0 <= y <= d:
+            issues.append("crosses the top frame")
+    if crosses(p0[2], p1[2], 0.0):
+        x, y, _ = crossing(2, 0.0)
+        if -half <= x <= half and 0.0 <= y <= d:
+            issues.append("crosses the floor frame")
+    return issues
+
+
+def _segment_cage_check(
+    cage: CageIn,
+    frame_segments: list[tuple[tuple[float, float, float], tuple[float, float, float]]],
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> tuple[float, list[str]]:
+    """Sample one path segment and check clearance to the cage frame/walls."""
+    length = math.dist(a, b)
+    steps = max(1, int(math.ceil(length / PATH_SAMPLE_M)))
+    min_clearance = math.inf
+    issues: list[str] = []
+    half_w = cage.width / 2.0
+    previous_local = _world_to_cage(cage, a)
+    for i in range(steps + 1):
+        t = i / steps
+        point = _lerp3(a, b, t)
+        local = _world_to_cage(cage, point)
+        distance = min(
+            _point_segment_distance(point, seg[0], seg[1]) for seg in frame_segments
+        )
+        wall_gap = math.inf
+        if (
+            -half_w <= local[0] <= half_w
+            and 0.0 < local[1] <= cage.depth
+            and 0.0 <= local[2] <= cage.height
+        ):
+            # Conservative clearance to the closed side/back/top/floor faces.
+            wall_gap = min(
+                local[0] + half_w,
+                half_w - local[0],
+                cage.depth - local[1],
+                local[2],
+                cage.height - local[2],
+            )
+            if wall_gap + 1e-9 < cage.clearance_m:
+                issues.append(
+                    f"wall clearance {wall_gap * 1000:.0f} mm "
+                    f"< {cage.clearance_m * 1000:.0f} mm"
+                )
+        min_clearance = min(min_clearance, distance, wall_gap)
+        if distance + 1e-9 < cage.clearance_m:
+            issues.append(
+                f"frame clearance {distance * 1000:.0f} mm "
+                f"< {cage.clearance_m * 1000:.0f} mm"
+            )
+        if i:
+            issues.extend(_shell_crossing_issues(previous_local, local, cage))
+        previous_local = local
+    return min_clearance, sorted(set(issues))
+
+
+def _plan_retract_path(
+    cage: CageIn,
+    frame_segments: list[tuple[tuple[float, float, float], tuple[float, float, float]]],
+    start: dict[str, float],
+    retract_m: float,
+    gate_clearance: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, list[str]]:
+    """Find a horizontal pull-back path that avoids the cage frame.
+
+    Preference: direct toward the base, then an outward/tangent detour. Every
+    leg uses the same 5 mm clearance check as the dry-run planner.
+    """
+    x, y, z = start["x"], start["y"], start["z"]
+    radius = math.hypot(x, y)
+    target_radius = max(0.05, radius - retract_m)
+    if radius <= target_radius + 1e-6:
+        return (
+            [
+                {
+                    "kind": "start",
+                    "pose": dict(start),
+                    "zone": "outside",
+                    "reach_m": round(radius, 4),
+                    "issues": [],
+                }
+            ],
+            [],
+            True,
+            [
+                f"start radius {radius:.3f} m is already at the "
+                f"{target_radius:.3f} m pull-back radius"
+            ],
+        )
+
+    def at_limit(px: float, py: float) -> tuple[float, float]:
+        r = math.hypot(px, py)
+        if r <= target_radius + 1e-6:
+            return px, py
+        scale = target_radius / r
+        return px * scale, py * scale
+
+    def pose_at(px: float, py: float) -> dict[str, float]:
+        return {**start, "x": px, "y": py, "z": z}
+
+    ux, uy = -x / radius, -y / radius
+    direct = at_limit(x, y)
+    yaw = math.radians(cage.yaw)
+    nx, ny = math.sin(yaw), -math.cos(yaw)
+    cage_center = _cage_to_world(cage, (0.0, cage.depth / 2.0, 0.0))
+    ax, ay = x - cage_center[0], y - cage_center[1]
+    away_n = math.hypot(ax, ay)
+    if away_n > 1e-6:
+        ax, ay = ax / away_n, ay / away_n
+    else:
+        ax, ay = nx, ny
+
+    candidates: list[list[tuple[float, float]]] = [[(x, y), direct]]
+    directions: list[tuple[float, float]] = []
+    for degrees in range(0, 360, 22):
+        radians = math.radians(degrees)
+        directions.append((math.cos(radians), math.sin(radians)))
+    directions.extend([(ax, ay), (nx, ny), (-nx, -ny), (ux, uy)])
+
+    unique: list[tuple[float, float]] = []
+    for dx, dy in directions:
+        n = math.hypot(dx, dy)
+        if n <= 1e-6:
+            continue
+        dx, dy = dx / n, dy / n
+        if not any(
+            abs(dx - ex) < 1e-3 and abs(dy - ey) < 1e-3 for ex, ey in unique
+        ):
+            unique.append((dx, dy))
+    # Prefer moving away from the cage, then toward the base.
+    unique.sort(
+        key=lambda d: -(d[0] * ax + d[1] * ay) - 0.5 * (d[0] * ux + d[1] * uy)
+    )
+    for distance in (0.05, 0.10, 0.15):
+        for dx, dy in unique:
+            mid = (x + dx * distance, y + dy * distance)
+            candidates.append([(x, y), mid, at_limit(*mid)])
+
+    def build(coords: list[tuple[float, float]]):
+        deduped = [coords[0]]
+        for point in coords[1:]:
+            if math.dist(point, deduped[-1]) > 1e-4:
+                deduped.append(point)
+        deduped[-1] = at_limit(*deduped[-1])
+        names = ["start"] + [
+            f"retract{i}" for i in range(1, len(deduped) - 1)
+        ] + ["retract"]
+        points = [
+            {
+                "kind": name,
+                "pose": pose_at(px, py),
+                "zone": "outside",
+                "reach_m": round(math.hypot(px, py), 4),
+                "issues": [],
+            }
+            for name, (px, py) in zip(names, deduped)
+        ]
+        segments = []
+        ok = True
+        for a, b in zip(points, points[1:]):
+            pa = (a["pose"]["x"], a["pose"]["y"], a["pose"]["z"])
+            pb = (b["pose"]["x"], b["pose"]["y"], b["pose"]["z"])
+            min_clearance, issues = _segment_cage_check(
+                cage, frame_segments, pa, pb
+            )
+            if issues:
+                ok = False
+            segments.append(
+                {
+                    "from": a["kind"],
+                    "to": b["kind"],
+                    "length_m": round(math.dist(pa, pb), 4),
+                    "min_clearance_m": (
+                        round(min_clearance, 4)
+                        if math.isfinite(min_clearance)
+                        else None
+                    ),
+                    "collision": bool(issues),
+                    "issues": issues,
+                }
+            )
+        return points, segments, ok
+
+    direct_points, direct_segments, direct_ok = build(candidates[0])
+    if direct_ok:
+        return direct_points, direct_segments, True, []
+    for coords in candidates[1:]:
+        points, segments, ok = build(coords)
+        if ok:
+            return (
+                points,
+                segments,
+                True,
+                ["direct retract was blocked; routed around the frame"],
+            )
+    return direct_points, direct_segments, False, ["no clear retract path found"]
+
+
+def _pose_dict(pose: dict[str, Any]) -> dict[str, float]:
+    return {key: float(pose[key]) for key in ("x", "y", "z", "roll", "pitch", "yaw")}
+
+
+def plan_pick_path(
+    payload: PickPathIn,
+    current_pose: dict[str, Any] | None,
+    max_reach_m: float,
+) -> dict[str, Any]:
+    """Build a dry-run path: start -> [via] -> pre-gate -> gate -> [via] -> approach -> target."""
+    if payload.corners is not None:
+        prepared, corner_meta = _prepare_cage_corners(
+            payload.corners, payload.ignored_corners
+        )
+        cage, fit_meta = _fit_cage_corners(
+            prepared,
+            payload.cage.opening_margin,
+            payload.cage.clearance_m,
+            payload.cage.front_top_open,
+        )
+        fit_meta.update(corner_meta)
+        cage_source = "corners"
+    else:
+        cage = payload.cage
+        fit_meta = None
+        cage_source = "dimensions"
+
+    if payload.start is not None:
+        start = _pose_dict(payload.start.model_dump())
+    elif current_pose is not None:
+        start = _pose_dict(current_pose)
+    else:
+        raise HTTPException(409, "no current arm pose; provide start")
+
+    via = _pose_dict(payload.via.model_dump()) if payload.via is not None else None
+    home = _pose_dict(payload.home.model_dump()) if payload.home is not None else None
+    target = _pose_dict(payload.target.model_dump())
+
+    w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
+    target_local = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
+    start_local = _world_to_cage(cage, (start["x"], start["y"], start["z"]))
+    target_inside = 0.0 < target_local[1] < d
+    if via is not None:
+        via_local = _world_to_cage(cage, (via["x"], via["y"], via["z"]))
+        via_inside = 0.0 < via_local[1] < d
+    else:
+        via_local = None
+        via_inside = False
+    start_inside = (
+        0.0 < start_local[1] < d
+        and -w / 2.0 <= start_local[0] <= w / 2.0
+        and 0.0 <= start_local[2] <= h
+    )
+
+    warnings: list[str] = []
+    if fit_meta:
+        warnings.extend(fit_meta.get("warnings", []))
+    if start_inside:
+        warnings.append(
+            "start is inside the cage; use an outside start or the path will cross the frame"
+        )
+    if home is not None:
+        home_local = _world_to_cage(cage, (home["x"], home["y"], home["z"]))
+        home_inside = (
+            0.0 < home_local[1] < d
+            and -w / 2.0 <= home_local[0] <= w / 2.0
+            and 0.0 <= home_local[2] <= h
+        )
+        if home_inside:
+            warnings.append("home is inside the cage; move home outside the opening")
+    if not target_inside:
+        warnings.append("target is outside the cage; the opening gate is not used")
+    z_open_hi = h if cage.front_top_open else h - margin
+    if w - 2 * margin <= 0 or z_open_hi - margin <= 0:
+        warnings.append("opening_margin is too large for the cage dimensions")
+    z_low = margin + cage.clearance_m
+    z_high = z_open_hi - cage.clearance_m
+    if z_high < z_low:
+        z_high = z_low
+        warnings.append("not enough vertical room for the gate clearance")
+
+    yaw = math.radians(cage.yaw)
+    normal_out = (math.sin(yaw), -math.cos(yaw), 0.0)
+    gate_local = (
+        min(
+            max(target_local[0], -w / 2.0 + margin + cage.clearance_m),
+            w / 2.0 - margin - cage.clearance_m,
+        ),
+        0.0,
+        min(max(target_local[2], z_low), z_high),
+    )
+    gate_xyz = _cage_to_world(cage, gate_local)
+    pre_gate_xyz = (
+        gate_xyz[0] + normal_out[0] * payload.gate_clearance_m,
+        gate_xyz[1] + normal_out[1] * payload.gate_clearance_m,
+        gate_xyz[2],
+    )
+
+    approach_m = payload.approach_m
+    if target_inside:
+        max_inside = max(0.0, target_local[1] - 0.005)
+        if approach_m > max_inside:
+            approach_m = max_inside
+            warnings.append(
+                f"approach clamped to {approach_m * 1000:.0f} mm to stay inside the cage"
+            )
+    approach_xyz = (
+        target["x"] + normal_out[0] * approach_m,
+        target["y"] + normal_out[1] * approach_m,
+        target["z"],
+    )
+
+    def oriented(
+        xyz: tuple[float, float, float], reference: dict[str, float]
+    ) -> dict[str, float]:
+        return {
+            "x": xyz[0],
+            "y": xyz[1],
+            "z": xyz[2],
+            "roll": reference["roll"],
+            "pitch": reference["pitch"],
+            "yaw": reference["yaw"],
+        }
+
+    waypoints: list[tuple[str, dict[str, float]]] = [("start", start)]
+    if home is not None:
+        waypoints.append(("home", home))
+    if via is not None and not via_inside:
+        waypoints.append(("via", via))
+    if target_inside:
+        waypoints.append(("pre_gate", oriented(pre_gate_xyz, target)))
+        waypoints.append(("gate", oriented(gate_xyz, target)))
+    if via is not None and via_inside:
+        waypoints.append(("via", via))
+    if approach_m > 1e-6:
+        waypoints.append(("approach", oriented(approach_xyz, target)))
+    waypoints.append(("target", target))
+
+    deduped: list[tuple[str, dict[str, float]]] = [waypoints[0]]
+    for kind, pose in waypoints[1:]:
+        previous = deduped[-1][1]
+        if (
+            math.dist(
+                (previous["x"], previous["y"], previous["z"]),
+                (pose["x"], pose["y"], pose["z"]),
+            )
+            > 1e-4
+        ):
+            deduped.append((kind, pose))
+    waypoints = deduped
+
+    frame_segments = _cage_frame_segments(cage)
+    blocking = False
+    points: list[dict[str, Any]] = []
+    for kind, pose in waypoints:
+        local = _world_to_cage(cage, (pose["x"], pose["y"], pose["z"]))
+        in_box = (
+            -w / 2.0 - 1e-6 <= local[0] <= w / 2.0 + 1e-6
+            and -1e-6 <= local[1] <= d + 1e-6
+            and -1e-6 <= local[2] <= h + 1e-6
+        )
+        zone = "gate" if abs(local[1]) <= 1e-6 else ("inside" if in_box else "outside")
+        reach = math.hypot(pose["x"], pose["y"])
+        issues: list[str] = []
+        if reach > max_reach_m + 1e-6:
+            issues.append(f"horizontal reach {reach:.3f} m > {max_reach_m:.3f} m")
+        if not (MIN_POSE_Z_M <= pose["z"] <= MAX_POSE_Z_M):
+            issues.append(
+                f"z={pose['z']:.3f} m outside "
+                f"[{MIN_POSE_Z_M:.2f}, {MAX_POSE_Z_M:.2f}] m"
+            )
+        if abs(local[1]) <= 1e-6 and not (
+            -w / 2.0 + margin <= local[0] <= w / 2.0 - margin
+            and margin <= local[2] <= z_open_hi
+        ):
+            issues.append("point on the opening plane is outside the opening rectangle")
+        if issues:
+            blocking = True
+        points.append(
+            {
+                "kind": kind,
+                "pose": pose,
+                "zone": zone,
+                "reach_m": round(reach, 4),
+                "issues": issues,
+            }
+        )
+
+    segments: list[dict[str, Any]] = []
+    for index in range(len(waypoints) - 1):
+        kind_a, a = waypoints[index]
+        kind_b, b = waypoints[index + 1]
+        p0 = (a["x"], a["y"], a["z"])
+        p1 = (b["x"], b["y"], b["z"])
+        length = math.dist(p0, p1)
+        min_clearance, issues = _segment_cage_check(cage, frame_segments, p0, p1)
+        if kind_a == "approach" and kind_b == "target":
+            if abs(a["z"] - b["z"]) > 1e-6 or any(
+                abs(a[key] - b[key]) > 1e-6 for key in ("roll", "pitch", "yaw")
+            ):
+                issues.append("final approach is not horizontal / attitude-locked")
+        collision = bool(issues)
+        if collision:
+            blocking = True
+        segments.append(
+            {
+                "from": kind_a,
+                "to": kind_b,
+                "length_m": round(length, 4),
+                "min_clearance_m": (
+                    round(min_clearance, 4) if math.isfinite(min_clearance) else None
+                ),
+                "collision": collision,
+                "issues": issues,
+            }
+        )
+
+    if via is not None and via_inside and target_inside and via_local[1] > target_local[1] + 0.005:
+        warnings.append("via is deeper than target; the path backtracks toward the opening")
+
+    opening_center_xyz = _cage_to_world(cage, (0.0, 0.0, h / 2.0))
+    return {
+        "ok": not blocking,
+        "dry_run": True,
+        "cage_source": cage_source,
+        "cage_fit": fit_meta,
+        "points": points,
+        "segments": segments,
+        "warnings": warnings,
+        "actions": [
+            {"at": "start", "action": "close_gripper"},
+            {"at": "target", "action": "open_gripper"},
+        ],
+        "cage": cage.model_dump(),
+        "opening": {
+            "center": {
+                "x": opening_center_xyz[0],
+                "y": opening_center_xyz[1],
+                "z": opening_center_xyz[2],
+            },
+            "gate": {"x": gate_xyz[0], "y": gate_xyz[1], "z": gate_xyz[2]},
+            "normal_out": {
+                "x": normal_out[0],
+                "y": normal_out[1],
+                "z": normal_out[2],
+            },
+            "width_m": round(w - 2 * margin, 4),
+            "height_m": round(z_open_hi - margin, 4),
+            "front_top_open": cage.front_top_open,
+        },
+        "limits": {
+            "max_reach_m": max_reach_m,
+            "z_min_m": MIN_POSE_Z_M,
+            "z_max_m": MAX_POSE_Z_M,
+        },
+    }
+
+
 def _webctl_call(
     path: str,
     method: str = "GET",
@@ -1961,6 +3272,30 @@ def create_app(controller: ArmController) -> FastAPI:
     @app.post("/api/arm/pose")
     def arm_pose(body: PoseIn) -> dict[str, Any]:
         return controller.move_pose(body)
+
+    @app.post("/api/arm/cage_fit")
+    def arm_cage_fit(body: CageFitIn) -> dict[str, Any]:
+        """Fit the cage box to eight taught corners (no motion)."""
+        prepared, meta = _prepare_cage_corners(body.points, body.ignored_corners)
+        cage, fit = _fit_cage_corners(
+            prepared,
+            body.opening_margin,
+            body.clearance_m,
+            body.front_top_open,
+        )
+        fit.update(meta)
+        return {"ok": True, "cage": cage.model_dump(), "fit": fit}
+
+    @app.post("/api/arm/pick_path")
+    def arm_pick_path(body: PickPathIn) -> dict[str, Any]:
+        """Dry-run Cartesian path with cage frame clearance checks (no motion)."""
+        snapshot = controller.snapshot()
+        return plan_pick_path(body, snapshot["pose"], float(snapshot["max_reach_m"]))
+
+    @app.post("/api/arm/execute_pick")
+    def arm_execute_pick(body: ExecutePickIn) -> dict[str, Any]:
+        """Close at the current pose, home, place at target, open (blocking)."""
+        return controller.execute_pick_place(body)
 
     @app.post("/api/arm/motors/enable")
     def arm_enable_motors() -> dict[str, Any]:

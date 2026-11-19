@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import {
   api,
+  type ArmPose,
   type ArmPosePreset,
   type ArmSequence,
   type ArmStatus,
+  type CageFitResult,
+  type CageGeometry,
+  type ExecutePickResult,
+  type PickPathResult,
+  type PickPathVec3,
   type QrDetection,
   type VisionCalibration,
 } from '../services/api'
@@ -26,6 +32,123 @@ const HOSTS = [
 ]
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const POSE_FIELDS: Array<{ key: keyof ArmPose; label: string; step: number }> = [
+  { key: 'x', label: 'X (m)', step: 0.01 },
+  { key: 'y', label: 'Y (m)', step: 0.01 },
+  { key: 'z', label: 'Z (m)', step: 0.01 },
+  { key: 'roll', label: 'Roll (°)', step: 1 },
+  { key: 'pitch', label: 'Pitch (°)', step: 1 },
+  { key: 'yaw', label: 'Yaw (°)', step: 1 },
+]
+
+const CORNER_LABELS = [
+  'FL bottom',
+  'FR bottom',
+  'BR bottom',
+  'BL bottom',
+  'FL top',
+  'FR top',
+  'BR top',
+  'BL top',
+]
+
+const CAGE_STORAGE_KEY = 'packtug.cageGeometry'
+
+const DEFAULT_CAGE: CageGeometry = {
+  x: 0.25,
+  y: 0,
+  z: 0,
+  yaw: -90,
+  width: 0.55,
+  depth: 0.25,
+  height: 0.40,
+  opening_margin: 0.02,
+  clearance_m: 0.03,
+  front_top_open: true,
+}
+
+const DEFAULT_IGNORED = [false, false, false, false, false, false, true, true]
+
+type SavedCageTeaching = {
+  corners: Array<PickPathVec3 | null>
+  ignored: boolean[]
+  cage: CageGeometry
+  fit: CageFitResult | null
+  lastStart?: ArmPose | null
+  home?: ArmPose | null
+  homeRecorded?: boolean
+}
+
+function loadCageTeaching(): SavedCageTeaching | null {
+  try {
+    const raw = localStorage.getItem(CAGE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as SavedCageTeaching
+    if (!Array.isArray(parsed.corners) || parsed.corners.length !== 8) return null
+    if (!Array.isArray(parsed.ignored) || parsed.ignored.length !== 8) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function NumberField({
+  label,
+  value,
+  step = 0.01,
+  onChange,
+}: {
+  label: string
+  value: number
+  step?: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="field" style={{ minWidth: 78 }}>
+      <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>{label}</span>
+      <input
+        type="number"
+        step={step}
+        value={value}
+        onChange={(event) => {
+          const next = Number(event.target.value)
+          if (Number.isFinite(next)) onChange(next)
+        }}
+        style={{ width: 84 }}
+      />
+    </label>
+  )
+}
+
+function PoseEditor({
+  title,
+  pose,
+  onChange,
+}: {
+  title: string
+  pose: ArmPose
+  onChange: (pose: ArmPose) => void
+}) {
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <span className="muted" style={{ fontSize: 12 }}>
+        {title}
+      </span>
+      <div className="row" style={{ gap: 6 }}>
+        {POSE_FIELDS.map((field) => (
+          <NumberField
+            key={field.key}
+            label={field.label}
+            step={field.step}
+            value={pose[field.key]}
+            onChange={(value) => onChange({ ...pose, [field.key]: value } as ArmPose)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
 
 type LogEntry = { id: string; t: string; text: string; level: 'info' | 'success' | 'warn' | 'error' }
 type DepthStats = {
@@ -70,10 +193,104 @@ export function Arm() {
   const [visionCalib, setVisionCalib] = useState<VisionCalibration | null>(null)
   const [visionPending, setVisionPending] = useState(false)
   const [visionMessage, setVisionMessage] = useState<string | null>(null)
+
+  const [savedCage] = useState(() => loadCageTeaching())
+
+  const [pathVia, setPathVia] = useState<ArmPose>({
+    x: 0.30,
+    y: -0.05,
+    z: 0.25,
+    roll: 180,
+    pitch: 0,
+    yaw: 0,
+  })
+  const [useVia, setUseVia] = useState(false)
+  const [useCurrentStart, setUseCurrentStart] = useState(true)
+  const [pathStart, setPathStart] = useState<ArmPose>({
+    x: 0.10,
+    y: 0,
+    z: 0.20,
+    roll: 180,
+    pitch: 0,
+    yaw: 90,
+  })
+  const [lastStart, setLastStart] = useState<ArmPose | null>(
+    () => savedCage?.lastStart ?? null,
+  )
+  const [useHome, setUseHome] = useState(true)
+  const [homeRecorded, setHomeRecorded] = useState(
+    () => savedCage?.homeRecorded ?? false,
+  )
+  const [pathHome, setPathHome] = useState<ArmPose>(
+    () =>
+      savedCage?.home ?? {
+        x: 0.30,
+        y: 0,
+        z: 0.20,
+        roll: 180,
+        pitch: 0,
+        yaw: 0,
+      },
+  )
+  const [pathTarget, setPathTarget] = useState<ArmPose>({
+    x: 0.40,
+    y: -0.10,
+    z: 0.10,
+    roll: 180,
+    pitch: 0,
+    yaw: 0,
+  })
+  const [pathCage, setPathCage] = useState<CageGeometry>(
+    () => savedCage?.cage ?? DEFAULT_CAGE,
+  )
+  const [pathApproach, setPathApproach] = useState(0.06)
+  const [pathGateClearance, setPathGateClearance] = useState(0.08)
+  const [pathResult, setPathResult] = useState<PickPathResult | null>(null)
+  const [pathPending, setPathPending] = useState(false)
+  const [pathError, setPathError] = useState<string | null>(null)
+  const [execSpeed, setExecSpeed] = useState(5)
+  const [execRetract, setExecRetract] = useState(0.08)
+  const [execHomeLift, setExecHomeLift] = useState(0.08)
+  const [preserveOrientation, setPreserveOrientation] = useState(true)
+  const [foldJ2ToMin, setFoldJ2ToMin] = useState(false)
+  const [returnHomeAfter, setReturnHomeAfter] = useState(false)
+  const [execPending, setExecPending] = useState(false)
+  const [execResult, setExecResult] = useState<ExecutePickResult | null>(null)
+  const [execError, setExecError] = useState<string | null>(null)
+  const [cageFront, setCageFront] = useState<ArmPose | null>(null)
+  const [cageCenterRecorded, setCageCenterRecorded] = useState(false)
+  const [cageMessage, setCageMessage] = useState<string | null>(null)
+  const [cageCorners, setCageCorners] = useState<Array<PickPathVec3 | null>>(
+    () => savedCage?.corners ?? Array(8).fill(null),
+  )
+  const [cageFit, setCageFit] = useState<CageFitResult | null>(
+    () => savedCage?.fit ?? null,
+  )
+  const [cageFitPending, setCageFitPending] = useState(false)
+  const [cageIgnored, setCageIgnored] = useState<boolean[]>(
+    () => savedCage?.ignored ?? [...DEFAULT_IGNORED],
+  )
   const [dragRect, setDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const cameraImgRef = useRef<HTMLImageElement | null>(null)
   const stopSequenceRef = useRef(false)
+
+  useEffect(() => {
+    const payload: SavedCageTeaching = {
+      corners: cageCorners,
+      ignored: cageIgnored,
+      cage: pathCage,
+      fit: cageFit,
+      lastStart,
+      home: pathHome,
+      homeRecorded,
+    }
+    try {
+      localStorage.setItem(CAGE_STORAGE_KEY, JSON.stringify(payload))
+    } catch {
+      // Ignore storage errors (private mode or quota exceeded).
+    }
+  }, [cageCorners, cageIgnored, pathCage, cageFit, lastStart, pathHome, homeRecorded])
 
   useEffect(() => {
     let alive = true
@@ -480,6 +697,293 @@ export function Arm() {
     }
   }
 
+  async function fillTargetFromQr() {
+    if (!qr?.ok || !qr.center) return
+    try {
+      const mapped = await api.mapVisionPixel(qr.center.x, qr.center.y)
+      setPathTarget((current) => ({ ...current, x: mapped.x, y: mapped.y }))
+      addLog(`Target XY ← QR ${mapped.x.toFixed(3)}, ${mapped.y.toFixed(3)}`, 'info')
+    } catch (err) {
+      setPathError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  function setTargetToCageCentre() {
+    const yaw = (pathCage.yaw * Math.PI) / 180
+    const localY = pathCage.depth / 2
+    const zLocal = Math.max(
+      pathCage.clearance_m + 0.02,
+      Math.min(0.1, pathCage.height / 2),
+    )
+    const x = Number((pathCage.x - localY * Math.sin(yaw)).toFixed(3))
+    const y = Number((pathCage.y + localY * Math.cos(yaw)).toFixed(3))
+    const z = Number((pathCage.z + zLocal).toFixed(3))
+    setPathTarget((current) => ({
+      ...current,
+      x,
+      y,
+      z,
+      ...(status?.pose
+        ? {
+            roll: status.pose.roll,
+            pitch: status.pose.pitch,
+            yaw: status.pose.yaw,
+          }
+        : {}),
+    }))
+    addLog(
+      `Target = cage floor centre (${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)} m)`,
+      'info',
+    )
+  }
+
+  async function planPickPath() {
+    setPathPending(true)
+    setPathError(null)
+    try {
+      const points = cageCorners.map((point, index) =>
+        point ?? (cageIgnored[index] ? { x: 0, y: 0, z: 0 } : null),
+      )
+      const anyCorner = cageCorners.some((point) => point !== null)
+      const corners = points.some((point) => point === null)
+        ? null
+        : (points as PickPathVec3[])
+      if (anyCorner && corners === null) {
+        setPathError('Record all reachable cage corners, or clear cage teaching.')
+        return
+      }
+      const ignored = cageIgnored.flatMap((value, index) => (value ? [index] : []))
+      if (useHome && !homeRecorded) {
+        setPathError(
+          'Record the home pose first: click Home / fold, then Home = current.',
+        )
+        return
+      }
+      const result = await api.planArmPickPath({
+        start: useCurrentStart ? null : pathStart,
+        ...(useVia ? { via: pathVia } : {}),
+        ...(useHome ? { home: pathHome } : {}),
+        target: pathTarget,
+        approach_m: pathApproach,
+        gate_clearance_m: pathGateClearance,
+        cage: pathCage,
+        ...(corners ? { corners, ignored_corners: ignored } : {}),
+      })
+      setPathResult(result)
+      const startPoint = result.points.find((point) => point.kind === 'start')
+      if (startPoint) setLastStart({ ...startPoint.pose })
+      addLog(
+        `Pick path ${result.ok ? 'clear' : 'blocked'} · ${result.points.length} points`,
+        result.ok ? 'success' : 'warn',
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setPathError(message)
+      setPathResult(null)
+      addLog(`Pick path — ${message}`, 'error')
+    } finally {
+      setPathPending(false)
+    }
+  }
+
+  function cornerRequestData(): {
+    corners: PickPathVec3[] | null
+    ignored: number[]
+  } {
+    const points = cageCorners.map((point, index) =>
+      point ?? (cageIgnored[index] ? { x: 0, y: 0, z: 0 } : null),
+    )
+    return {
+      corners: points.some((point) => point === null)
+        ? null
+        : (points as PickPathVec3[]),
+      ignored: cageIgnored.flatMap((value, index) => (value ? [index] : [])),
+    }
+  }
+
+  async function executePickPlace() {
+    if (!status?.connected) {
+      setExecError('Connect the arm first.')
+      return
+    }
+    if (execPending) return
+    if (!homeRecorded) {
+      setExecError('Record home first: Home / fold, then Home = current.')
+      return
+    }
+    const confirmed = window.confirm(
+      'This will:\n' +
+        '1. close the gripper at the current pose,\n' +
+        '2. pull the object horizontally back toward the base,\n' +
+        '3. lower in place at the pulled-back position,\n' +
+        '4. move horizontally to the home X/Y at the safe height,\n' +
+        '5. keep the gripper at its current level attitude,\n' +
+        '6. follow the safe-home -> cage-centre path and open the gripper.\n\n' +
+        'Keep the workspace clear and a hand on the power switch. Continue?',
+    )
+    if (!confirmed) return
+    setExecPending(true)
+    setExecError(null)
+    setExecResult(null)
+    try {
+      const { corners, ignored } = cornerRequestData()
+      if (cageCorners.some((point) => point !== null) && corners === null) {
+        setExecError('Record all reachable cage corners first.')
+        return
+      }
+      const result = await api.executeArmPick({
+        target: pathTarget,
+        home: pathHome,
+        home_lift_m: execHomeLift,
+        retract_m: execRetract,
+        preserve_orientation: preserveOrientation,
+        fold_j2_to_min: foldJ2ToMin,
+        approach_m: pathApproach,
+        gate_clearance_m: pathGateClearance,
+        cage: pathCage,
+        ...(corners ? { corners, ignored_corners: ignored } : {}),
+        speed_percent: execSpeed,
+        return_home_after: returnHomeAfter,
+      })
+      setExecResult(result)
+      if (!result.ok) setExecError(result.error ?? 'Execution stopped')
+      addLog(
+        `Execute ${result.ok ? 'done' : 'stopped'} · ${result.stage}`,
+        result.ok ? 'success' : 'error',
+      )
+      try {
+        applySnapshot(await api.getArmStatus())
+      } catch {
+        // Keep the local snapshot if the read fails.
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setExecError(message)
+      addLog(`Execute — ${message}`, 'error')
+    } finally {
+      setExecPending(false)
+    }
+  }
+
+  function recordCageCenter() {
+    if (!status?.pose) return
+    const pose = status.pose
+    setPathCage((current) => ({ ...current, x: pose.x, y: pose.y, z: pose.z }))
+    setCageCenterRecorded(true)
+    setCageFront(null)
+    setCageMessage(
+      `Opening center recorded at ${pose.x.toFixed(3)}, ${pose.y.toFixed(3)}, ${pose.z.toFixed(3)} m`,
+    )
+    addLog('Cage opening center recorded from the current pose', 'info')
+  }
+
+  function recordCageFront() {
+    if (!status?.pose) return
+    const front = { ...status.pose }
+    setCageFront(front)
+    const dx = front.x - pathCage.x
+    const dy = front.y - pathCage.y
+    const distance = Math.hypot(dx, dy)
+    if (distance < 0.01) {
+      setCageMessage(
+        'Move at least 20 mm back from the opening center before recording the front point.',
+      )
+      return
+    }
+    const yawDeg = (Math.atan2(dx / distance, -(dy / distance)) * 180) / Math.PI
+    setPathCage((current) => ({ ...current, yaw: Number(yawDeg.toFixed(1)) }))
+    setPathGateClearance(Math.min(0.30, Math.max(0.02, Number(distance.toFixed(3)))))
+    const zNote =
+      Math.abs(front.z - pathCage.z) > 0.02
+        ? ` · Z differs by ${Math.round((front.z - pathCage.z) * 1000)} mm`
+        : ''
+    setCageMessage(
+      `Front point recorded ${Math.round(distance * 1000)} mm out · yaw ${yawDeg.toFixed(1)}°${zNote}`,
+    )
+    addLog(`Cage yaw ${yawDeg.toFixed(1)}° from two taught points`, 'info')
+  }
+
+  function recordCageCorner(index: number) {
+    if (!status?.pose) return
+    const pose = status.pose
+    setCageCorners((current) =>
+      current.map((point, i) =>
+        i === index ? { x: pose.x, y: pose.y, z: pose.z } : point,
+      ),
+    )
+    setCageFit(null)
+    setCageMessage(`Corner ${index + 1} (${CORNER_LABELS[index]}) recorded`)
+    addLog(`Cage corner ${index + 1} recorded`, 'info')
+  }
+
+  function clearCageCorners() {
+    setCageCorners(Array(8).fill(null))
+    setCageFit(null)
+    setCageMessage(null)
+    setCageIgnored([...DEFAULT_IGNORED])
+  }
+
+  function toggleCageIgnored(index: number) {
+    setCageIgnored((current) =>
+      current.map((value, i) => (i === index ? !value : value)),
+    )
+    setCageFit(null)
+    setCageMessage(null)
+  }
+
+  async function fitCageCorners() {
+    const points = cageCorners.map((point, index) =>
+      point ?? (cageIgnored[index] ? { x: 0, y: 0, z: 0 } : null),
+    )
+    if (points.some((point) => point === null)) {
+      setCageMessage('Record all reachable corners first.')
+      return
+    }
+    const usable = points as PickPathVec3[]
+    const ignored = cageIgnored.flatMap((value, index) => (value ? [index] : []))
+    setCageFitPending(true)
+    try {
+      const result = await api.fitArmCage(usable, {
+        opening_margin: pathCage.opening_margin,
+        clearance_m: pathCage.clearance_m,
+        front_top_open: pathCage.front_top_open ?? true,
+        ignored_corners: ignored,
+      })
+      setCageFit(result)
+      setPathCage((current) => ({ ...current, ...result.cage }))
+      const swapped =
+        !!result.fit.reordered_corners?.includes(2) &&
+        !!result.fit.reordered_corners?.includes(3)
+      if (swapped) {
+        setCageCorners((current) => {
+          const next = [...current]
+          ;[next[2], next[3]] = [next[3], next[2]]
+          return next
+        })
+      }
+      const notes: string[] = []
+      if (ignored.length) {
+        notes.push(`derived ${ignored.map((index) => index + 1).join(', ')}`)
+      }
+      if (swapped) notes.push('swapped BR/BL bottom')
+      setCageMessage(
+        `Box fitted ${Math.round(result.fit.width_m * 1000)} × ${Math.round(
+          result.fit.depth_m * 1000,
+        )} × ${Math.round(result.fit.height_m * 1000)} mm${
+          notes.length ? ` · ${notes.join(' · ')}` : ''
+        }`,
+      )
+      addLog(
+        `Cage box fitted from 8 corners · yaw ${result.fit.yaw_deg.toFixed(1)}°`,
+        'success',
+      )
+    } catch (err) {
+      setCageMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCageFitPending(false)
+    }
+  }
+
   async function savePose() {
     const name = poseName.trim()
     if (!name) {
@@ -875,6 +1379,602 @@ export function Arm() {
             </button>
           </div>
           {visionMessage && <span className="faint">{visionMessage}</span>}
+        </div>
+      </Card>
+
+      <Card
+        title="Pick path (dry-run)"
+        hint="start → home → [via] → gate → approach → target · no motion is sent"
+        right={
+          <Badge tone={pathResult ? (pathResult.ok ? 'green' : 'red') : 'grey'} dot>
+            {pathResult ? (pathResult.ok ? 'clear' : 'blocked') : 'not planned'}
+          </Badge>
+        }
+      >
+        <div className="stack">
+          <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>
+            The planner closes the gripper at the start, transits through home, then routes
+            through the cage opening (gate) and moves horizontally into the placement point.
+            A via point is optional. Cage pose is in the arm base frame; yaw −90° means the
+            opening faces the arm and depth runs away from it.
+          </p>
+          <div className="row" style={{ gap: 8 }}>
+            <label className="row" style={{ gap: 5, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={useCurrentStart}
+                onChange={(event) => setUseCurrentStart(event.target.checked)}
+              />
+              Start = current pose
+            </label>
+            {!useCurrentStart && (
+              <button
+                className="btn sm"
+                onClick={() => status?.pose && setPathStart({ ...status.pose })}
+                disabled={!status?.pose}
+              >
+                Fill start from current
+              </button>
+            )}
+            {lastStart && (
+              <button
+                className="btn sm"
+                onClick={() => {
+                  setPathStart({ ...lastStart })
+                  setUseCurrentStart(false)
+                }}
+              >
+                Use last start
+              </button>
+            )}
+            {lastStart && (
+              <span className="faint" style={{ fontSize: 11 }}>
+                last: {(lastStart.x * 1000).toFixed(0)},{' '}
+                {(lastStart.y * 1000).toFixed(0)}, {(lastStart.z * 1000).toFixed(0)} mm
+              </span>
+            )}
+          </div>
+          {!useCurrentStart && (
+            <PoseEditor title="Start" pose={pathStart} onChange={setPathStart} />
+          )}
+          <div className="row" style={{ gap: 8 }}>
+            <label className="row" style={{ gap: 5, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={useHome}
+                onChange={(event) => setUseHome(event.target.checked)}
+              />
+              Go via home
+            </label>
+            <button
+              className="btn sm"
+              onClick={() => {
+                if (status?.pose) {
+                  setPathHome({ ...status.pose })
+                  setHomeRecorded(true)
+                }
+              }}
+              disabled={!status?.pose}
+            >
+              Home = current
+            </button>
+            {homeRecorded && (
+              <span className="faint" style={{ fontSize: 11 }}>
+                home: {(pathHome.x * 1000).toFixed(0)},{' '}
+                {(pathHome.y * 1000).toFixed(0)}, {(pathHome.z * 1000).toFixed(0)} mm
+              </span>
+            )}
+          </div>
+          {useHome && !homeRecorded && (
+            <span className="faint" style={{ fontSize: 11.5 }}>
+              Click <b>Home / fold</b> first, then <b>Home = current</b>.
+            </span>
+          )}
+          {useHome && homeRecorded && (
+            <PoseEditor title="Home" pose={pathHome} onChange={setPathHome} />
+          )}
+          <div className="row" style={{ gap: 8 }}>
+            <label className="row" style={{ gap: 5, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={useVia}
+                onChange={(event) => setUseVia(event.target.checked)}
+              />
+              Use via point
+            </label>
+          </div>
+          {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
+          <PoseEditor title="Grasp target" pose={pathTarget} onChange={setPathTarget} />
+          <div className="row" style={{ gap: 6 }}>
+            <button className="btn sm" onClick={setTargetToCageCentre}>
+              Target = cage floor centre
+            </button>
+            <span className="faint" style={{ fontSize: 11.5 }}>
+              uses the current cage geometry · Z is 100 mm above the floor, edit it if needed
+            </span>
+          </div>
+          <div className="row" style={{ gap: 6 }}>
+            <NumberField
+              label="Approach (m)"
+              value={pathApproach}
+              step={0.01}
+              onChange={setPathApproach}
+            />
+            <NumberField
+              label="Gate clearance (m)"
+              value={pathGateClearance}
+              step={0.01}
+              onChange={setPathGateClearance}
+            />
+            {useVia && (
+              <button
+                className="btn sm"
+                onClick={() => status?.pose && setPathVia({ ...status.pose })}
+                disabled={!status?.pose}
+              >
+                Via = current
+              </button>
+            )}
+            <button
+              className="btn sm"
+              onClick={() => void fillTargetFromQr()}
+              disabled={!qr?.ok || !qr.center}
+            >
+              Target XY from QR
+            </button>
+          </div>
+
+          <details>
+            <summary className="muted" style={{ cursor: 'pointer', fontSize: 12.5 }}>
+              Cage geometry (dimensions or 8 taught corners)
+            </summary>
+            <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Teach 8 corners (preferred; overrides dimensions)
+              </span>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                Order: front-left-bottom, front-right-bottom, back-right-bottom,
+                back-left-bottom, then the same four on top. The planner checks the 11 edges;
+                the front-top edge is ignored because the cage is open there. BR top / BL top
+                are unreachable, so they are ignored by default and derived from the other six.
+              </span>
+              <div className="grid cols-4" style={{ gap: 6 }}>
+                {CORNER_LABELS.map((label, index) => {
+                  const point = cageCorners[index]
+                  const ignored = cageIgnored[index]
+                  return (
+                    <div key={label} className="stack" style={{ gap: 4 }}>
+                      <span className="faint" style={{ fontSize: 11 }}>
+                        {label}
+                        {ignored ? ' · ignored' : ''}
+                      </span>
+                      <span
+                        className="mono"
+                        style={{ fontSize: 11, opacity: ignored ? 0.45 : 1 }}
+                      >
+                        {point
+                          ? `${(point.x * 1000).toFixed(0)}, ${(point.y * 1000).toFixed(
+                              0,
+                            )}, ${(point.z * 1000).toFixed(0)} mm`
+                          : '—'}
+                      </span>
+                      <button
+                        className="btn sm"
+                        onClick={() => recordCageCorner(index)}
+                        disabled={!status?.pose || status.busy}
+                      >
+                        Record
+                      </button>
+                      <label
+                        className="row"
+                        style={{ gap: 4, fontSize: 10.5, color: 'var(--text-dim)' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={ignored}
+                          disabled={index < 6}
+                          onChange={() => toggleCageIgnored(index)}
+                        />
+                        ignore
+                      </label>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="row" style={{ gap: 6 }}>
+                <button
+                  className="btn sm primary"
+                  onClick={() => void fitCageCorners()}
+                  disabled={
+                    cageFitPending ||
+                    cageCorners.some((point, index) => !point && !cageIgnored[index])
+                  }
+                >
+                  {cageFitPending ? 'Fitting…' : 'Fit box from 8 corners'}
+                </button>
+                <button className="btn sm" onClick={clearCageCorners}>
+                  Clear corners
+                </button>
+                {cageFit && (
+                  <span className="faint" style={{ fontSize: 11.5 }}>
+                    {cageFit.fit.width_m.toFixed(3)} × {cageFit.fit.depth_m.toFixed(3)} ×{' '}
+                    {cageFit.fit.height_m.toFixed(3)} m · yaw{' '}
+                    {cageFit.fit.yaw_deg.toFixed(1)}°
+                  </span>
+                )}
+              </div>
+              {cageFit && cageFit.fit.warnings.length > 0 && (
+                <span style={{ color: 'var(--amber)', fontSize: 11.5 }}>
+                  {cageFit.fit.warnings.join(' · ')}
+                </span>
+              )}
+              {cageFit && (
+                <span className="faint" style={{ fontSize: 11 }}>
+                  Edge spread: W {Math.round(cageFit.fit.edge_spread_m.width_m * 1000)} mm · D{' '}
+                  {Math.round(cageFit.fit.edge_spread_m.depth_m * 1000)} mm · H{' '}
+                  {Math.round(cageFit.fit.edge_spread_m.height_m * 1000)} mm · orthogonality{' '}
+                  {cageFit.fit.orthogonality.toFixed(2)}
+                </span>
+              )}
+              {cageFit &&
+                cageFit.fit.reconstructed_corners &&
+                cageFit.fit.reconstructed_corners.length > 0 && (
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    Derived:{' '}
+                    {cageFit.fit.reconstructed_corners
+                      .map((index) => CORNER_LABELS[index] ?? `#${index + 1}`)
+                      .join(', ')}
+                  </span>
+                )}
+              {cageFit &&
+                cageFit.fit.reordered_corners &&
+                cageFit.fit.reordered_corners.length > 0 && (
+                  <span style={{ color: 'var(--amber)', fontSize: 11 }}>
+                    Reordered:{' '}
+                    {cageFit.fit.reordered_corners
+                      .map((index) => CORNER_LABELS[index] ?? `#${index + 1}`)
+                      .join(', ')}
+                  </span>
+                )}
+              {cageFit && cageFit.fit.fit_method !== 'bottom_corners_plus_height' && (
+                <span style={{ color: 'var(--amber)', fontSize: 11 }}>
+                  Old cage fit; click Fit box from 8 corners again.
+                </span>
+              )}
+            </div>
+            <p className="faint" style={{ margin: '8px 0 0', fontSize: 11.5 }}>
+              No ruler: jog the tool flange to the opening center, record it, then move straight
+              back along the opening normal (~80 mm) and record the front point. Yaw and gate
+              clearance are derived from the two points. Use the same reference for both records
+              (flange, not gripper tip).
+            </p>
+            <div className="row" style={{ gap: 6, marginTop: 6 }}>
+              <button
+                className="btn sm"
+                onClick={recordCageCenter}
+                disabled={!status?.pose || status.busy}
+              >
+                Record center = current
+              </button>
+              <button
+                className="btn sm"
+                onClick={recordCageFront}
+                disabled={!cageCenterRecorded || !status?.pose || status.busy}
+              >
+                Record front = current
+              </button>
+              {cageMessage && (
+                <span className="faint" style={{ fontSize: 11.5 }}>
+                  {cageMessage}
+                </span>
+              )}
+            </div>
+            {cageFront && (
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                Front point: {cageFront.x.toFixed(3)}, {cageFront.y.toFixed(3)},{' '}
+                {cageFront.z.toFixed(3)} m
+              </span>
+            )}
+            <div className="row" style={{ gap: 6, marginTop: 8 }}>
+              <NumberField
+                label="Cage X (m)"
+                value={pathCage.x}
+                onChange={(value) => setPathCage((current) => ({ ...current, x: value }))}
+              />
+              <NumberField
+                label="Cage Y (m)"
+                value={pathCage.y}
+                onChange={(value) => setPathCage((current) => ({ ...current, y: value }))}
+              />
+              <NumberField
+                label="Cage Z (m)"
+                value={pathCage.z}
+                onChange={(value) => setPathCage((current) => ({ ...current, z: value }))}
+              />
+              <NumberField
+                label="Yaw (°)"
+                value={pathCage.yaw}
+                step={1}
+                onChange={(value) => setPathCage((current) => ({ ...current, yaw: value }))}
+              />
+            </div>
+            <div className="row" style={{ gap: 6, marginTop: 6 }}>
+              <NumberField
+                label="Width (m)"
+                value={pathCage.width}
+                onChange={(value) => setPathCage((current) => ({ ...current, width: value }))}
+              />
+              <NumberField
+                label="Depth (m)"
+                value={pathCage.depth}
+                onChange={(value) => setPathCage((current) => ({ ...current, depth: value }))}
+              />
+              <NumberField
+                label="Height (m)"
+                value={pathCage.height}
+                onChange={(value) => setPathCage((current) => ({ ...current, height: value }))}
+              />
+              <NumberField
+                label="Opening margin (m)"
+                value={pathCage.opening_margin}
+                onChange={(value) =>
+                  setPathCage((current) => ({ ...current, opening_margin: value }))
+                }
+              />
+              <NumberField
+                label="Clearance (m)"
+                value={pathCage.clearance_m}
+                onChange={(value) =>
+                  setPathCage((current) => ({ ...current, clearance_m: value }))
+                }
+              />
+            </div>
+          </details>
+
+          <div className="row">
+            <button
+              className="btn primary"
+              onClick={() => void planPickPath()}
+              disabled={pathPending}
+            >
+              {pathPending ? 'Planning…' : 'Plan dry-run'}
+            </button>
+            {pathError && <span style={{ color: 'var(--red)', fontSize: 12 }}>{pathError}</span>}
+          </div>
+
+          <div
+            className="stack"
+            style={{
+              gap: 6,
+              borderTop: '1px solid var(--border-soft)',
+              paddingTop: 10,
+            }}
+          >
+            <span className="muted" style={{ fontSize: 12 }}>
+              Execute (moves the arm)
+            </span>
+            <div className="row" style={{ gap: 6 }}>
+              <NumberField
+                label="Pull back (m)"
+                value={execRetract}
+                step={0.01}
+                onChange={setExecRetract}
+              />
+              <NumberField
+                label="Home lift (m)"
+                value={execHomeLift}
+                step={0.01}
+                onChange={setExecHomeLift}
+              />
+              <NumberField
+                label="Speed (%)"
+                value={execSpeed}
+                step={1}
+                onChange={setExecSpeed}
+              />
+              <label className="row" style={{ gap: 5, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={preserveOrientation}
+                  onChange={(event) => setPreserveOrientation(event.target.checked)}
+                />
+                Keep gripper level
+              </label>
+              <label className="row" style={{ gap: 5, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={foldJ2ToMin}
+                  onChange={(event) => setFoldJ2ToMin(event.target.checked)}
+                />
+                Fold J2 to min
+              </label>
+              <label className="row" style={{ gap: 5, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={returnHomeAfter}
+                  onChange={(event) => setReturnHomeAfter(event.target.checked)}
+                />
+                Return home after
+              </label>
+              <button
+                className="btn danger"
+                onClick={() => void executePickPlace()}
+                disabled={
+                  execPending ||
+                  !status?.connected ||
+                  !!status?.fault ||
+                  !!status?.busy ||
+                  !!status?.learning_mode ||
+                  !!status?.calibration_needed ||
+                  !(status?.tool ?? '').includes('GRIPPER')
+                }
+              >
+                {execPending ? 'Executing…' : 'Execute pick & place'}
+              </button>
+            </div>
+            <span className="faint" style={{ fontSize: 11.5 }}>
+              Starts from the current pose: closes the gripper, pulls the object horizontally
+              back toward the base, lowers at that pulled-back position, moves to the home X/Y
+              at the safe height, keeps the gripper level, follows the checked safe-home →
+              cage-centre path, then opens the gripper.
+            </span>
+            {execError && (
+              <span style={{ color: 'var(--red)', fontSize: 12 }}>{execError}</span>
+            )}
+            {execResult && (
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Step</th>
+                    <th>Result</th>
+                    <th>Pose</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {execResult.steps.map((step, index) => (
+                    <tr key={`${step.step}-${index}`}>
+                      <td className="mono">
+                        {step.step}
+                        {step.angle_deg != null
+                          ? ` · J2 ${step.angle_deg.toFixed(1)}°`
+                          : ''}
+                      </td>
+                      <td>
+                        <Badge tone={step.ok ? 'green' : 'red'}>
+                          {step.ok ? 'ok' : 'fail'}
+                        </Badge>
+                      </td>
+                      <td className="mono">
+                        {step.pose
+                          ? `${(step.pose.x * 1000).toFixed(0)}, ${(
+                              step.pose.y * 1000
+                            ).toFixed(0)}, ${(step.pose.z * 1000).toFixed(0)} mm`
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {execResult && execResult.plan && (
+              <div className="stack" style={{ gap: 4 }}>
+                {execResult.plan.warnings.length > 0 && (
+                  <span className="faint" style={{ fontSize: 11.5 }}>
+                    plan warnings: {execResult.plan.warnings.join(' · ')}
+                  </span>
+                )}
+                {execResult.plan.segments.map((segment, index) => (
+                  <span
+                    key={`${segment.from}-${segment.to}-${index}`}
+                    className="faint"
+                    style={{
+                      fontSize: 11.5,
+                      color: segment.collision ? 'var(--red)' : undefined,
+                    }}
+                  >
+                    {segment.from} → {segment.to}:{' '}
+                    {segment.collision ? segment.issues.join('; ') : 'clear'}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {pathResult && (
+            <div className="stack" style={{ gap: 8 }}>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                source: {pathResult.cage_source ?? 'dimensions'}
+                {pathResult.cage_fit
+                  ? ` · ${pathResult.cage_fit.width_m.toFixed(3)} × ${pathResult.cage_fit.depth_m.toFixed(3)} × ${pathResult.cage_fit.height_m.toFixed(3)} m · yaw ${pathResult.cage_fit.yaw_deg.toFixed(1)}°`
+                  : ''}
+              </span>
+              {pathResult.actions && pathResult.actions.length > 0 && (
+                <span className="faint" style={{ fontSize: 11.5 }}>
+                  Actions:{' '}
+                  {pathResult.actions
+                    .map((action) => `${action.action} @ ${action.at}`)
+                    .join(' · ')}
+                </span>
+              )}
+              {pathResult.warnings.length > 0 && (
+                <span className="faint" style={{ fontSize: 12 }}>
+                  {pathResult.warnings.join(' · ')}
+                </span>
+              )}
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Point</th>
+                    <th>X / Y / Z (mm)</th>
+                    <th>Zone</th>
+                    <th>Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pathResult.points.map((point, index) => (
+                    <tr key={`${point.kind}-${index}`}>
+                      <td className="mono">{point.kind}</td>
+                      <td className="mono">
+                        {(point.pose.x * 1000).toFixed(0)} /{' '}
+                        {(point.pose.y * 1000).toFixed(0)} /{' '}
+                        {(point.pose.z * 1000).toFixed(0)}
+                      </td>
+                      <td>
+                        <Badge
+                          tone={
+                            point.zone === 'inside'
+                              ? 'cyan'
+                              : point.zone === 'gate'
+                                ? 'amber'
+                                : 'grey'
+                          }
+                        >
+                          {point.zone}
+                        </Badge>
+                      </td>
+                      <td className="faint" style={{ fontSize: 11.5 }}>
+                        {point.issues.join('; ') || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Segment</th>
+                    <th>Length</th>
+                    <th>Min clearance</th>
+                    <th>Result</th>
+                    <th>Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pathResult.segments.map((segment, index) => (
+                    <tr key={`${segment.from}-${segment.to}-${index}`}>
+                      <td className="mono">
+                        {segment.from} → {segment.to}
+                      </td>
+                      <td className="mono">{(segment.length_m * 1000).toFixed(0)} mm</td>
+                      <td className="mono">
+                        {segment.min_clearance_m != null
+                          ? `${(segment.min_clearance_m * 1000).toFixed(0)} mm`
+                          : '—'}
+                      </td>
+                      <td>
+                        <Badge tone={segment.collision ? 'red' : 'green'}>
+                          {segment.collision ? 'collision' : 'clear'}
+                        </Badge>
+                      </td>
+                      <td className="faint" style={{ fontSize: 11.5 }}>
+                        {segment.issues.join('; ') || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </Card>
 

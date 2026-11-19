@@ -1,3 +1,12 @@
 # Install into the `ned` conda env (which already has pyniryo==1.1.2).
 fastapi>=0.115
 uvicorn[standard]>=0.32
+
+# QR detection and the 6-point pixel->arm calibration live in arm_server.py,
+# so OpenCV is needed in the same env as the FastAPI bridge.
+opencv-python-headless>=4.9
+
+# Real-arm TCP client (Ned1). The `ned` env already ships it; on a fresh env:
+#   python -m pip install pyniryo==1.1.2 --no-deps
+# pyniryo declares opencv-python (GUI build), which would collide with the
+# headless wheel above; --no-deps reuses opencv-python-headless instead.

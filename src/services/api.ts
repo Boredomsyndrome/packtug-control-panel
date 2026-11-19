@@ -113,6 +113,143 @@ export interface VisionMapping {
   y: number
 }
 
+export interface PickPathVec3 {
+  x: number
+  y: number
+  z: number
+}
+
+/** Cage pose in the arm base frame (metres, degrees) plus the outer box. */
+export interface CageGeometry {
+  x: number
+  y: number
+  z: number
+  yaw: number
+  width: number
+  depth: number
+  height: number
+  opening_margin: number
+  clearance_m: number
+  /** the real cage has no front-top bar */
+  front_top_open?: boolean
+}
+
+export interface CageFitInfo {
+  width_m: number
+  depth_m: number
+  height_m: number
+  yaw_deg: number
+  origin: PickPathVec3
+  center: PickPathVec3
+  edge_spread_m: { width_m: number; depth_m: number; height_m: number }
+  orthogonality: number
+  fit_method?: string
+  warnings: string[]
+  ignored_corners?: number[]
+  reconstructed_corners?: number[]
+  reordered_corners?: number[]
+}
+
+export interface CageFitResult {
+  ok: boolean
+  cage: CageGeometry
+  fit: CageFitInfo
+}
+
+export interface PickPathRequest {
+  /** null = use the current arm pose */
+  start?: ArmPose | null
+  /** omitted = no via point */
+  via?: ArmPose
+  /** optional home transit between pick and place */
+  home?: ArmPose
+  target: ArmPose
+  approach_m?: number
+  gate_clearance_m?: number
+  cage?: CageGeometry
+  /** eight taught corners override cage pose/size */
+  corners?: PickPathVec3[]
+  /** corner indices to ignore (only 6 and 7 are supported) */
+  ignored_corners?: number[]
+}
+
+export interface PickPathPoint {
+  kind: string
+  pose: ArmPose
+  zone: 'outside' | 'inside' | 'gate'
+  reach_m: number
+  issues: string[]
+}
+
+export interface PickPathSegment {
+  from: string
+  to: string
+  length_m: number
+  min_clearance_m: number | null
+  collision: boolean
+  issues: string[]
+}
+
+export interface PickPathResult {
+  ok: boolean
+  dry_run: boolean
+  cage_source?: 'dimensions' | 'corners'
+  cage_fit?: CageFitInfo | null
+  points: PickPathPoint[]
+  segments: PickPathSegment[]
+  warnings: string[]
+  actions?: Array<{ at: string; action: string }>
+  opening?: {
+    center: PickPathVec3
+    gate: PickPathVec3
+    normal_out: PickPathVec3
+    width_m: number
+    height_m: number
+    front_top_open?: boolean
+  }
+  limits?: { max_reach_m: number; z_min_m: number; z_max_m: number }
+}
+
+export interface ExecutePickStep {
+  step: string
+  ok: boolean
+  percent?: number
+  pose?: ArmPose
+  angle_deg?: number
+  requested_deg?: number
+  substeps?: number
+  skipped?: boolean
+}
+
+export interface ExecutePickResult {
+  ok: boolean
+  stage: string
+  steps: ExecutePickStep[]
+  retract?: PickPathResult
+  plan?: PickPathResult
+  error?: string
+}
+
+export interface ExecutePickRequest {
+  target: ArmPose
+  /** recorded home pose; execution moves to home + home_lift_m */
+  home?: ArmPose
+  home_lift_m?: number
+  /** horizontal pull-back distance toward the base before lowering */
+  retract_m?: number
+  /** keep the gripper at its current attitude (no orient rotation) */
+  preserve_orientation?: boolean
+  /** drive joint 2 toward its minimum angle after the safe home point */
+  fold_j2_to_min?: boolean
+  approach_m?: number
+  gate_clearance_m?: number
+  cage?: CageGeometry
+  corners?: PickPathVec3[]
+  ignored_corners?: number[]
+  speed_percent?: number
+  return_home_after?: boolean
+}
+
 export interface ArmPosePreset {
   name: string
   joints_deg: number[]
@@ -377,6 +514,32 @@ export const api = {
 
   async mapVisionPixel(x: number, y: number): Promise<VisionMapping> {
     return jsonRequest<VisionMapping>('/vision/map', { x, y })
+  },
+
+  /**
+   * Dry-run Cartesian pick path with cage frame clearance checks.
+   * Always live: the planner needs the bridge's current pose and limits.
+   */
+  async planArmPickPath(request: PickPathRequest): Promise<PickPathResult> {
+    return jsonRequest<PickPathResult>('/arm/pick_path', request)
+  },
+
+  /** Fit an ideal cage box to eight taught corners (no motion). */
+  async fitArmCage(
+    points: PickPathVec3[],
+    options?: {
+      opening_margin?: number
+      clearance_m?: number
+      front_top_open?: boolean
+      ignored_corners?: number[]
+    },
+  ): Promise<CageFitResult> {
+    return jsonRequest<CageFitResult>('/arm/cage_fit', { points, ...options })
+  },
+
+  /** Blocking pick/place: close at start, home, place at target, open. */
+  async executeArmPick(request: ExecutePickRequest): Promise<ExecutePickResult> {
+    return jsonRequest<ExecutePickResult>('/arm/execute_pick', request)
   },
 
   async connectArm(ip: string): Promise<ArmStatus> {

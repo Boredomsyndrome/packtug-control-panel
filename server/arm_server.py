@@ -80,7 +80,7 @@ MAX_REQUEST_DEG = 60.0    # largest joint change accepted per manual command
 MAX_POSE_DEG = 180.0      # largest joint change when recalling a saved pose
 MIN_POSE_Z_M = 0.02       # lowest tool z accepted for a Cartesian target
 MAX_POSE_Z_M = 0.50       # highest tool z accepted for a Cartesian target
-MAX_VELOCITY = 5
+MAX_VELOCITY = 20
 MAX_VELOCITY_LIMIT = 20
 POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
 SEQUENCES_FILE = Path(__file__).resolve().parent / "arm_sequences.json"
@@ -1027,11 +1027,37 @@ class ArmController:
                     self._record_motion_fault_locked(exc, actual)
                     with self._state:
                         self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
-                else:
-                    with self._state:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        if type(exc).__name__ in CONNECTION_ERRORS:
-                            self.connected = False
+                    raise HTTPException(502, self.last_error) from exc
+                if "goal has been aborted" in str(exc).lower():
+                    log.warning(
+                        "linear pose aborted; retrying with IK + joint-space path"
+                    )
+                    try:
+                        with self._socket_timeout(READ_TIMEOUT_S):
+                            joints = self._robot.inverse_kinematics(
+                                x,
+                                y,
+                                z,
+                                math.radians(roll_deg),
+                                math.radians(pitch_deg),
+                                math.radians(yaw_deg),
+                            )
+                        target_deg = [math.degrees(float(v)) for v in joints]
+                        return self._move_locked(target_deg, max_delta=MAX_POSE_DEG)
+                    except Exception as fallback_exc:
+                        log.exception("joint-space pose fallback failed")
+                        actual = self._read_after_fault_locked()
+                        self._record_motion_fault_locked(fallback_exc, actual)
+                        with self._state:
+                            self.last_error = (
+                                self.fault
+                                or f"{type(fallback_exc).__name__}: {fallback_exc}"
+                            )
+                        raise HTTPException(502, self.last_error) from fallback_exc
+                with self._state:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        self.connected = False
                 raise HTTPException(502, self.last_error) from exc
             finally:
                 with self._state:

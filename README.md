@@ -84,7 +84,7 @@ Open `http://127.0.0.1:8020/arm`. Connection addresses: WiFi hotspot
 `10.10.10.10`, direct Ethernet `169.254.200.200`, and Jetson relay
 `127.0.0.1` (requires the local SSH tunnel to port `40001`).
 
-Safety: the bridge caps the arm at **1–20% speed** (default 5%), accepts at most
+Safety: the bridge caps the arm at **1–20% speed** (default 20%), accepts at most
 **60° per command**, without internal 15° subdivision. This kit has **no
 hardware E-stop**, so keep the workspace clear and a hand on the power switch.
 Dragging a joint slider commits when you release it. **Manual pose** releases the

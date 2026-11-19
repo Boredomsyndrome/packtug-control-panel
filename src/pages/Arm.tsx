@@ -1203,7 +1203,7 @@ export function Arm() {
     <>
       <PageHeader
         title="Arm Control"
-        desc="Niryo Ned1 joint terminal over PyNiryo. Speed 1–20% (default 5%), ≤60° per command."
+        desc="Niryo Ned1 joint terminal over PyNiryo. Speed 1–20% (default 20%), ≤60° per command."
         actions={
           <>
             {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}

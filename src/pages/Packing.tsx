@@ -9,10 +9,11 @@ import {
   CAGE_STORAGE_KEY,
   placementToArmTarget,
   placementToLocalTarget,
+  placementTargetIssues,
   type ArmTargetFromPacking,
   type TargetReference,
 } from '../lib/digitalTwin'
-import type { CageGeometry } from '../services/api'
+import type { CageGeometry, CageFitResult } from '../services/api'
 
 export function Packing() {
   const { orderId } = useParams()
@@ -27,14 +28,25 @@ export function Packing() {
   const [playing, setPlaying] = useState(true)
   const [speed, setSpeed] = useState(1)
   const [twinCage, setTwinCage] = useState<CageGeometry | null>(null)
+  const [teachingIssue, setTeachingIssue] = useState<string | null>(null)
   const [twinSeq, setTwinSeq] = useState<number | null>(null)
   const [twinReference, setTwinReference] = useState<TargetReference>('web')
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(CAGE_STORAGE_KEY)
-      const parsed = raw ? (JSON.parse(raw) as { cage?: CageGeometry }) : null
+      const parsed = raw ? (JSON.parse(raw) as {
+        cage?: CageGeometry; corners?: Array<unknown | null>; fit?: CageFitResult | null
+      }) : null
       if (parsed?.cage) setTwinCage(parsed.cage)
+      if (parsed?.corners?.some(point => point !== null)) {
+        if (!parsed.fit || !parsed.cage ||
+            (['x', 'y', 'z', 'yaw', 'width', 'depth', 'height'] as const).some(
+              key => Math.abs(parsed.fit!.cage[key] - parsed.cage![key]) > 1e-6,
+            )) {
+          setTeachingIssue('Cage teaching has changed. Fit the recorded corners in Arm before sending a packing target.')
+        }
+      }
     } catch {
       setTwinCage(null)
     }
@@ -68,6 +80,15 @@ export function Packing() {
     () => (twinPlacement && twinCage ? placementToArmTarget(twinPlacement, twinCage, twinReference) : null),
     [twinPlacement, twinCage, twinReference],
   )
+  const twinIssues = twinPlacement && twinCage
+    ? placementTargetIssues(twinPlacement, twinCage, twinReference)
+    : []
+  if (teachingIssue) twinIssues.push(teachingIssue)
+  const dimensionsDiffer = !!(plan && twinCage && (
+    Math.abs(plan.bin.w - twinCage.width * 1000) > 1 ||
+    Math.abs(plan.bin.d - twinCage.depth * 1000) > 1 ||
+    Math.abs(plan.bin.h - twinCage.height * 1000) > 1
+  ))
 
   // restart playback whenever the order, cage tab or plan changes
   useEffect(() => {
@@ -104,7 +125,7 @@ export function Packing() {
   }
 
   function sendTwinTarget() {
-    if (!twinPlacement || !twinTarget) return
+    if (!twinPlacement || !twinTarget || twinIssues.length) return
     const payload: ArmTargetFromPacking = {
       ...twinTarget,
       placementSeq: twinPlacement.seq,
@@ -357,6 +378,14 @@ export function Packing() {
                   </p>
                 ) : (
                   <div className="stack" style={{ fontSize: 12.5 }}>
+                      <div>
+                        Packing cage (W × D × H): {plan?.bin.w} × {plan?.bin.d} × {plan?.bin.h} mm<br />
+                        Taught cage: {(twinCage.width * 1000).toFixed(1)} × {(twinCage.depth * 1000).toFixed(1)} × {(twinCage.height * 1000).toFixed(1)} mm
+                      </div>
+                      {dimensionsDiffer && <p role="alert">
+                        Packing and taught dimensions differ. Targets use the taught front-left floor
+                        corner without scaling; each box is checked against the taught dimensions.
+                      </p>}
                     <div className="row between">
                       <span className="muted">Test box</span>
                       <select
@@ -398,12 +427,15 @@ export function Packing() {
                         </div>
                       </div>
                     </div>
-                    <button className="btn primary" onClick={sendTwinTarget} disabled={!twinTarget}>
+                    {twinIssues.map((issue) => <p key={issue} role="alert">{issue}</p>)}
+                    <button className="btn primary" onClick={sendTwinTarget} disabled={!twinTarget || twinIssues.length > 0}>
                       Send target to Arm →
                     </button>
                     <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
-                      The arm target is converted with the cage origin/yaw saved in Arm. Start and tool
-                      orientation must still be recorded manually.
+                      Packing coordinates start at the front-left floor corner; the saved Arm origin
+                      is the opening floor centre. Start
+                      position must still be recorded manually. Final attitude is level and aligned
+                      with the cage opening. Box-centre targets are geometric references, not calibrated grasp offsets.
                     </p>
                   </div>
                 )}

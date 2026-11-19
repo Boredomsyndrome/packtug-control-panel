@@ -157,6 +157,7 @@ export interface CageFitResult {
 }
 
 export interface PickPathRequest {
+  use_taught_final?: boolean
   /** null = use the current arm pose */
   start?: ArmPose | null
   /** omitted = no via point */
@@ -231,15 +232,16 @@ export interface ExecutePickResult {
 }
 
 export interface ExecutePickRequest {
+  use_taught_final?: boolean
   target: ArmPose
   /** recorded home pose; execution moves to home + home_lift_m */
   home?: ArmPose
   home_lift_m?: number
   /** horizontal pull-back distance toward the base before lowering */
   retract_m?: number
-  /** keep the gripper at its current attitude (no orient rotation) */
+    /** Legacy field; placement always levels and aligns the gripper. */
   preserve_orientation?: boolean
-  /** drive joint 2 toward its minimum angle after the safe home point */
+    /** Legacy field; true is rejected during level placement. */
   fold_j2_to_min?: boolean
   approach_m?: number
   gate_clearance_m?: number
@@ -521,7 +523,7 @@ export const api = {
    * Always live: the planner needs the bridge's current pose and limits.
    */
   async planArmPickPath(request: PickPathRequest): Promise<PickPathResult> {
-    return jsonRequest<PickPathResult>('/arm/pick_path', request)
+    return jsonRequest<PickPathResult>(request.use_taught_final ? '/arm/taught_pick_path' : '/arm/pick_path', request)
   },
 
   /** Fit an ideal cage box to eight taught corners (no motion). */
@@ -539,7 +541,7 @@ export const api = {
 
   /** Blocking pick/place: close at start, home, place at target, open. */
   async executeArmPick(request: ExecutePickRequest): Promise<ExecutePickResult> {
-    return jsonRequest<ExecutePickResult>('/arm/execute_pick', request)
+    return jsonRequest<ExecutePickResult>(request.use_taught_final ? '/arm/execute_taught_pick' : '/arm/execute_pick', request)
   },
 
   async connectArm(ip: string): Promise<ArmStatus> {

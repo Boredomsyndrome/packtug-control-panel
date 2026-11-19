@@ -277,6 +277,7 @@ class CageIn(BaseModel):
 
 
 class PickPathIn(BaseModel):
+    use_taught_final: bool = False
     """Dry-run Cartesian pick path request."""
 
     start: PoseIn | None = None
@@ -301,12 +302,14 @@ class CageFitIn(BaseModel):
 
 
 class ExecutePickIn(BaseModel):
+    use_taught_final: bool = False
     """Blocking pick/place: close, pull back, lower, safe-home, place, open."""
 
     target: PoseIn
     home: PoseIn | None = None
     home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
     retract_m: float = Field(default=0.08, ge=0.0, le=0.20)
+    # Legacy request field: placement is always level, regardless of this value.
     preserve_orientation: bool = True
     fold_j2_to_min: bool = False
     approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
@@ -944,6 +947,8 @@ class ArmController:
         roll_deg: float,
         pitch_deg: float,
         yaw_deg: float,
+        *,
+        strict_linear: bool = False,
     ) -> dict[str, Any]:
         """Linear Cartesian move with degrees converted to radians.
 
@@ -1037,7 +1042,7 @@ class ArmController:
                     with self._state:
                         self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
                     raise HTTPException(502, self.last_error) from exc
-                if "goal has been aborted" in str(exc).lower():
+                if "goal has been aborted" in str(exc).lower() and not strict_linear:
                     log.warning(
                         "linear pose aborted; retrying with IK + joint-space path"
                     )
@@ -1086,8 +1091,7 @@ class ArmController:
 
         The safe-home point is ``home + home_lift_m``. The tool is rotated to
         the placement attitude at that clear point, so the final approach is a
-        translation-only path. J2 folding is optional and happens after the
-        safe home point.
+        translation-only path. J2 folding is rejected for this operation.
         """
         steps: list[dict[str, Any]] = []
         try:
@@ -1103,10 +1107,6 @@ class ArmController:
                 raise HTTPException(502, "current pose is unavailable")
             start = _pose_dict(start_pose)
             target = _pose_dict(payload.target.model_dump())
-            if payload.preserve_orientation:
-                target["roll"] = start["roll"]
-                target["pitch"] = start["pitch"]
-                target["yaw"] = start["yaw"]
 
             if payload.corners is not None:
                 prepared, corner_meta = _prepare_cage_corners(
@@ -1124,6 +1124,22 @@ class ArmController:
                 cage = payload.cage
                 fit_meta = None
                 cage_source = "dimensions"
+            # Placement orientation is mandatory, including for legacy clients
+            # sending preserve_orientation=True.
+            target = _taught_final_pose() if payload.use_taught_final else _level_placement_pose(cage, target)
+            if payload.fold_j2_to_min:
+                raise HTTPException(422, "J2 folding is not supported during level placement")
+            if payload.home is None:
+                raise HTTPException(409, "record the home pose before execution")
+            # Reject an invalid placement before closing the gripper or moving.
+            target_issues = _cage_target_issues(cage, target)
+            if target_issues:
+                return {
+                    "ok": False,
+                    "stage": "target_check",
+                    "steps": [{"step": "target_check", "ok": False}],
+                    "error": "; ".join(target_issues) + "; arm has not moved",
+                }
             frame_segments = _cage_frame_segments(cage)
 
             # Find a horizontal pull-back path that avoids the cage frame.
@@ -1260,81 +1276,32 @@ class ArmController:
                 "x": home_base["x"],
                 "y": home_base["y"],
                 "z": safe_home_z,
-                "roll": start["roll"] if payload.preserve_orientation else target["roll"],
-                "pitch": start["pitch"] if payload.preserve_orientation else target["pitch"],
-                "yaw": start["yaw"] if payload.preserve_orientation else target["yaw"],
+                "roll": target["roll"],
+                "pitch": target["pitch"],
+                "yaw": target["yaw"],
             }
-            if not payload.preserve_orientation:
-                self.move_pose_deg(
-                    safe_home["x"],
-                    safe_home["y"],
-                    safe_home["z"],
-                    safe_home["roll"],
-                    safe_home["pitch"],
-                    safe_home["yaw"],
-                )
-                steps.append({"step": "orient", "ok": True, "pose": safe_home})
-
-            if payload.fold_j2_to_min:
-                j2_min = JOINT_LIMITS_DEG[1][0]
-                with self._state:
-                    current_joints = (
-                        list(self.joints_deg)
-                        if self.joints_deg is not None
-                        else None
-                    )
-                if current_joints is None:
-                    self.move_joint(2, j2_min)
-                    steps.append(
-                        {
-                            "step": "fold_j2_min",
-                            "ok": True,
-                            "angle_deg": j2_min,
-                        }
-                    )
-                else:
-                    probe = list(current_joints)
-                    safe_j2 = probe[1]
-                    angle = probe[1]
-                    while angle > j2_min + 1e-6:
-                        angle = max(j2_min, angle - 2.0)
-                        probe[1] = angle
-                        if tip_radius(probe) > self.max_reach_m + 1e-6:
-                            break
-                        safe_j2 = angle
-
-                    moves = 0
-                    current_j2 = current_joints[1]
-                    while abs(safe_j2 - current_j2) > 0.5 and moves < 6:
-                        step = max(-55.0, min(55.0, safe_j2 - current_j2))
-                        self.move_joint(2, current_j2 + step)
-                        current_j2 += step
-                        moves += 1
-
-                    if safe_j2 > j2_min + 0.5:
-                        warnings.append(
-                            f"J2 clamped to {safe_j2:.1f}° "
-                            f"(requested {j2_min:.1f}°) by max horizontal reach"
-                        )
-                    steps.append(
-                        {
-                            "step": "fold_j2_min",
-                            "ok": True,
-                            "angle_deg": safe_j2,
-                            "requested_deg": j2_min,
-                            "substeps": moves,
-                        }
-                    )
+            self.move_pose_deg(
+                safe_home["x"],
+                safe_home["y"],
+                safe_home["z"],
+                safe_home["roll"],
+                safe_home["pitch"],
+                safe_home["yaw"],
+                strict_linear=True,
+            )
+            steps.append({"step": "orient", "ok": True, "pose": safe_home})
 
             snapshot = self.snapshot()
             home_pose = snapshot.get("pose")
             if home_pose is None:
                 raise HTTPException(502, "home pose is unavailable")
+            _verify_placement_attitude(home_pose, target)
 
             plan = plan_pick_path(
                 PickPathIn(
                     start=PoseIn(**home_pose),
-                    target=payload.target,
+                    target=PoseIn(**target),
+                    use_taught_final=payload.use_taught_final,
                     approach_m=payload.approach_m,
                     gate_clearance_m=payload.gate_clearance_m,
                     cage=payload.cage,
@@ -1380,23 +1347,28 @@ class ArmController:
                     pose["roll"],
                     pose["pitch"],
                     pose["yaw"],
+                    strict_linear=True,
                 )
+                _verify_placement_attitude(self.snapshot().get("pose"), target)
                 steps.append(
                     {"step": f"move:{point['kind']}", "ok": True, "pose": pose}
                 )
 
+            # A successful motion response alone does not authorize release.
+            _verify_placement_attitude(self.snapshot().get("pose"), target)
             self._gripper_action(False)
             steps.append({"step": "open_gripper", "ok": True})
 
             if payload.return_home_after:
-                self.move_pose_deg(
-                    safe_home["x"],
-                    safe_home["y"],
-                    safe_home["z"],
-                    safe_home["roll"],
-                    safe_home["pitch"],
-                    safe_home["yaw"],
-                )
+                # Retrace the checked entry route, maintaining level attitude.
+                for point in reversed(plan["points"][:-1]):
+                    pose = {**point["pose"], **{key: target[key] for key in ("roll", "pitch", "yaw")}}
+                    self.move_pose_deg(
+                        pose["x"], pose["y"], pose["z"],
+                        pose["roll"], pose["pitch"], pose["yaw"],
+                        strict_linear=True,
+                    )
+                    _verify_placement_attitude(self.snapshot().get("pose"), target)
                 steps.append(
                     {"step": "return_safe_home", "ok": True, "pose": safe_home}
                 )
@@ -2850,6 +2822,43 @@ def _pose_dict(pose: dict[str, Any]) -> dict[str, float]:
     return {key: float(pose[key]) for key in ("x", "y", "z", "roll", "pitch", "yaw")}
 
 
+def _cage_target_issues(cage: CageIn, target: dict[str, float]) -> list[str]:
+    """Placement targets must be inside the taught cage with wall clearance."""
+    x, y, z = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
+    if not all(math.isfinite(value) for value in (x, y, z)):
+        return ["target coordinates must be finite"]
+    if not (-cage.width / 2 <= x <= cage.width / 2 and 0 < y < cage.depth and 0 <= z <= cage.height):
+        return [
+            "target is outside the taught cage "
+            f"(local x/y/z {x * 1000:.0f}/{y * 1000:.0f}/{z * 1000:.0f} mm); "
+            "check packing dimensions, opening-centre origin and cage teaching"
+        ]
+    gap = min(x + cage.width / 2, cage.width / 2 - x, cage.depth - y, z, cage.height - z)
+    if gap + 1e-9 < cage.clearance_m:
+        return [f"target wall clearance {gap * 1000:.0f} mm < {cage.clearance_m * 1000:.0f} mm"]
+    return []
+
+
+def _taught_final_pose() -> dict[str, float]:
+    record = json.loads((ROOT / "src/data/taughtFinalPose.json").read_text(encoding="utf-8-sig"))
+    return _pose_dict(record["pose"])
+
+
+def _level_placement_pose(cage: CageIn, pose: dict[str, float]) -> dict[str, float]:
+    # Ned side-entry convention already used by the panel: roll=180, pitch=0.
+    # Tool forward points along cage +Y, hence cage yaw + 90 degrees.
+    return {**pose, "roll": 180.0, "pitch": 0.0, "yaw": (cage.yaw + 270.0) % 360.0 - 180.0}
+
+
+def _verify_placement_attitude(actual: dict[str, float] | None, target: dict[str, float]) -> None:
+    if actual is None or any(
+        not math.isfinite(actual[key])
+        or abs((actual[key] - target[key] + 180) % 360 - 180) > 2.0
+        for key in ("roll", "pitch", "yaw")
+    ):
+        raise HTTPException(409, "placement attitude is not level/aligned within 2 degrees; gripper remains closed")
+
+
 def plan_pick_path(
     payload: PickPathIn,
     current_pose: dict[str, Any] | None,
@@ -2882,15 +2891,22 @@ def plan_pick_path(
 
     via = _pose_dict(payload.via.model_dump()) if payload.via is not None else None
     home = _pose_dict(payload.home.model_dump()) if payload.home is not None else None
-    target = _pose_dict(payload.target.model_dump())
+    target = _taught_final_pose() if payload.use_taught_final else _level_placement_pose(cage, _pose_dict(payload.target.model_dump()))
 
     w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
     target_local = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
     start_local = _world_to_cage(cage, (start["x"], start["y"], start["z"]))
-    target_inside = 0.0 < target_local[1] < d
+    target_inside = (
+        -w / 2 <= target_local[0] <= w / 2
+        and 0.0 < target_local[1] < d
+        and 0.0 <= target_local[2] <= h
+    )
+    target_issues = _cage_target_issues(cage, target)
     if via is not None:
         via_local = _world_to_cage(cage, (via["x"], via["y"], via["z"]))
         via_inside = 0.0 < via_local[1] < d
+        if via_inside:
+            via = _level_placement_pose(cage, via)
     else:
         via_local = None
         via_inside = False
@@ -2901,6 +2917,7 @@ def plan_pick_path(
     )
 
     warnings: list[str] = []
+    warnings.append("placement attitude locked to taught final pose" if payload.use_taught_final else "placement attitude locked: roll 180°, pitch 0°, yaw aligned with cage depth")
     if fit_meta:
         warnings.extend(fit_meta.get("warnings", []))
     if start_inside:
@@ -2917,7 +2934,7 @@ def plan_pick_path(
         if home_inside:
             warnings.append("home is inside the cage; move home outside the opening")
     if not target_inside:
-        warnings.append("target is outside the cage; the opening gate is not used")
+        warnings.append("target is outside the taught cage; correct the target before execution")
     z_open_hi = h if cage.front_top_open else h - margin
     if w - 2 * margin <= 0 or z_open_hi - margin <= 0:
         warnings.append("opening_margin is too large for the cage dimensions")
@@ -2993,12 +3010,14 @@ def plan_pick_path(
                 (pose["x"], pose["y"], pose["z"]),
             )
             > 1e-4
+            or any(abs((pose[key] - previous[key] + 180) % 360 - 180) > 1e-4
+                   for key in ("roll", "pitch", "yaw"))
         ):
             deduped.append((kind, pose))
     waypoints = deduped
 
     frame_segments = _cage_frame_segments(cage)
-    blocking = False
+    blocking = bool(target_issues)
     points: list[dict[str, Any]] = []
     for kind, pose in waypoints:
         local = _world_to_cage(cage, (pose["x"], pose["y"], pose["z"]))
@@ -3009,7 +3028,7 @@ def plan_pick_path(
         )
         zone = "gate" if abs(local[1]) <= 1e-6 else ("inside" if in_box else "outside")
         reach = math.hypot(pose["x"], pose["y"])
-        issues: list[str] = []
+        issues: list[str] = list(target_issues) if kind == "target" else []
         if reach > max_reach_m + 1e-6:
             issues.append(f"horizontal reach {reach:.3f} m > {max_reach_m:.3f} m")
         if not (MIN_POSE_Z_M <= pose["z"] <= MAX_POSE_Z_M):
@@ -3351,12 +3370,14 @@ def create_app(controller: ArmController) -> FastAPI:
         fit.update(meta)
         return {"ok": True, "cage": cage.model_dump(), "fit": fit}
 
+    @app.post("/api/arm/taught_pick_path")
     @app.post("/api/arm/pick_path")
     def arm_pick_path(body: PickPathIn) -> dict[str, Any]:
         """Dry-run Cartesian path with cage frame clearance checks (no motion)."""
         snapshot = controller.snapshot()
         return plan_pick_path(body, snapshot["pose"], float(snapshot["max_reach_m"]))
 
+    @app.post("/api/arm/execute_taught_pick")
     @app.post("/api/arm/execute_pick")
     def arm_execute_pick(body: ExecutePickIn) -> dict[str, Any]:
         """Close at the current pose, home, place at target, open (blocking)."""

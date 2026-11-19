@@ -16,6 +16,8 @@ import {
 import { Badge, Card, PageHeader } from '../components/ui'
 import { clock } from '../lib/format'
 import { ARM_TARGET_STORAGE_KEY, type ArmTargetFromPacking } from '../lib/digitalTwin'
+import { CAGE_BIN } from '../data/mock'
+import taughtFinal from '../data/taughtFinalPose.json'
 
 const JOINTS = [
   { id: 'J1', name: 'base' },
@@ -61,9 +63,9 @@ const DEFAULT_CAGE: CageGeometry = {
   y: 0,
   z: 0,
   yaw: -90,
-  width: 0.55,
-  depth: 0.25,
-  height: 0.40,
+  width: CAGE_BIN.w / 1000,
+  depth: CAGE_BIN.d / 1000,
+  height: CAGE_BIN.h / 1000,
   opening_margin: 0.02,
   clearance_m: 0.03,
   front_top_open: true,
@@ -126,10 +128,12 @@ function PoseEditor({
   title,
   pose,
   onChange,
+  positionOnly = false,
 }: {
   title: string
   pose: ArmPose
   onChange: (pose: ArmPose) => void
+  positionOnly?: boolean
 }) {
   return (
     <div className="stack" style={{ gap: 6 }}>
@@ -137,7 +141,7 @@ function PoseEditor({
         {title}
       </span>
       <div className="row" style={{ gap: 6 }}>
-        {POSE_FIELDS.map((field) => (
+        {POSE_FIELDS.filter((field) => !positionOnly || ['x', 'y', 'z'].includes(field.key)).map((field) => (
           <NumberField
             key={field.key}
             label={field.label}
@@ -233,7 +237,7 @@ export function Arm() {
         yaw: 0,
       },
   )
-  const [pathTarget, setPathTarget] = useState<ArmPose>({
+  const [, setPathTarget] = useState<ArmPose>({
     x: 0.40,
     y: -0.10,
     z: 0.10,
@@ -253,8 +257,6 @@ export function Arm() {
   const [execSpeed, setExecSpeed] = useState(5)
   const [execRetract, setExecRetract] = useState(0.08)
   const [execHomeLift, setExecHomeLift] = useState(0.08)
-  const [preserveOrientation, setPreserveOrientation] = useState(true)
-  const [foldJ2ToMin, setFoldJ2ToMin] = useState(false)
   const [returnHomeAfter, setReturnHomeAfter] = useState(false)
   const [execPending, setExecPending] = useState(false)
   const [execResult, setExecResult] = useState<ExecutePickResult | null>(null)
@@ -301,7 +303,7 @@ export function Arm() {
       const target = JSON.parse(raw) as ArmTargetFromPacking
       setPathTarget((current) => ({ ...current, x: target.x, y: target.y, z: target.z }))
       setTwinTargetNote(
-        `Packing box #${target.placementSeq} (${target.reference}) → target ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; orientation unchanged`,
+        `Packing box #${target.placementSeq} (${target.reference}) → target ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; level placement aligned with cage`,
       )
       localStorage.removeItem(ARM_TARGET_STORAGE_KEY)
     } catch {
@@ -780,7 +782,8 @@ export function Arm() {
         start: useCurrentStart ? null : pathStart,
         ...(useVia ? { via: pathVia } : {}),
         ...(useHome ? { home: pathHome } : {}),
-        target: pathTarget,
+        target: taughtFinal.pose,
+        use_taught_final: true,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
         cage: pathCage,
@@ -834,8 +837,8 @@ export function Arm() {
         '2. pull the object horizontally back toward the base,\n' +
         '3. lower in place at the pulled-back position,\n' +
         '4. move horizontally to the home X/Y at the safe height,\n' +
-        '5. keep the gripper at its current level attitude,\n' +
-        '6. follow the safe-home -> cage-centre path and open the gripper.\n\n' +
+        '5. level and align the gripper at safe home,\n' +
+        '6. follow the checked path to the target and verify the level attitude before opening.\n\n' +
         'Keep the workspace clear and a hand on the power switch. Continue?',
     )
     if (!confirmed) return
@@ -849,12 +852,11 @@ export function Arm() {
         return
       }
       const result = await api.executeArmPick({
-        target: pathTarget,
+        target: taughtFinal.pose,
+        use_taught_final: true,
         home: pathHome,
         home_lift_m: execHomeLift,
         retract_m: execRetract,
-        preserve_orientation: preserveOrientation,
-        fold_j2_to_min: foldJ2ToMin,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
         cage: pathCage,
@@ -1501,7 +1503,11 @@ export function Arm() {
             </label>
           </div>
           {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
-          <PoseEditor title="Grasp target" pose={pathTarget} onChange={setPathTarget} />
+          <p>Final target: {taughtFinal.pose.x.toFixed(4)}, {taughtFinal.pose.y.toFixed(4)}, {taughtFinal.pose.z.toFixed(4)} m · saved manual teaching</p>
+          <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
+            Final attitude locked: Roll {taughtFinal.pose.roll.toFixed(2)}° · Pitch {taughtFinal.pose.pitch.toFixed(2)}° · Yaw {taughtFinal.pose.yaw.toFixed(2)}°
+            {' '}from manual teaching. Attitude is checked before release (2° tolerance).
+          </p>
           {twinTargetNote && (
             <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
               {twinTargetNote}
@@ -1797,22 +1803,6 @@ export function Arm() {
               <label className="row" style={{ gap: 5, fontSize: 12 }}>
                 <input
                   type="checkbox"
-                  checked={preserveOrientation}
-                  onChange={(event) => setPreserveOrientation(event.target.checked)}
-                />
-                Keep gripper level
-              </label>
-              <label className="row" style={{ gap: 5, fontSize: 12 }}>
-                <input
-                  type="checkbox"
-                  checked={foldJ2ToMin}
-                  onChange={(event) => setFoldJ2ToMin(event.target.checked)}
-                />
-                Fold J2 to min
-              </label>
-              <label className="row" style={{ gap: 5, fontSize: 12 }}>
-                <input
-                  type="checkbox"
                   checked={returnHomeAfter}
                   onChange={(event) => setReturnHomeAfter(event.target.checked)}
                 />
@@ -1837,8 +1827,8 @@ export function Arm() {
             <span className="faint" style={{ fontSize: 11.5 }}>
               Starts from the current pose: closes the gripper, pulls the object horizontally
               back toward the base, lowers at that pulled-back position, moves to the home X/Y
-              at the safe height, keeps the gripper level, follows the checked safe-home →
-              cage-centre path, then opens the gripper.
+              at the safe height, levels and aligns the gripper, follows the checked safe-home →
+              target path, then verifies its attitude before opening the gripper.
             </span>
             {execError && (
               <span style={{ color: 'var(--red)', fontSize: 12 }}>{execError}</span>

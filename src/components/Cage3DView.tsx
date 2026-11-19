@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CagePlan, Placement, Size3, Vec3 } from '../types'
 import { hueForSku } from '../lib/format'
+import { CAGE_BIN } from '../data/mock'
 
 interface Face {
   points: Vec3[]
@@ -11,7 +12,7 @@ interface Face {
 }
 
 const LIGHT_DIR: Vec3 = { x: 0.35, y: -0.55, z: 0.76 }
-const DEFAULT_BIN: Size3 = { w: 550, d: 250, h: 400 }
+const DEFAULT_BIN: Size3 = CAGE_BIN
 
 const DROP_MS = 720
 const APPROACH_Y = 260

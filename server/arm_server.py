@@ -965,6 +965,15 @@ class ArmController:
                 if self.pose is not None and "z" in self.pose
                 else None
             )
+            start_orientation = (
+                (
+                    float(self.pose["roll"]),
+                    float(self.pose["pitch"]),
+                    float(self.pose["yaw"]),
+                )
+                if self.pose is not None
+                else None
+            )
         at_current_height = current_z is not None and abs(z - current_z) <= 1e-3
         if not (MIN_POSE_Z_M <= z <= MAX_POSE_Z_M) and not at_current_height:
             raise HTTPException(
@@ -1032,28 +1041,36 @@ class ArmController:
                     log.warning(
                         "linear pose aborted; retrying with IK + joint-space path"
                     )
-                    try:
-                        with self._socket_timeout(READ_TIMEOUT_S):
-                            joints = self._robot.inverse_kinematics(
-                                x,
-                                y,
-                                z,
-                                math.radians(roll_deg),
-                                math.radians(pitch_deg),
-                                math.radians(yaw_deg),
+                    orientations = [(roll_deg, pitch_deg, yaw_deg)]
+                    if start_orientation is not None:
+                        orientations.append(start_orientation)
+                    fallback_error: Exception | None = None
+                    for fallback_roll, fallback_pitch, fallback_yaw in orientations:
+                        try:
+                            with self._socket_timeout(READ_TIMEOUT_S):
+                                joints = self._robot.inverse_kinematics(
+                                    x,
+                                    y,
+                                    z,
+                                    math.radians(fallback_roll),
+                                    math.radians(fallback_pitch),
+                                    math.radians(fallback_yaw),
+                                )
+                            target_deg = [math.degrees(float(v)) for v in joints]
+                            return self._move_locked(
+                                target_deg, max_delta=MAX_POSE_DEG
                             )
-                        target_deg = [math.degrees(float(v)) for v in joints]
-                        return self._move_locked(target_deg, max_delta=MAX_POSE_DEG)
-                    except Exception as fallback_exc:
-                        log.exception("joint-space pose fallback failed")
-                        actual = self._read_after_fault_locked()
-                        self._record_motion_fault_locked(fallback_exc, actual)
-                        with self._state:
-                            self.last_error = (
-                                self.fault
-                                or f"{type(fallback_exc).__name__}: {fallback_exc}"
-                            )
-                        raise HTTPException(502, self.last_error) from fallback_exc
+                        except Exception as fallback_exc:
+                            fallback_error = fallback_exc
+                    log.warning(
+                        "joint-space pose fallback failed: %s", fallback_error
+                    )
+                    with self._state:
+                        self.last_error = (
+                            f"target pose has no reachable IK solution: "
+                            f"{fallback_error}"
+                        )
+                    raise HTTPException(502, self.last_error) from fallback_error
                 with self._state:
                     self.last_error = f"{type(exc).__name__}: {exc}"
                     if type(exc).__name__ in CONNECTION_ERRORS:

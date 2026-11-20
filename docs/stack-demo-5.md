@@ -48,7 +48,7 @@ For digital-twin pick/place planning, assume the gripper end is at the
 (x + w/2, y, z + h/2)
 ```
 
-The software keeps the gripper end horizontal (`roll 180`, `pitch 0`,
+The software keeps the gripper end horizontal (`roll 0`, `pitch 0`,
 `yaw = cage yaw + 90`). The physical demo block still has its gripper web at
 the hole centre; the front-face target is the planning convention and may
 need a fixture or TCP offset for the real tool.

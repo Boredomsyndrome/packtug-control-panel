@@ -77,8 +77,10 @@ export function Packing() {
   const twinPlacement = cage?.placements.find((p) => p.seq === twinSeq) ?? cage?.placements[0] ?? null
   const twinLocal = twinPlacement ? placementToLocalTarget(twinPlacement, twinReference) : null
   const twinTarget = useMemo(
-    () => (twinPlacement && twinCage ? placementToArmTarget(twinPlacement, twinCage, twinReference) : null),
-    [twinPlacement, twinCage, twinReference],
+    () => (twinPlacement && twinCage
+      ? placementToArmTarget(twinPlacement, twinCage, twinReference, (plan?.bin.w ?? twinCage.width * 1000) / 1000)
+      : null),
+    [twinPlacement, twinCage, twinReference, plan?.bin.w],
   )
   const twinIssues = twinPlacement && twinCage
     ? placementTargetIssues(twinPlacement, twinCage, twinReference)
@@ -383,8 +385,9 @@ export function Packing() {
                         Taught cage: {(twinCage.width * 1000).toFixed(1)} × {(twinCage.depth * 1000).toFixed(1)} × {(twinCage.height * 1000).toFixed(1)} mm
                       </div>
                       {dimensionsDiffer && <p role="alert">
-                        Packing and taught dimensions differ. Targets use the taught cage origin and
-                        width without scaling; each box is checked against the taught dimensions.
+                        Packing and taught dimensions differ. Targets use the taught cage origin, but
+                        X is centred with the packing plan width; each box is checked against the
+                        taught dimensions without scaling.
                       </p>}
                     <div className="row between">
                       <span className="muted">Test box</span>

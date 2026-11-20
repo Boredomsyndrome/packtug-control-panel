@@ -109,6 +109,59 @@ COLLISION_MARKERS = (
     "hardware error",
     "motor error",
 )
+HARDWARE_REFRESH_S = 2.0
+HARDWARE_ERROR_BITS = (
+    (0x20, "overload"),
+    (0x10, "electrical shock"),
+    (0x08, "encoder"),
+    (0x04, "overheating"),
+    (0x01, "input voltage"),
+)
+
+
+def decode_hardware_faults(
+    raw_errors: Any, motor_names: list[str] | None = None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Convert PyNiryo's per-motor hardware error codes into readable faults."""
+    if raw_errors is None:
+        raw_errors = []
+    elif isinstance(raw_errors, (str, bytes)):
+        raw_errors = [raw_errors]
+    else:
+        raw_errors = list(raw_errors)
+    names = [str(name) for name in (motor_names or [])]
+    faults: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_errors):
+        text = str(raw).strip()
+        if text.lower() in ("", "0", "none", "null"):
+            continue
+        try:
+            code: int | str = int(raw)
+        except (TypeError, ValueError):
+            code = text
+        reasons = (
+            [label for bit, label in HARDWARE_ERROR_BITS if code & bit]
+            if isinstance(code, int)
+            else [text]
+        )
+        if not reasons:
+            reasons = [f"error {code}"]
+        if index < 6:
+            joint = f"J{index + 1}"
+        elif index < len(names) and names[index]:
+            joint = names[index]
+        else:
+            joint = f"motor {index + 1}"
+        message = f"{joint} {', '.join(reasons)} (code {code})"
+        faults.append({
+            "index": index,
+            "joint": joint,
+            "name": names[index] if index < len(names) else joint,
+            "code": code,
+            "reasons": reasons,
+            "message": message,
+        })
+    return faults, "; ".join(fault["message"] for fault in faults) if faults else None
 
 
 class _RawCommand:
@@ -218,6 +271,18 @@ class ConnectIn(BaseModel):
     ip: str = Field(default=DEFAULT_HOST, min_length=1)
 
 
+class JogStreamIn(BaseModel):
+    """Normalized real-time velocity for the continuous jog thread."""
+    x: float = Field(default=0.0, ge=-1.0, le=1.0)
+    y: float = Field(default=0.0, ge=-1.0, le=1.0)
+    z: float = Field(default=0.0, ge=-1.0, le=1.0)
+    roll: float = Field(default=0.0, ge=-1.0, le=1.0)
+    pitch: float = Field(default=0.0, ge=-1.0, le=1.0)
+    yaw: float = Field(default=0.0, ge=-1.0, le=1.0)
+    j6: float = Field(default=0.0, ge=-1.0, le=1.0)
+    scale: float = Field(default=1.0, ge=1.0, le=6.0)
+
+
 class JogIn(BaseModel):
     joint: int = Field(ge=1, le=6)
     delta_deg: float = Field(ge=-MAX_STEP_DEG, le=MAX_STEP_DEG)
@@ -251,6 +316,17 @@ class PoseIn(BaseModel):
     roll: float
     pitch: float
     yaw: float
+
+
+class LinearMoveIn(BaseModel):
+    """Small Cartesian jog; roll/pitch stay locked, yaw may be offset."""
+    dx: float = Field(default=0.0, ge=-0.25, le=0.25)
+    dy: float = Field(default=0.0, ge=-0.25, le=0.25)
+    dz: float = Field(default=0.0, ge=-0.25, le=0.25)
+    dpitch: float = Field(default=0.0, ge=-90.0, le=90.0)
+    dyaw: float = Field(default=0.0, ge=-90.0, le=90.0)
+    dj6: float = Field(default=0.0, ge=-30.0, le=30.0)
+    droll: float = Field(default=0.0, ge=-90.0, le=90.0)
 
 
 class Vec3In(BaseModel):
@@ -307,6 +383,7 @@ class CageFitIn(BaseModel):
 class ExecutePickIn(BaseModel):
     """Blocking pick/place: close, pull back, lower, safe-home, place, open."""
 
+    start: PoseIn | None = None
     target: PoseIn
     home: PoseIn | None = None
     home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
@@ -376,6 +453,23 @@ class ArmController:
         self.recovery_target_deg: list[float] | None = None
         self.last_good_joints: list[float] | None = None
         self.collision_api_supported: bool | None = None
+        self.jog_control_enabled: bool = False
+        self._jog_stream_lock = threading.Lock()
+        self._jog_stream_stop = threading.Event()
+        self._jog_stream_thread: threading.Thread | None = None
+        self._jog_stream_velocity: dict[str, float] | None = None
+        self._jog_stream_scale = 1.0
+        self._jog_stream_last_update = 0.0
+        self._jog_stream_target: dict[str, float] | None = None
+        self._jog_stream_base_j6: float | None = None
+        self._jog_stream_j6_offset = 0.0
+        self.hardware_errors: list[Any] = []
+        self.hardware_faults: list[dict[str, Any]] = []
+        self.hardware_fault: str | None = None
+        self.hardware_motion_fault: str | None = None
+        self.hardware_tool_fault: str | None = None
+        self.hardware_details: dict[str, Any] = {}
+        self._hardware_checked_at = 0.0
 
     # ---------- snapshot ----------
 
@@ -415,8 +509,83 @@ class ArmController:
                     else "motion-error" if self.collision_api_supported is False
                     else "unknown"
                 ),
+                "hardware_errors": list(self.hardware_errors),
+                "hardware_fault": self.hardware_fault,
+                "hardware_motion_fault": self.hardware_motion_fault,
+                "hardware_tool_fault": self.hardware_tool_fault,
+                "hardware_faults": [dict(fault) for fault in self.hardware_faults],
+                "motors_temperature": list(
+                    self.hardware_details.get("motors_temperature", [])
+                ),
+                "motors_voltage": list(self.hardware_details.get("motors_voltage", [])),
+                "motor_names": list(self.hardware_details.get("motor_names", [])),
                 "updated_at": self.updated_at,
             }
+
+    def _store_hardware_locked(self, hw: Any) -> None:
+        names = [str(name) for name in (getattr(hw, "motor_names", []) or [])]
+        raw_errors = getattr(hw, "hardware_errors", []) or []
+        if isinstance(raw_errors, (str, bytes)):
+            raw_errors = [raw_errors]
+        raw_errors = list(raw_errors)
+        faults, summary = decode_hardware_faults(raw_errors, names)
+        message = str(getattr(hw, "error_message", "") or "").strip()
+        if len(message) >= 2 and message[0] == message[-1] and message[0] in "'\"":
+            message = message[1:-1].strip()
+        if message.lower() in ("", "none", "null", "ok", "0", "no error", "no hardware error"):
+            message = ""
+        # The robot uses "''" as its no-error sentinel. Keep a real
+        # error_message as a fallback when no per-motor code is reported.
+        if not summary and message:
+            summary = message
+        motion_fault = "; ".join(
+            fault["message"] for fault in faults if int(fault["index"]) < 6
+        ) or None
+        tool_fault = "; ".join(
+            fault["message"] for fault in faults if int(fault["index"]) >= 6
+        ) or None
+        if not faults and message:
+            # Robot-level error messages are treated as motion faults; the
+            # tool has its own per-motor code when the gripper is the problem.
+            motion_fault = message
+        details = {
+            "hardware_version": getattr(hw, "hardware_version", None),
+            "rpi_temperature": getattr(hw, "rpi_temperature", None),
+            "connection_up": getattr(hw, "connection_up", None),
+            "error_message": message or None,
+            "calibration_needed": getattr(hw, "calibration_needed", None),
+            "calibration_in_progress": getattr(hw, "calibration_in_progress", None),
+            "motor_names": names,
+            "motor_types": list(getattr(hw, "motor_types", []) or []),
+            "motors_temperature": list(getattr(hw, "motors_temperature", []) or []),
+            "motors_voltage": list(getattr(hw, "motors_voltage", []) or []),
+            "hardware_errors": raw_errors,
+        }
+        with self._state:
+            self.hardware_errors = raw_errors
+            self.hardware_faults = faults
+            self.hardware_fault = summary
+            self.hardware_motion_fault = motion_fault
+            self.hardware_tool_fault = tool_fault
+            self.hardware_details = details
+            self._hardware_checked_at = time.monotonic()
+
+    def _refresh_hardware_locked(self, force: bool = False) -> None:
+        """Refresh the cached motor error state (at most every HARDWARE_REFRESH_S)."""
+        if self.mock or self._robot is None:
+            return
+        with self._state:
+            if not force and time.monotonic() - self._hardware_checked_at < HARDWARE_REFRESH_S:
+                return
+        try:
+            with self._socket_timeout(READ_TIMEOUT_S):
+                hw = self._robot.get_hardware_status()
+        except Exception as exc:
+            log.debug("hardware status read failed: %s", exc)
+            with self._state:
+                self._hardware_checked_at = time.monotonic()
+            return
+        self._store_hardware_locked(hw)
 
     def hardware_status(self) -> dict[str, Any]:
         with self._motion:
@@ -426,37 +595,36 @@ class ArmController:
                 if not self.mock and self._robot is None:
                     raise HTTPException(409, "arm is not connected")
             if self.mock:
-                return {"mock": True, "hardware_version": "mock", "error_message": None,
-                        "hardware_errors": [], "motors_temperature": [], "motors_voltage": []}
-            try:
-                with self._socket_timeout(READ_TIMEOUT_S):
-                    hw = self._robot.get_hardware_status()
-            except Exception as exc:
-                with self._state:
-                    self.last_error = f"{type(exc).__name__}: {exc}"
-                    if type(exc).__name__ in CONNECTION_ERRORS:
-                        self.connected = False
-                raise HTTPException(502, self.last_error) from exc
-            return {
-                "mock": False,
-                "hardware_version": getattr(hw, "hardware_version", None),
-                "rpi_temperature": getattr(hw, "rpi_temperature", None),
-                "connection_up": getattr(hw, "connection_up", None),
-                "error_message": getattr(hw, "error_message", None),
-                "calibration_needed": getattr(hw, "calibration_needed", None),
-                "calibration_in_progress": getattr(hw, "calibration_in_progress", None),
-                "motor_names": getattr(hw, "motor_names", []),
-                "motor_types": getattr(hw, "motor_types", []),
-                "motors_temperature": getattr(hw, "motors_temperature", []),
-                "motors_voltage": getattr(hw, "motors_voltage", []),
-                "hardware_errors": getattr(hw, "hardware_errors", []),
-            }
+                return {
+                    "mock": True,
+                    "hardware_version": "mock",
+                    "error_message": None,
+                    "hardware_errors": [],
+                    "hardware_fault": None,
+                    "hardware_motion_fault": None,
+                    "hardware_tool_fault": None,
+                    "hardware_faults": [],
+                    "motors_temperature": [],
+                    "motors_voltage": [],
+                    "motor_names": [],
+                }
+            self._refresh_hardware_locked(force=True)
+            with self._state:
+                return {
+                    "mock": False,
+                    **self.hardware_details,
+                    "hardware_fault": self.hardware_fault,
+                    "hardware_motion_fault": self.hardware_motion_fault,
+                    "hardware_tool_fault": self.hardware_tool_fault,
+                    "hardware_faults": [dict(fault) for fault in self.hardware_faults],
+                }
 
     def status(self) -> dict[str, Any]:
         if self.connected and not self.mock and not self.busy:
             if self._motion.acquire(blocking=False):
                 try:
                     self._read_locked()
+                    self._refresh_hardware_locked()
                     with self._state:
                         self.last_error = None
                 except Exception as exc:  # keep serving the cached snapshot
@@ -490,6 +658,7 @@ class ArmController:
                     self.recovery_target_deg = None
                     self.last_good_joints = list(self.joints_deg)
                     self.last_error = None
+                    self.jog_control_enabled = False
                     self.updated_at = time.time()
                 log.info("mock arm connected (%s)", host)
                 return self.snapshot()
@@ -516,6 +685,7 @@ class ArmController:
                     self._robot = robot
                 self._read_locked()
                 self._probe_collision_api_locked()
+                self._refresh_hardware_locked(force=True)
                 with self._state:
                     self.connected = True
                     self.host = host
@@ -557,6 +727,7 @@ class ArmController:
             self.host = None
             self.joints_deg = None
             self.pose = None
+            self.jog_control_enabled = False
             self.calibration_needed = None
             self.learning_mode = None
             self.tool = None
@@ -568,6 +739,14 @@ class ArmController:
             self.recovery_target_deg = None
             self.last_good_joints = None
             self.collision_api_supported = None
+            self.hardware_errors = []
+            self.hardware_faults = []
+            self.hardware_fault = None
+            self.hardware_motion_fault = None
+            self.hardware_tool_fault = None
+            self.hardware_details = {}
+            self._hardware_checked_at = 0.0
+        self._stop_jog_stream()
 
     # ---------- reads ----------
 
@@ -679,26 +858,9 @@ class ArmController:
         """Return a non-empty hardware error message, if the robot reports one."""
         if self.mock or self._robot is None:
             return None
-        try:
-            with self._socket_timeout(READ_TIMEOUT_S):
-                hw = self._robot.get_hardware_status()
-        except Exception as exc:
-            log.debug("hardware status read failed: %s", exc)
-            return None
-        raw_errors = getattr(hw, "hardware_errors", None) or []
-        if isinstance(raw_errors, str):
-            raw_errors = [raw_errors]
-        errors = [
-            str(item).strip()
-            for item in raw_errors
-            if str(item).strip().lower() not in ("", "0", "none", "null")
-        ]
-        message = str(getattr(hw, "error_message", "") or "").strip()
-        if message.lower() in ("", "none", "null", "ok"):
-            message = ""
-        if errors or message:
-            return message or "; ".join(errors)
-        return None
+        self._refresh_hardware_locked(force=True)
+        with self._state:
+            return self.hardware_fault
 
     @staticmethod
     def _is_collision_text(text: str) -> bool:
@@ -755,27 +917,53 @@ class ArmController:
 
     # ---------- motion ----------
 
-    def _check_motion_locked(self) -> None:
+    def _disable_jog_locked(self) -> None:
+        if not self.jog_control_enabled:
+            return
+        try:
+            if self._robot is not None:
+                with self._socket_timeout(TOOL_TIMEOUT_S):
+                    self._robot.set_jog_control(False)
+        except Exception as exc:
+            log.warning("could not disable jog control: %s", exc)
+        finally:
+            self.jog_control_enabled = False
+
+    def _check_motion_locked(self, allow_jog: bool = False) -> None:
         with self._state:
             if not self.connected:
                 raise HTTPException(409, "arm is not connected")
             if not self.mock and self._robot is None:
                 raise HTTPException(409, "arm is not connected")
+            if not allow_jog:
+                self._stop_jog_stream()
+                self._disable_jog_locked()
+        self._refresh_hardware_locked()
+        with self._state:
             if self.calibration_needed:
                 raise HTTPException(409, "calibration required — run ned_calibrate.py --go")
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
+            hardware_fault = self.hardware_motion_fault
             if MOTION_FAULT_ENABLED and self.fault:
                 raise HTTPException(
                     409,
                     "arm is in a motion fault state — press Recover to retract to the "
                     "last safe point before moving again",
                 )
+        if hardware_fault:
+            raise HTTPException(
+                409,
+                f"hardware fault: {hardware_fault}. Clear the obstruction/load, "
+                "power-cycle the arm, and reconnect before moving.",
+            )
 
     def _check_tool_locked(self) -> None:
         with self._state:
             if not self.connected:
                 raise HTTPException(409, "arm is not connected")
+        self._disable_jog_locked()
+        with self._state:
             if self.learning_mode:
                 raise HTTPException(409, "motors are released — enable motors first")
             if MOTION_FAULT_ENABLED and self.fault:
@@ -948,6 +1136,360 @@ class ArmController:
                     self.busy = False
         return self.snapshot()
 
+    def move_linear(
+        self, dx: float, dy: float, dz: float, dyaw: float = 0.0, dpitch: float = 0.0
+    ) -> dict[str, Any]:
+        """Move by a Cartesian delta while preserving the current tool attitude.
+
+        PyNiryo's linear pose command interpolates the TCP along a straight
+        line. Roll/pitch stay fixed; yaw can be offset separately. The wrist
+        joints compensate so the gripper remains horizontal during the move.
+        """
+        values = (dx, dy, dz, dyaw, dpitch)
+        if not all(math.isfinite(value) for value in values):
+            raise HTTPException(400, "linear deltas must be finite")
+        if not any(abs(value) > 1e-9 for value in values):
+            return self.snapshot()
+        with self._motion:
+            self._check_motion_locked()
+            current = self.snapshot().get("pose")
+        if current is None:
+            raise HTTPException(502, "current pose is unavailable")
+        target_x = float(current["x"]) + float(dx)
+        target_y = float(current["y"]) + float(dy)
+        target_z = float(current["z"]) + float(dz)
+        target_pitch = (float(current["pitch"]) + float(dpitch) + 180.0) % 360.0 - 180.0
+        target_yaw = (float(current["yaw"]) + float(dyaw) + 180.0) % 360.0 - 180.0
+        return self.move_pose_deg(
+            target_x,
+            target_y,
+            target_z,
+            float(current["roll"]),
+            target_pitch,
+            target_yaw,
+            strict_linear=True,
+        )
+
+    def jog_pose(
+        self,
+        dx: float,
+        dy: float,
+        dz: float,
+        dpitch: float = 0.0,
+        dyaw: float = 0.0,
+        dj6: float = 0.0,
+        droll: float = 0.0,
+    ) -> dict[str, Any]:
+        """Stream a small orientation-locked Cartesian offset via JOG_JOINTS.
+
+        The firmware's JOG_POSE command was changing wrist orientation during
+        pure translation on this Ned1. Solve IK for the target pose first and
+        send only the small joint deltas through JOG_JOINTS; roll is kept at
+        the current value, pitch/yaw are optional offsets, and J6 can be
+        adjusted separately with ``dj6``.
+        """
+        values = (dx, dy, dz, dpitch, dyaw, dj6, droll)
+        if not all(math.isfinite(value) for value in values):
+            raise HTTPException(400, "jog deltas must be finite")
+        if abs(dpitch) < 0.05:
+            dpitch = 0.0
+        if abs(dyaw) < 0.05:
+            dyaw = 0.0
+        if abs(droll) < 0.05:
+            droll = 0.0
+        if not any(abs(value) > 1e-9 for value in values):
+            return self.snapshot()
+        log.info(
+            "jog dx=%.4f dy=%.4f dz=%.4f droll=%.2f dpitch=%.2f dyaw=%.2f dj6=%.2f",
+            dx, dy, dz, droll, dpitch, dyaw, dj6,
+        )
+        with self._motion:
+            self._check_motion_locked(allow_jog=True)
+            with self._state:
+                current_pose = dict(self.pose) if self.pose is not None else None
+                current_joints = (
+                    list(self.joints_deg) if self.joints_deg is not None else None
+                )
+            if current_pose is None or current_joints is None:
+                raise HTTPException(502, "current pose or joints are unavailable")
+            target_x = float(current_pose["x"]) + float(dx)
+            target_y = float(current_pose["y"]) + float(dy)
+            target_z = float(current_pose["z"]) + float(dz)
+            target_roll = (float(current_pose["roll"]) + float(droll) + 180.0) % 360.0 - 180.0
+            target_pitch = (float(current_pose["pitch"]) + float(dpitch) + 180.0) % 360.0 - 180.0
+            target_yaw = (float(current_pose["yaw"]) + float(dyaw) + 180.0) % 360.0 - 180.0
+            if math.hypot(target_x, target_y) > self.max_reach_m + 1e-6:
+                raise HTTPException(400, "jog would exceed max horizontal reach")
+            if not (MIN_POSE_Z_M <= target_z <= MAX_POSE_Z_M):
+                raise HTTPException(
+                    400,
+                    f"jog would put z outside [{MIN_POSE_Z_M:.2f}, {MAX_POSE_Z_M:.2f}] m",
+                )
+            if self.mock:
+                with self._state:
+                    self.pose = {
+                        **current_pose,
+                        "x": target_x,
+                        "y": target_y,
+                        "z": target_z,
+                        "roll": target_roll,
+                        "pitch": target_pitch,
+                        "yaw": target_yaw,
+                    }
+                    self.joints_deg = list(current_joints)
+                    self.joints_deg[5] = (
+                        self.joints_deg[5] + float(dj6) + 180.0
+                    ) % 360.0 - 180.0
+                    self.updated_at = time.time()
+                    self.last_error = None
+                return self.snapshot()
+            try:
+                with self._socket_timeout(READ_TIMEOUT_S):
+                    solved = self._robot.inverse_kinematics(
+                        [
+                            target_x,
+                            target_y,
+                            target_z,
+                            math.radians(target_roll),
+                            math.radians(target_pitch),
+                            math.radians(target_yaw),
+                        ]
+                    )
+                target_joints = [math.degrees(float(v)) for v in solved]
+                if len(target_joints) != 6:
+                    raise RuntimeError("IK returned an invalid joint solution")
+                target_joints[5] += float(dj6)
+                target_joints[5] = (target_joints[5] + 180.0) % 360.0 - 180.0
+                delta = [b - a for a, b in zip(current_joints, target_joints)]
+                limit = 8.0
+                largest = max(abs(value) for value in delta)
+                if largest > limit:
+                    scale = limit / largest
+                    delta = [value * scale for value in delta]
+                next_joints = [a + b for a, b in zip(current_joints, delta)]
+                for index, value in enumerate(next_joints):
+                    lo, hi = JOINT_LIMITS_DEG[index]
+                    if value < lo - 1e-6 or value > hi + 1e-6:
+                        raise HTTPException(
+                            400,
+                            f"jog would push J{index + 1} outside its joint limit",
+                        )
+                if not self.jog_control_enabled:
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        self._robot.set_jog_control(True)
+                    with self._state:
+                        self.jog_control_enabled = True
+                with self._socket_timeout(TOOL_TIMEOUT_S):
+                    self._robot.jog_joints([math.radians(value) for value in delta])
+                if self._query_collision_flag_locked():
+                    raise RuntimeError("robot reported a collision during jog")
+                # Keep the local target in sync without an extra TCP round-trip
+                # on every 120 ms tick; the 1 Hz status poll refreshes the
+                # authoritative pose. This is what keeps jogging responsive.
+                with self._state:
+                    self.joints_deg = next_joints
+                    self.pose = {
+                        **current_pose,
+                        "x": target_x,
+                        "y": target_y,
+                        "z": target_z,
+                        "roll": target_roll,
+                        "pitch": target_pitch,
+                        "yaw": target_yaw,
+                    }
+                    self.last_error = None
+                    self.updated_at = time.time()
+            except HTTPException:
+                raise
+            except Exception as exc:
+                actual = self._read_after_fault_locked()
+                self._record_motion_fault_locked(exc, actual)
+                with self._state:
+                    self.last_error = self.fault or f"{type(exc).__name__}: {exc}"
+                raise HTTPException(502, self.last_error) from exc
+        return self.snapshot()
+
+    def update_jog_stream(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        j6: float,
+        scale: float,
+    ) -> dict[str, Any]:
+        """Set/update the normalized velocity consumed by the jog thread."""
+        velocity = {
+            "x": float(x), "y": float(y), "z": float(z),
+            "roll": float(roll), "pitch": float(pitch), "yaw": float(yaw),
+            "j6": float(j6),
+        }
+        moving = any(abs(value) > 1e-9 for value in velocity.values())
+        if not moving:
+            with self._jog_stream_lock:
+                self._jog_stream_last_update = time.monotonic()
+                self._jog_stream_scale = float(scale)
+                self._jog_stream_velocity = None
+                self._jog_stream_target = None
+                self._jog_stream_base_j6 = None
+                self._jog_stream_j6_offset = 0.0
+                self._jog_stream_stop.set()
+            return self.snapshot()
+        with self._state:
+            initial_pose = dict(self.pose) if self.pose is not None else None
+            initial_j6 = float(self.joints_deg[5]) if self.joints_deg is not None else None
+        with self._jog_stream_lock:
+            self._jog_stream_last_update = time.monotonic()
+            self._jog_stream_scale = float(scale)
+            self._jog_stream_velocity = velocity
+            if self._jog_stream_target is None and initial_pose is not None:
+                self._jog_stream_target = initial_pose
+                self._jog_stream_base_j6 = initial_j6
+                self._jog_stream_j6_offset = 0.0
+            self._jog_stream_stop.clear()
+            if self._jog_stream_thread is None or not self._jog_stream_thread.is_alive():
+                self._jog_stream_thread = threading.Thread(
+                    target=self._jog_stream_loop,
+                    daemon=True,
+                    name="arm-jog-stream",
+                )
+                self._jog_stream_thread.start()
+        return self.snapshot()
+
+    def stop_jog_stream(self) -> dict[str, Any]:
+        self._stop_jog_stream()
+        return self.snapshot()
+
+    def _stop_jog_stream(self) -> None:
+        with self._jog_stream_lock:
+            self._jog_stream_velocity = None
+            self._jog_stream_target = None
+            self._jog_stream_base_j6 = None
+            self._jog_stream_j6_offset = 0.0
+            self._jog_stream_stop.set()
+
+    def _jog_stream_loop(self) -> None:
+        try:
+            while not self._jog_stream_stop.is_set():
+                with self._jog_stream_lock:
+                    velocity = (
+                        dict(self._jog_stream_velocity)
+                        if self._jog_stream_velocity is not None
+                        else None
+                    )
+                    scale = self._jog_stream_scale
+                    last_update = self._jog_stream_last_update
+                    target = (
+                        dict(self._jog_stream_target)
+                        if self._jog_stream_target is not None
+                        else None
+                    )
+                    j6_offset = self._jog_stream_j6_offset
+                    base_j6 = self._jog_stream_base_j6
+                if velocity is None:
+                    time.sleep(0.02)
+                    continue
+                if time.monotonic() - last_update > 0.8:
+                    self._stop_jog_stream()
+                    break
+                if not self.connected:
+                    time.sleep(0.05)
+                    continue
+                with self._motion:
+                    try:
+                        self._check_motion_locked(allow_jog=True)
+                        with self._state:
+                            current_joints = (
+                                list(self.joints_deg)
+                                if self.joints_deg is not None
+                                else None
+                            )
+                            if target is None and self.pose is not None:
+                                target = dict(self.pose)
+                        if target is None or current_joints is None:
+                            target = None
+                            time.sleep(0.02)
+                            continue
+                        target = self._advance_jog_target(target, velocity, scale)
+                        if target is None:
+                            self._stop_jog_stream()
+                            break
+                        if self.mock:
+                            with self._state:
+                                self.pose = dict(target)
+                                self.updated_at = time.time()
+                                self.last_error = None
+                            with self._jog_stream_lock:
+                                self._jog_stream_target = dict(target)
+                            time.sleep(0.02)
+                            continue
+                        # Use the robot's native Cartesian planner with an
+                        # absolute orientation target. Do not solve IK locally:
+                        # J4/J6 must be allowed to compensate together so the
+                        # tool orientation stays consistent.
+                        self._disable_jog_locked()
+                        target_pose = SimpleNamespace(
+                            x=target["x"],
+                            y=target["y"],
+                            z=target["z"],
+                            roll=math.radians(target["roll"]),
+                            pitch=math.radians(target["pitch"]),
+                            yaw=math.radians(target["yaw"]),
+                        )
+                        with self._socket_timeout(MOTION_TIMEOUT_S):
+                            self._send_linear_pose(target_pose)
+                        if self._query_collision_flag_locked():
+                            raise RuntimeError("robot reported a collision during jog")
+                        with self._state:
+                            self.pose = dict(target)
+                            self.last_error = None
+                            self.updated_at = time.time()
+                        with self._jog_stream_lock:
+                            self._jog_stream_target = dict(target)
+                    except Exception as exc:
+                        log.warning("jog stream error: %s", exc)
+                        with self._state:
+                            self.last_error = f"{type(exc).__name__}: {exc}"
+                        with self._jog_stream_lock:
+                            self._jog_stream_velocity = None
+                            self._jog_stream_stop.set()
+                        time.sleep(0.08)
+                        break
+                time.sleep(0.01)
+        finally:
+            with self._jog_stream_lock:
+                self._jog_stream_thread = None
+                self._jog_stream_velocity = None
+                self._jog_stream_target = None
+                self._jog_stream_base_j6 = None
+                self._jog_stream_j6_offset = 0.0
+
+    def _advance_jog_target(
+        self, target: dict[str, float], velocity: dict[str, float], scale: float
+    ) -> dict[str, float] | None:
+        next_target = dict(target)
+        next_target["x"] += velocity["x"] * 0.006 * scale
+        next_target["y"] += velocity["y"] * 0.006 * scale
+        next_target["z"] += velocity["z"] * 0.006 * scale
+        next_target["roll"] = (
+            next_target["roll"]
+            + (velocity["roll"] + velocity["j6"]) * 2.0 * scale
+            + 180.0
+        ) % 360.0 - 180.0
+        next_target["pitch"] = (
+            next_target["pitch"] + velocity["pitch"] * 2.0 * scale + 180.0
+        ) % 360.0 - 180.0
+        next_target["yaw"] = (
+            next_target["yaw"] + velocity["yaw"] * 2.0 * scale + 180.0
+        ) % 360.0 - 180.0
+        if math.hypot(next_target["x"], next_target["y"]) > self.max_reach_m + 1e-6:
+            return None
+        if not (MIN_POSE_Z_M <= next_target["z"] <= MAX_POSE_Z_M):
+            return None
+        return next_target
+
     def move_pose_deg(
         self,
         x: float,
@@ -1114,7 +1656,11 @@ class ArmController:
             start_pose = snapshot.get("pose")
             if start_pose is None:
                 raise HTTPException(502, "current pose is unavailable")
-            start = _pose_dict(start_pose)
+            start = (
+                _pose_dict(payload.start.model_dump())
+                if payload.start is not None
+                else _pose_dict(start_pose)
+            )
             target = _pose_dict(payload.target.model_dump())
 
             if payload.corners is not None:
@@ -1151,6 +1697,15 @@ class ArmController:
                 }
             frame_segments = _cage_frame_segments(cage)
 
+            # Keep the gripper horizontal while grasping, retracting and placing.
+            # Roll stays at 0°; the current yaw is kept so the operator can still
+            # rotate in the horizontal plane.
+            grasp_start = {
+                **start,
+                "roll": 0.0,
+                "pitch": 0.0,
+            }
+
             # Find a horizontal pull-back path that avoids the cage frame.
             (
                 retract_points,
@@ -1160,7 +1715,7 @@ class ArmController:
             ) = _plan_retract_path(
                 cage,
                 frame_segments,
-                start,
+                grasp_start,
                 payload.retract_m,
                 payload.gate_clearance_m,
             )
@@ -1212,6 +1767,44 @@ class ArmController:
                 {"step": "speed", "ok": True, "percent": payload.speed_percent}
             )
 
+            moved_to_start = False
+            if payload.start is not None:
+                current_start = _pose_dict(start_pose)
+                distance = math.dist(
+                    (current_start["x"], current_start["y"], current_start["z"]),
+                    (grasp_start["x"], grasp_start["y"], grasp_start["z"]),
+                )
+                orientation_delta = max(
+                    abs((current_start["roll"] - grasp_start["roll"] + 180.0) % 360.0 - 180.0),
+                    abs((current_start["pitch"] - grasp_start["pitch"] + 180.0) % 360.0 - 180.0),
+                )
+                if distance > 1e-4 or orientation_delta > 0.1:
+                    self.move_pose_deg(
+                        grasp_start["x"],
+                        grasp_start["y"],
+                        grasp_start["z"],
+                        grasp_start["roll"],
+                        grasp_start["pitch"],
+                        grasp_start["yaw"],
+                    )
+                    moved_to_start = True
+                    steps.append({"step": "move_to_start", "ok": True, "pose": grasp_start})
+
+            orientation_delta = max(
+                abs((start["roll"] - grasp_start["roll"] + 180.0) % 360.0 - 180.0),
+                abs((start["pitch"] - grasp_start["pitch"] + 180.0) % 360.0 - 180.0),
+            )
+            if not moved_to_start and orientation_delta > 0.1:
+                self.move_pose_deg(
+                    start["x"],
+                    start["y"],
+                    start["z"],
+                    grasp_start["roll"],
+                    grasp_start["pitch"],
+                    grasp_start["yaw"],
+                )
+                steps.append({"step": "level_grasp", "ok": True, "pose": grasp_start})
+
             self._gripper_action(True)
             steps.append({"step": "close_gripper", "ok": True})
 
@@ -1238,67 +1831,37 @@ class ArmController:
                     409,
                     "record the home pose first: Home / fold, then Home = current",
                 )
-            home_base = _pose_dict(payload.home.model_dump())
-            safe_home_z = min(
-                MAX_POSE_Z_M, home_base["z"] + payload.home_lift_m
-            )
             retract_last = retract_points[-1]["pose"]
-            lower = {
+
+            # Re-orient at the outer retract point, not at home.  Rotating the
+            # wrist after the base has moved close to the robot makes J5 run
+            # into its upper limit on this Ned; this point is clear of the
+            # base/singular zone and leaves the wrist room to turn.
+            oriented_retract = {
                 "x": retract_last["x"],
                 "y": retract_last["y"],
-                "z": safe_home_z,
-                "roll": start["roll"],
-                "pitch": start["pitch"],
-                "yaw": start["yaw"],
-            }
-            self.move_pose_deg(
-                lower["x"],
-                lower["y"],
-                lower["z"],
-                lower["roll"],
-                lower["pitch"],
-                lower["yaw"],
-            )
-            steps.append({"step": "lower", "ok": True, "pose": lower})
-
-            safe_home_xy = {
-                "x": home_base["x"],
-                "y": home_base["y"],
-                "z": safe_home_z,
-                "roll": start["roll"],
-                "pitch": start["pitch"],
-                "yaw": start["yaw"],
-            }
-            self.move_pose_deg(
-                safe_home_xy["x"],
-                safe_home_xy["y"],
-                safe_home_xy["z"],
-                safe_home_xy["roll"],
-                safe_home_xy["pitch"],
-                safe_home_xy["yaw"],
-            )
-            steps.append(
-                {"step": "safe_home_xy", "ok": True, "pose": safe_home_xy}
-            )
-
-            safe_home = {
-                "x": home_base["x"],
-                "y": home_base["y"],
-                "z": safe_home_z,
+                "z": retract_last["z"],
                 "roll": target["roll"],
                 "pitch": target["pitch"],
                 "yaw": target["yaw"],
             }
             self.move_pose_deg(
-                safe_home["x"],
-                safe_home["y"],
-                safe_home["z"],
-                safe_home["roll"],
-                safe_home["pitch"],
-                safe_home["yaw"],
-                strict_linear=True,
+                oriented_retract["x"],
+                oriented_retract["y"],
+                oriented_retract["z"],
+                oriented_retract["roll"],
+                oriented_retract["pitch"],
+                oriented_retract["yaw"],
             )
-            steps.append({"step": "orient", "ok": True, "pose": safe_home})
+            steps.append({"step": "orient_retract", "ok": True, "pose": oriented_retract})
+            _verify_placement_attitude(self.snapshot().get("pose"), target)
+
+            # Do not transit through the recorded home pose here.  On this Ned
+            # the home XY is close to the base and forces J5 near its upper
+            # limit; turning the wrist there aborts the native linear planner.
+            # The retract point is already clear of the cage, so use it as the
+            # safe transit pose and let the checked path do the base rotation.
+            safe_home = dict(oriented_retract)
 
             snapshot = self.snapshot()
             home_pose = snapshot.get("pose")
@@ -2835,7 +3398,7 @@ def _cage_target_issues(cage: CageIn, target: dict[str, float]) -> list[str]:
     x, y, z = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
     if not all(math.isfinite(value) for value in (x, y, z)):
         return ["target coordinates must be finite"]
-    if not (-cage.width / 2 <= x <= cage.width / 2 and 0 < y < cage.depth and 0 <= z <= cage.height):
+    if not (-cage.width / 2 <= x <= cage.width / 2 and 0 <= y <= cage.depth and 0 <= z <= cage.height):
         return [
             "target is outside the taught cage "
             f"(local x/y/z {x * 1000:.0f}/{y * 1000:.0f}/{z * 1000:.0f} mm); "
@@ -2848,9 +3411,9 @@ def _cage_target_issues(cage: CageIn, target: dict[str, float]) -> list[str]:
 
 
 def _level_placement_pose(cage: CageIn, pose: dict[str, float]) -> dict[str, float]:
-    # Ned side-entry convention already used by the panel: roll=180, pitch=0.
-    # Tool forward points along cage +Y, hence cage yaw + 90 degrees.
-    return {**pose, "roll": 180.0, "pitch": 0.0, "yaw": (cage.yaw + 270.0) % 360.0 - 180.0}
+    # Table-level side-entry convention: roll=0, pitch=0. Tool forward points
+    # along cage +Y, hence cage yaw + 90 degrees.
+    return {**pose, "roll": 0.0, "pitch": 0.0, "yaw": (cage.yaw + 270.0) % 360.0 - 180.0}
 
 
 def _verify_placement_attitude(actual: dict[str, float] | None, target: dict[str, float]) -> None:
@@ -2901,7 +3464,7 @@ def plan_pick_path(
     start_local = _world_to_cage(cage, (start["x"], start["y"], start["z"]))
     target_inside = (
         -w / 2 <= target_local[0] <= w / 2
-        and 0.0 < target_local[1] < d
+        and 0.0 <= target_local[1] <= d
         and 0.0 <= target_local[2] <= h
     )
     target_issues = _cage_target_issues(cage, target)
@@ -2920,7 +3483,7 @@ def plan_pick_path(
     )
 
     warnings: list[str] = []
-    warnings.append("placement attitude locked: roll 180°, pitch 0°, yaw aligned with cage depth")
+    warnings.append("placement attitude locked: roll 0°, pitch 0°, yaw aligned with cage depth")
     if fit_meta:
         warnings.extend(fit_meta.get("warnings", []))
     if start_inside:
@@ -3208,6 +3771,16 @@ def create_app(controller: ArmController) -> FastAPI:
         """Proxy the Jetson RGB MJPEG stream so the UI stays same-origin."""
         return _proxy_camera(CAMERA_STREAM_URL, "camera stream")
 
+    @app.get("/api/camera/status")
+    def camera_status() -> dict[str, Any]:
+        """Return the Jetson camera mode and last-frame ages."""
+        base = CAMERA_STREAM_URL.rsplit("/", 1)[0]
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=4) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise HTTPException(502, f"camera status unavailable: {exc}") from exc
+
     @app.get("/api/camera/depth")
     def camera_depth():
         """Proxy the colorized Jetson depth MJPEG stream."""
@@ -3359,6 +3932,31 @@ def create_app(controller: ArmController) -> FastAPI:
     @app.post("/api/arm/pose")
     def arm_pose(body: PoseIn) -> dict[str, Any]:
         return controller.move_pose(body)
+
+    @app.post("/api/arm/linear")
+    def arm_linear(body: LinearMoveIn) -> dict[str, Any]:
+        """Move by dx/dy/dz with roll locked; pitch/yaw may be offset."""
+        return controller.move_linear(
+            body.dx, body.dy, body.dz, body.dyaw, body.dpitch
+        )
+
+    @app.post("/api/arm/jog_pose")
+    def arm_jog_pose(body: LinearMoveIn) -> dict[str, Any]:
+        """Stream a relative Cartesian offset through the firmware jog mode."""
+        return controller.jog_pose(
+            body.dx, body.dy, body.dz, body.dpitch, body.dyaw, body.dj6, body.droll
+        )
+
+    @app.post("/api/arm/jog_stream")
+    def arm_jog_stream(body: JogStreamIn) -> dict[str, Any]:
+        """Continuous velocity stream; the server paces the jog thread."""
+        return controller.update_jog_stream(
+            body.x, body.y, body.z, body.roll, body.pitch, body.yaw, body.j6, body.scale
+        )
+
+    @app.post("/api/arm/jog_stop")
+    def arm_jog_stop() -> dict[str, Any]:
+        return controller.stop_jog_stream()
 
     @app.post("/api/arm/cage_fit")
     def arm_cage_fit(body: CageFitIn) -> dict[str, Any]:

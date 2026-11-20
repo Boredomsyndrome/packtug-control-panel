@@ -43,17 +43,25 @@ test('box centre reference and taught width are honoured', () => {
   near(target.z, 0.075)
 })
 
-test('out-of-bounds boxes, targets and front-plane targets are rejected', () => {
+test('packing width, not taught width, centres the packing bin', () => {
+  const target = placementToArmTarget(box, { ...cage, width: 0.6 }, 'front', 0.55)
+  near(target.x, 0.02)
+  near(target.y, 0.06)
+  near(target.z, 0.075)
+})
+
+test('out-of-bounds boxes and outside targets are rejected; opening-plane targets are allowed', () => {
   assert.ok(placementTargetIssues(box, { ...cage, depth: 0.17 }).length)
   assert.ok(placementTargetIssues({ ...box, x: 500 }, cage).length)
   assert.ok(placementTargetIssues({ ...box, y: 230 }, cage).length)
-  assert.ok(placementTargetIssues({ ...box, y: 0 }, cage).some(issue => issue.includes('front face')))
+  assert.deepEqual(placementTargetIssues({ ...box, y: 0 }, cage), [])
+  assert.ok(placementTargetIssues({ ...box, y: -1 }, cage).some(issue => issue.includes('front face')))
 })
 
 test('level attitude follows the cage depth, including wrapped yaw', () => {
   for (const yaw of [-450, -90, 0, 37, 180, 450]) {
     const pose = placementOrientation({ ...cage, yaw })
-    assert.equal(pose.roll, 180)
+    assert.equal(pose.roll, 0)
     assert.equal(pose.pitch, 0)
     near(Math.cos(pose.yaw * Math.PI / 180), -Math.sin(yaw * Math.PI / 180))
     near(Math.sin(pose.yaw * Math.PI / 180), Math.cos(yaw * Math.PI / 180))

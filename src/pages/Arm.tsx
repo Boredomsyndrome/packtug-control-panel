@@ -197,6 +197,19 @@ export function Arm() {
   >(null)
   const [sequenceStopping, setSequenceStopping] = useState(false)
   const [linearPath, setLinearPath] = useState(true)
+  const [controlMode, setControlMode] = useState<'joint' | 'linear'>('linear')
+  const [linearSliders, setLinearSliders] = useState({ x: 0, y: 0, z: 0 })
+  const [orientationPad, setOrientationPad] = useState({ x: 0, y: 0 })
+  const [j6Target, setJ6Target] = useState(0)
+  const [linearSpeedScale, setLinearSpeedScale] = useState(4)
+  const canMove =
+    !!status?.connected &&
+    !status.calibration_needed &&
+    !status.learning_mode &&
+    !status.busy &&
+    !status.fault &&
+    !status.hardware_motion_fault &&
+    !pending
   const [camKey, setCamKey] = useState(0)
   const [camError, setCamError] = useState(false)
   const [camMode, setCamMode] = useState<'rgb' | 'depth'>('rgb')
@@ -288,6 +301,14 @@ export function Arm() {
   const [dragRect, setDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const cameraImgRef = useRef<HTMLImageElement | null>(null)
+  const lastCamRetryRef = useRef(0)
+  const linearSliderRef = useRef({ x: 0, y: 0, z: 0 })
+  const keyInputRef = useRef({ x: 0, y: 0, z: 0, roll: 0, pitch: 0, yaw: 0, j6: 0 })
+  const orientationInputRef = useRef({ pitch: 0, yaw: 0 })
+  const orientationActiveRef = useRef(false)
+  const jogStreamActiveRef = useRef(false)
+  const orientationDraggingRef = useRef(false)
+  const j6DraggingRef = useRef(false)
   const stopSequenceRef = useRef(false)
 
   useEffect(() => {
@@ -377,6 +398,172 @@ export function Arm() {
 
   useEffect(() => {
     let alive = true
+    const check = async () => {
+      try {
+        const res = await fetch('/api/camera/status')
+        if (!res.ok) return
+        const health = (await res.json()) as {
+          mode?: string
+          color?: { age_sec?: number | null }
+          depth?: { age_sec?: number | null }
+        }
+        if (!alive) return
+        const sourceMode = health.mode === 'depth' ? 'depth' : health.mode === 'rgb' ? 'rgb' : null
+        if (sourceMode && sourceMode !== camMode) {
+          setCamMode(sourceMode)
+          setCamError(false)
+          setCamKey((value) => value + 1)
+          lastCamRetryRef.current = Date.now()
+          return
+        }
+        const age = sourceMode === 'depth' ? health.depth?.age_sec : health.color?.age_sec
+        if ((age == null || age > 3) && Date.now() - lastCamRetryRef.current > 8000) {
+          lastCamRetryRef.current = Date.now()
+          setCamError(false)
+          setCamKey((value) => value + 1)
+        }
+      } catch {
+        // Camera health polling is best-effort; the image onError handles hard failures.
+      }
+    }
+    void check()
+    const timer = window.setInterval(check, 3000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [camMode])
+
+  useEffect(() => {
+    if (controlMode === 'linear') return
+    linearSliderRef.current = { x: 0, y: 0, z: 0 }
+    setLinearSliders({ x: 0, y: 0, z: 0 })
+    orientationInputRef.current = { pitch: 0, yaw: 0 }
+    setOrientationPad({ x: 0, y: 0 })
+  }, [controlMode])
+
+  useEffect(() => {
+    if (!j6DraggingRef.current && status?.joints_deg?.length) {
+      setJ6Target(Math.round(status.joints_deg[5] * 10) / 10)
+    }
+  }, [status?.joints_deg])
+
+  useEffect(() => {
+    if (controlMode !== 'linear') return
+    const held = new Set<string>()
+    const update = () => {
+      const axis = (plus: string, minus: string) =>
+        (held.has(plus) ? 1 : 0) - (held.has(minus) ? 1 : 0)
+      const zUp = held.has('q')
+      const zDown = held.has('e')
+      keyInputRef.current = {
+        x: axis('d', 'a'),
+        y: axis('w', 's'),
+        z: (zUp ? 1 : 0) - (zDown ? 1 : 0),
+        roll: axis('l', 'j'),
+        pitch: axis('i', 'k'),
+        yaw: axis('o', 'u'),
+        j6: axis('m', 'n'),
+      }
+    }
+    const handleDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      const key = event.key.toLowerCase()
+      if (!['w','a','s','d','q','e','u','i','o','j','k','l','n','m','arrowleft','arrowright','arrowup','arrowdown','pageup','pagedown'].includes(key)) return
+      event.preventDefault()
+      if (['w','a','s','d','q','e','arrowleft','arrowright','arrowup','arrowdown','pageup','pagedown'].includes(key)) {
+        // W/S/A/D/Q/E are translation-only. Drop any sphere orientation that
+        // was left behind by a previous drag.
+        orientationActiveRef.current = false
+        orientationInputRef.current = { pitch: 0, yaw: 0 }
+        setOrientationPad({ x: 0, y: 0 })
+      }
+      held.add(key)
+      update()
+    }
+    const handleUp = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if (!held.has(key)) return
+      held.delete(key)
+      update()
+    }
+    const clear = () => {
+      held.clear()
+      keyInputRef.current = { x: 0, y: 0, z: 0, roll: 0, pitch: 0, yaw: 0, j6: 0 }
+    }
+    window.addEventListener('keydown', handleDown)
+    window.addEventListener('keyup', handleUp)
+    window.addEventListener('blur', clear)
+    return () => {
+      window.removeEventListener('keydown', handleDown)
+      window.removeEventListener('keyup', handleUp)
+      window.removeEventListener('blur', clear)
+      clear()
+    }
+  }, [controlMode])
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) stopMotion()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
+
+  useEffect(() => {
+    if (controlMode !== 'linear') {
+      if (jogStreamActiveRef.current) {
+        jogStreamActiveRef.current = false
+        void api.stopArmJog()
+      }
+      return
+    }
+    const timer = window.setInterval(() => {
+      if (!canMove) {
+        if (jogStreamActiveRef.current) {
+          jogStreamActiveRef.current = false
+          void api.stopArmJog()
+        }
+        return
+      }
+      const slider = linearSliderRef.current
+      const keys = keyInputRef.current
+      const orientation = orientationInputRef.current
+      const clamp = (value: number) => Math.max(-1, Math.min(1, value))
+      const x = clamp(slider.x + keys.x)
+      const y = clamp(slider.y + keys.y)
+      const z = clamp(slider.z + keys.z)
+      const roll = clamp(keys.roll)
+      const pitch = clamp((orientationActiveRef.current ? orientation.pitch : 0) + keys.pitch)
+      const yaw = clamp((orientationActiveRef.current ? orientation.yaw : 0) + keys.yaw)
+      const j6 = clamp(keys.j6)
+      if (!x && !y && !z && !roll && !pitch && !yaw && !j6) {
+        if (jogStreamActiveRef.current) {
+          jogStreamActiveRef.current = false
+          void api.stopArmJog()
+        }
+        return
+      }
+      jogStreamActiveRef.current = true
+      void api
+        .updateArmJog(x, y, z, roll, pitch, yaw, j6, linearSpeedScale)
+        .then((snapshot) => applySnapshot(snapshot))
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : String(err))
+        })
+    }, 100)
+    return () => {
+      window.clearInterval(timer)
+      if (jogStreamActiveRef.current) {
+        jogStreamActiveRef.current = false
+        void api.stopArmJog()
+      }
+    }
+  }, [controlMode, canMove, linearSpeedScale])
+
+  useEffect(() => {
+    let alive = true
     api
       .listArmPoses()
       .then((list) => {
@@ -441,16 +628,29 @@ export function Arm() {
     }
   }
 
-  const canMove =
-    !!status?.connected &&
-    !status.calibration_needed &&
-    !status.learning_mode &&
-    !status.busy &&
-    !status.fault &&
-    !pending
   const hasGripper = !!status?.tool?.includes('GRIPPER')
   const canUseGripper =
     !!status?.connected && !status.learning_mode && !status.busy && !status.fault && !pending && hasGripper
+
+  useEffect(() => {
+    const handleGripperKey = (event: KeyboardEvent) => {
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return
+      const target = event.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      const key = event.key.toLowerCase()
+      if (key !== 'g' && key !== 'h') return
+      event.preventDefault()
+      if (!canUseGripper) return
+      if (key === 'g') {
+        void run('Gripper close (G)', () => api.closeArmGripper())
+      } else {
+        void run('Gripper open (H)', () => api.openArmGripper())
+      }
+    }
+    window.addEventListener('keydown', handleGripperKey)
+    return () => window.removeEventListener('keydown', handleGripperKey)
+  }, [canUseGripper])
+  const j6Limits = status?.limits_deg?.[5] ?? [-144.46, 144.46]
   const addableStep =
     stepToAdd === ARM_SEQUENCE_GRIPPER_OPEN ||
     stepToAdd === ARM_SEQUENCE_GRIPPER_CLOSE ||
@@ -478,6 +678,75 @@ export function Arm() {
   function jog(index: number, direction: number) {
     const delta = direction * step
     void run(`${JOINTS[index].id} ${delta > 0 ? '+' : ''}${delta}°`, () => api.jogArmJoint(index + 1, delta))
+  }
+
+  function startLinearAxis() {
+    // A position-only gesture must not inherit a stale sphere orientation.
+    orientationActiveRef.current = false
+    orientationInputRef.current = { pitch: 0, yaw: 0 }
+    setOrientationPad({ x: 0, y: 0 })
+  }
+
+  function setLinearAxis(key: 'x' | 'y' | 'z', value: number) {
+    linearSliderRef.current = { ...linearSliderRef.current, [key]: value }
+    setLinearSliders((current) => ({ ...current, [key]: value }))
+  }
+
+  function stopLinearAxis(key: 'x' | 'y' | 'z') {
+    setLinearAxis(key, 0)
+  }
+
+  function stopMotion() {
+    linearSliderRef.current = { x: 0, y: 0, z: 0 }
+    setLinearSliders({ x: 0, y: 0, z: 0 })
+    keyInputRef.current = { x: 0, y: 0, z: 0, roll: 0, pitch: 0, yaw: 0, j6: 0 }
+    orientationActiveRef.current = false
+    orientationInputRef.current = { pitch: 0, yaw: 0 }
+    setOrientationPad({ x: 0, y: 0 })
+    jogStreamActiveRef.current = false
+    void api.stopArmJog()
+  }
+
+  function updateOrientationPad(event: PointerEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect()
+    let x = (event.clientX - rect.left - rect.width / 2) / (rect.width / 2)
+    let y = (event.clientY - rect.top - rect.height / 2) / (rect.height / 2)
+    const magnitude = Math.hypot(x, y)
+    if (magnitude > 1) {
+      x /= magnitude
+      y /= magnitude
+    }
+    setOrientationPad({ x, y })
+    orientationInputRef.current = { yaw: x, pitch: -y }
+  }
+
+  function startOrientationPad(event: PointerEvent<HTMLDivElement>) {
+    orientationDraggingRef.current = true
+    orientationActiveRef.current = true
+    event.currentTarget.setPointerCapture(event.pointerId)
+    updateOrientationPad(event)
+  }
+
+  function moveOrientationPad(event: PointerEvent<HTMLDivElement>) {
+    if (orientationDraggingRef.current) updateOrientationPad(event)
+  }
+
+  function stopOrientationPad() {
+    orientationDraggingRef.current = false
+    orientationActiveRef.current = false
+    setOrientationPad({ x: 0, y: 0 })
+    orientationInputRef.current = { pitch: 0, yaw: 0 }
+  }
+
+  function updateJ6(value: number) {
+    j6DraggingRef.current = true
+    setJ6Target(value)
+  }
+
+  function commitJ6(value: number) {
+    j6DraggingRef.current = false
+    if (!Number.isFinite(value)) return
+    void run(`J6 wrist roll ${value.toFixed(1)}°`, () => api.moveArmJoint(6, value))
   }
 
   function syncTargets() {
@@ -854,12 +1123,12 @@ export function Arm() {
     }
     const confirmed = window.confirm(
       'This will:\n' +
-        '1. close the gripper at the current pose,\n' +
-        '2. pull the object horizontally back toward the base,\n' +
-        '3. lower in place at the pulled-back position,\n' +
-        '4. move horizontally to the home X/Y at the safe height,\n' +
-        '5. level and align the gripper at safe home,\n' +
-        '6. follow the checked path to the target and verify the level attitude before opening.\n\n' +
+        (useCurrentStart ? '' : '1. move to the entered Start pose,\n') +
+        '2. level the gripper (roll/pitch) at the grasp pose,\n' +
+        '3. close the gripper and keep that level attitude while pulling back,\n' +
+        '4. reorient at the outer retract point (not near the base),\n' +
+        '5. use the retract point as a safe transit and follow the checked path to the target,\n' +
+        '6. verify the level/cage attitude before opening.\n\n' +
         'Keep the workspace clear and a hand on the power switch. Continue?',
     )
     if (!confirmed) return
@@ -873,6 +1142,7 @@ export function Arm() {
         return
       }
       const result = await api.executeArmPick({
+        ...(useCurrentStart ? {} : { start: pathStart }),
         target: pathTarget,
         home: pathHome,
         home_lift_m: execHomeLift,
@@ -1245,6 +1515,10 @@ export function Arm() {
           <>
             {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}
             {status?.fault && <Badge tone="red" dot>FAULT</Badge>}
+            {status?.hardware_motion_fault && <Badge tone="red" dot>HARDWARE</Badge>}
+            {!status?.hardware_motion_fault && status?.hardware_tool_fault && (
+              <Badge tone="amber" dot>TOOL</Badge>
+            )}
             <Badge
               tone={!status?.connected ? 'grey' : status.calibration_needed || status.learning_mode ? 'amber' : 'green'}
               dot
@@ -1259,6 +1533,20 @@ export function Arm() {
         No hardware E-stop on this arm. Keep the workspace clear and a hand on the power switch. A slider release may
         move a joint up to 60°, and manual posing releases the motors — hold the arm before enabling free motion.
       </div>
+
+      {status?.hardware_motion_fault && (
+        <div className="error-banner">
+          Hardware fault: {status.hardware_motion_fault}. Clear the obstruction/load, power-cycle the arm, then
+          reconnect before moving.
+        </div>
+      )}
+
+      {!status?.hardware_motion_fault && status?.hardware_tool_fault && (
+        <div className="stale-warning">
+          Tool warning: {status.hardware_tool_fault}. Arm motion remains available; check the gripper power and
+          connection.
+        </div>
+      )}
 
       <Card
         title="Camera"
@@ -1276,6 +1564,16 @@ export function Arm() {
                   {mode === 'rgb' ? 'RGB' : 'Depth'}
                 </button>
               ))}
+              <button
+                className="btn sm"
+                onClick={() => {
+                  setCamError(false)
+                  setCamKey((value) => value + 1)
+                }}
+                disabled={camSwitching}
+              >
+                Reconnect
+              </button>
             </div>
             <Badge tone={camError ? 'red' : camSwitching ? 'amber' : 'green'} dot>
               {camError ? 'offline' : camSwitching ? 'switching' : 'live'}
@@ -1860,10 +2158,11 @@ export function Arm() {
               </button>
             </div>
             <span className="faint" style={{ fontSize: 11.5 }}>
-              Starts from the current pose: closes the gripper, pulls the object horizontally
-              back toward the base, lowers at that pulled-back position, moves to the home X/Y
-              at the safe height, levels and aligns the gripper, follows the checked safe-home →
-              target path, then verifies its attitude before opening the gripper.
+              Uses the current pose as start, or the entered Start pose when “Start = current pose”
+              is unchecked. Levels roll/pitch at the grasp point while keeping yaw free, closes the
+              gripper, retracts horizontally, reorients at the outer retract point, then follows the
+              checked path to the target and verifies attitude before opening. The recorded home pose
+              is not used as an intermediate wrist-turning point.
             </span>
             {execError && (
               <span style={{ color: 'var(--red)', fontSize: 12 }}>{execError}</span>
@@ -2663,24 +2962,29 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
 
       <Card
         title="Joint control"
-        hint="Drag a slider and release, or nudge/apply targets; each release moves ≤60°"
+        hint={controlMode === 'joint' ? 'Drag a slider and release, or nudge/apply targets; each release moves ≤60°' : 'Hold a slider or key; release to stop; position and attitude update in real time'}
         right={
           <div className="row">
-            <span className="faint" style={{ fontSize: 12 }}>
-              Step
-            </span>
-            {[1, 2, 5, 10].map((s) => (
-              <button key={s} className={`btn sm ${step === s ? 'primary' : ''}`} onClick={() => setStep(s)}>
-                {s}°
-              </button>
-            ))}
-            <button className="btn sm" onClick={syncTargets} disabled={!status?.joints_deg}>
-              Sync targets
-            </button>
+            <span className="faint" style={{ fontSize: 12 }}>Mode</span>
+            <button className={`btn sm ${controlMode === 'joint' ? 'primary' : ''}`} onClick={() => setControlMode('joint')}>Joint</button>
+            <button className={`btn sm ${controlMode === 'linear' ? 'primary' : ''}`} onClick={() => setControlMode('linear')}>Linear</button>
+            {controlMode === 'joint' && (
+              <>
+                <span className="faint" style={{ fontSize: 12 }}>Step</span>
+                {[1, 2, 5, 10].map((s) => (
+                  <button key={s} className={`btn sm ${step === s ? 'primary' : ''}`} onClick={() => setStep(s)}>
+                    {s}°
+                  </button>
+                ))}
+                <button className="btn sm" onClick={syncTargets} disabled={!status?.joints_deg}>
+                  Sync targets
+                </button>
+              </>
+            )}
           </div>
         }
       >
-        <table className="data">
+        <table className="data" style={{ display: controlMode === 'joint' ? undefined : 'none' }}>
           <thead>
             <tr>
               <th>Joint</th>
@@ -2754,7 +3058,152 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
             })}
           </tbody>
         </table>
-        <div className="row" style={{ marginTop: 12 }}>
+        {controlMode === 'linear' && (
+          <div className="stack" style={{ gap: 14 }}>
+            <div className="grid cols-2" style={{ gap: 20 }}>
+              <div className="stack" style={{ gap: 8 }}>
+                <div className="row between">
+                  <span className="muted" style={{ fontSize: 12 }}>Position · hold to move</span>
+                  <label className="row" style={{ gap: 5, fontSize: 11 }}>
+                    <span className="faint">Speed</span>
+                    <select
+                      value={linearSpeedScale}
+                      onChange={(event) => setLinearSpeedScale(Number(event.target.value))}
+                      style={{ width: 64 }}
+                    >
+                      {[1, 2, 3, 4, 5, 6].map((value) => (
+                        <option key={value} value={value}>{value}×</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {([
+                  { key: 'z', label: 'Down / Up' },
+                  { key: 'x', label: 'Left / Right' },
+                  { key: 'y', label: 'Back / Forward' },
+                ] as const).map(({ key, label }) => (
+                  <div key={key} className="row" style={{ gap: 8 }}>
+                    <span className="faint" style={{ width: 100, fontSize: 11.5 }}>{label}</span>
+                    <span className="faint" style={{ fontSize: 11 }}>−</span>
+                    <input
+                      type="range"
+                      min={-1}
+                      max={1}
+                      step={0.05}
+                      value={linearSliders[key]}
+                      onPointerDown={startLinearAxis}
+                      onChange={(event) => setLinearAxis(key, Number(event.target.value))}
+                      onPointerUp={() => stopLinearAxis(key)}
+                      onPointerCancel={() => stopLinearAxis(key)}
+                      onBlur={() => stopLinearAxis(key)}
+                      disabled={!canMove}
+                      style={{ flex: 1, accentColor: 'var(--accent)' }}
+                      aria-label={`${label} real-time axis`}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>+</span>
+                  </div>
+                ))}
+                <span className="faint" style={{ fontSize: 11.5 }}>
+                  Keyboard: W/S forward-back · A/D left-right · Q/E down-up · U/O yaw · I/K pitch · J/L roll · N/M J6 · G/H gripper.
+                </span>
+              </div>
+
+              <div className="stack" style={{ gap: 6, alignItems: 'center' }}>
+                <span className="muted" style={{ fontSize: 12 }}>Gripper direction · drag the sphere</span>
+                <div
+                  style={{
+                    width: 210,
+                    height: 210,
+                    borderRadius: '50%',
+                    position: 'relative',
+                    touchAction: 'none',
+                    cursor: canMove ? 'grab' : 'not-allowed',
+                    border: '1px solid var(--border)',
+                    background:
+                      'radial-gradient(circle at 35% 28%, rgba(255,255,255,0.14), transparent 38%), radial-gradient(circle at 50% 50%, #141b2a 0%, #0a0f18 72%)',
+                    boxShadow: 'inset 0 0 28px rgba(0,0,0,.55)',
+                  }}
+                  onPointerDown={startOrientationPad}
+                  onPointerMove={moveOrientationPad}
+                  onPointerUp={stopOrientationPad}
+                  onPointerCancel={stopOrientationPad}
+                  onPointerLeave={stopOrientationPad}
+                  role="slider"
+                  tabIndex={0}
+                  aria-label="gripper pitch and yaw direction"
+                >
+                  <div style={{ position: 'absolute', left: '8%', right: '8%', top: '50%', borderTop: '1px solid rgba(255,255,255,.18)' }} />
+                  <div style={{ position: 'absolute', top: '8%', bottom: '8%', left: '50%', borderLeft: '1px solid rgba(255,255,255,.18)' }} />
+                  <div style={{ position: 'absolute', left: '15%', right: '15%', top: '50%', height: '70%', transform: 'translateY(-50%)', border: '1px solid rgba(255,255,255,.12)', borderRadius: '50%' }} />
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: `calc(50% + ${orientationPad.x * 42}% - 7px)`,
+                      top: `calc(50% + ${orientationPad.y * 42}% - 7px)`,
+                      width: 14,
+                      height: 14,
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                      boxShadow: '0 0 12px rgba(74, 222, 255, .8)',
+                    }}
+                  />
+                  <span className="faint" style={{ position: 'absolute', top: 3, left: 0, right: 0, textAlign: 'center', fontSize: 10 }}>pitch +</span>
+                  <span className="faint" style={{ position: 'absolute', bottom: 3, left: 0, right: 0, textAlign: 'center', fontSize: 10 }}>pitch −</span>
+                  <span className="faint" style={{ position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 10 }}>yaw −</span>
+                  <span className="faint" style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 10 }}>yaw +</span>
+                </div>
+                <span className="faint" style={{ fontSize: 11.5 }}>
+                  Sphere drag controls pitch/yaw; keyboard U/O yaw, I/K pitch, J/L roll, N/M J6.
+                </span>
+              </div>
+            </div>
+
+            <div className="stack" style={{ gap: 6, borderTop: '1px solid var(--border-soft)', paddingTop: 10 }}>
+              <div className="row between">
+                <span className="muted" style={{ fontSize: 12 }}>J6 wrist roll · separate gripper rotation</span>
+                <span className="mono" style={{ fontSize: 12 }}>{j6Target.toFixed(1)}°</span>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <span className="faint" style={{ fontSize: 11 }}>{j6Limits[0].toFixed(1)}°</span>
+                <input
+                  type="range"
+                  min={j6Limits[0]}
+                  max={j6Limits[1]}
+                  step={0.5}
+                  value={j6Target}
+                  onChange={(event) => updateJ6(Number(event.target.value))}
+                  onPointerUp={(event) => commitJ6(Number(event.currentTarget.value))}
+                  onPointerCancel={() => { j6DraggingRef.current = false }}
+                  onKeyUp={(event) => {
+                    if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End') {
+                      commitJ6(Number(event.currentTarget.value))
+                    }
+                  }}
+                  disabled={!canMove}
+                  style={{ flex: 1, accentColor: 'var(--accent)' }}
+                  aria-label="J6 wrist roll"
+                />
+                <span className="faint" style={{ fontSize: 11 }}>{j6Limits[1].toFixed(1)}°</span>
+              </div>
+              <span className="faint" style={{ fontSize: 11.5 }}>
+                J6 has a hardware/firmware range of about {j6Limits[0].toFixed(0)}° to {j6Limits[1].toFixed(0)}°,
+                so continuous 360° rotation is not physically available.
+              </span>
+            </div>
+
+            <div className="row">
+              <button className="btn danger" onClick={stopMotion}>
+                Stop motion / clear inputs
+              </button>
+            </div>
+            <span className="faint" style={{ fontSize: 11.5 }}>
+              {status?.pose
+                ? `Current attitude: roll ${status.pose.roll.toFixed(1)}° · pitch ${status.pose.pitch.toFixed(1)}° · yaw ${status.pose.yaw.toFixed(1)}°`
+                : 'Connect the arm to enable real-time control.'}
+            </span>
+          </div>
+        )}
+        <div className="row" style={{ marginTop: 12, display: controlMode === 'joint' ? undefined : 'none' }}>
           <button className="btn primary" onClick={applyTargets} disabled={!canMove}>
             Apply all targets
           </button>

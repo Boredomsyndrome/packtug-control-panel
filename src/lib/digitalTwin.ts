@@ -7,7 +7,7 @@ export const ARM_TARGET_STORAGE_KEY = 'packtug.armTarget'
 export type TargetReference = 'front' | 'center'
 
 export function placementOrientation(cage: CageGeometry) {
-  return { roll: 180, pitch: 0, yaw: ((cage.yaw + 270) % 360 + 360) % 360 - 180 }
+  return { roll: 0, pitch: 0, yaw: ((cage.yaw + 270) % 360 + 360) % 360 - 180 }
 }
 
 export interface ArmTargetFromPacking {
@@ -34,12 +34,14 @@ export function placementToArmTarget(
   placement: Placement,
   cage: CageGeometry,
   reference: TargetReference = 'front',
+  packingWidth = cage.width,
 ): { x: number; y: number; z: number } {
   const local = placementToLocalTarget(placement, reference)
   const yaw = (cage.yaw * Math.PI) / 180
-  // Packing uses the front-left floor corner; the arm uses the opening's
-  // floor centre. Apply the half-width offset before rotating into arm space.
-  const x = local.x / 1000 - cage.width / 2
+  // Packing uses the front-left floor corner. The placement x/y coordinates
+  // are expressed in the packing bin, so centre them with the *packing* width;
+  // the taught cage origin is still used for the world transform.
+  const x = local.x / 1000 - packingWidth / 2
   const y = local.y / 1000
 
   return {
@@ -72,8 +74,8 @@ export function placementTargetIssues(
       issues.push(`Target ${name} clearance ${gap.toFixed(0)} mm < ${(cage.clearance_m * 1000).toFixed(0)} mm.`)
     }
   }
-  if (reference === 'front' && local.y <= 0) {
-    issues.push('The box front face must be behind the cage opening (Y > 0).')
+  if (reference === 'front' && local.y < 0) {
+    issues.push('The box front face must not be outside the cage opening (Y ≥ 0).')
   }
   return issues
 }

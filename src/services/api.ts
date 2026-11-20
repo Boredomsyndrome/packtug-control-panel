@@ -79,6 +79,21 @@ export interface ArmStatus {
   recovery_available: boolean
   recovery_target_deg: number[] | null
   collision_api: 'hardware' | 'motion-error' | 'unknown'
+  hardware_errors: Array<number | string>
+  hardware_fault: string | null
+  hardware_motion_fault: string | null
+  hardware_tool_fault: string | null
+  hardware_faults: Array<{
+    index: number
+    joint: string
+    name: string
+    code: number | string
+    reasons: string[]
+    message: string
+  }>
+  motors_temperature: number[]
+  motors_voltage: number[]
+  motor_names: string[]
   updated_at: number | null
 }
 
@@ -231,6 +246,8 @@ export interface ExecutePickResult {
 }
 
 export interface ExecutePickRequest {
+  /** optional explicit grasp start; omitted = use the current pose */
+  start?: ArmPose
   target: ArmPose
   /** recorded home pose; execution moves to home + home_lift_m */
   home?: ArmPose
@@ -320,6 +337,14 @@ function mockArmStatus(): ArmStatus {
     recovery_available: false,
     recovery_target_deg: null,
     collision_api: 'motion-error',
+    hardware_errors: [],
+    hardware_fault: null,
+    hardware_motion_fault: null,
+    hardware_tool_fault: null,
+    hardware_faults: [],
+    motors_temperature: [],
+    motors_voltage: [],
+    motor_names: [],
     updated_at: Math.floor(Date.now() / 1000),
   }
 }
@@ -599,6 +624,83 @@ export const api = {
       return mockArmStatus()
     }
     return jsonRequest<ArmStatus>('/arm/joint', { joint, angle_deg: angleDeg })
+  },
+
+  /** Cartesian jog in metres; roll stays locked, pitch/yaw can be offset. */
+  async linearArmMove(
+    dx: number,
+    dy: number,
+    dz: number,
+    dyaw = 0,
+    dpitch = 0,
+  ): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(180)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      mockArm.pose = {
+        ...mockArm.pose,
+        x: mockArm.pose.x + dx,
+        y: mockArm.pose.y + dy,
+        z: mockArm.pose.z + dz,
+        pitch: ((mockArm.pose.pitch + dpitch + 180) % 360 + 360) % 360 - 180,
+        yaw: ((mockArm.pose.yaw + dyaw + 180) % 360 + 360) % 360 - 180,
+      }
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/linear', { dx, dy, dz, dyaw, dpitch })
+  },
+
+  /** Continuous firmware jog (no motion planning); roll stays locked. */
+  async jogArmPose(
+    dx: number,
+    dy: number,
+    dz: number,
+    dpitch = 0,
+    dyaw = 0,
+    dj6 = 0,
+    droll = 0,
+  ): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(20)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      mockArm.pose = {
+        ...mockArm.pose,
+        x: mockArm.pose.x + dx,
+        y: mockArm.pose.y + dy,
+        z: mockArm.pose.z + dz,
+        pitch: ((mockArm.pose.pitch + dpitch + 180) % 360 + 360) % 360 - 180,
+        roll: ((mockArm.pose.roll + droll + 180) % 360 + 360) % 360 - 180,
+        yaw: ((mockArm.pose.yaw + dyaw + 180) % 360 + 360) % 360 - 180,
+      }
+      if (dj6) {
+        mockArm.joints[5] = ((mockArm.joints[5] + dj6 + 180) % 360 + 360) % 360 - 180
+      }
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/jog_pose', { dx, dy, dz, dyaw, dpitch, dj6, droll })
+  },
+
+  async updateArmJog(
+    x: number,
+    y: number,
+    z: number,
+    roll: number,
+    pitch: number,
+    yaw: number,
+    j6: number,
+    scale: number,
+  ): Promise<ArmStatus> {
+    if (MOCK_MODE) {
+      await delay(5)
+      if (!mockArm.connected) throw new Error('arm is not connected')
+      return mockArmStatus()
+    }
+    return jsonRequest<ArmStatus>('/arm/jog_stream', { x, y, z, roll, pitch, yaw, j6, scale })
+  },
+
+  async stopArmJog(): Promise<ArmStatus> {
+    if (MOCK_MODE) return mockArmStatus()
+    return jsonRequest<ArmStatus>('/arm/jog_stop', {})
   },
 
   async enableArmMotors(): Promise<ArmStatus> {

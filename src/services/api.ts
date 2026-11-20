@@ -105,7 +105,36 @@ export interface QrDetection {
   corners?: Array<{ x: number; y: number }>
   angle_deg?: number
   area_px?: number
+  captured_at?: number | null
+  arm_pose?: ArmPose | null
+  camera_pose?: {
+    rvec: [number, number, number]
+    tvec: [number, number, number]
+    reprojection_error_px: number
+    qr_size_m: number
+  }
+  base_pose?: ArmPose
+  target_pose?: ArmPose
+  pose_error?: string
   error?: string
+}
+
+export interface HandEyeCalibrationSample {
+  arm_pose: ArmPose
+  camera_rvec: [number, number, number]
+  camera_tvec: [number, number, number]
+  captured_at?: number | null
+}
+
+export interface HandEyeCalibration {
+  samples: HandEyeCalibrationSample[]
+  camera_to_tool: {
+    rotation: number[][]
+    translation: number[]
+  } | null
+  needed: number
+  qr_size_m: number
+  last_capture?: { corners: number; reprojection_error_px: number }
 }
 
 export interface VisionCalibrationPoint {
@@ -515,13 +544,53 @@ export const api = {
     y: number,
     radius = 60,
     roi?: { x: number; y: number; w: number; h: number },
+    capture?: {
+      imageDataUrl: string
+      armPose: ArmPose | null
+      capturedAt: number
+      targetOffset: { x: number; y: number; z: number }
+    },
   ): Promise<QrDetection> {
     return jsonRequest<QrDetection>('/vision/qr', {
       x,
       y,
       radius,
       ...(roi ? { roi_x: roi.x, roi_y: roi.y, roi_w: roi.w, roi_h: roi.h } : {}),
+      ...(capture
+        ? {
+            image_data_url: capture.imageDataUrl,
+            arm_pose: capture.armPose,
+            captured_at: capture.capturedAt,
+            target_offset_x_m: capture.targetOffset.x,
+            target_offset_y_m: capture.targetOffset.y,
+            target_offset_z_m: capture.targetOffset.z,
+          }
+        : {}),
     })
+  },
+
+  async getHandEyeCalibration(): Promise<HandEyeCalibration> {
+    return jsonRequest<HandEyeCalibration>('/vision/hand_eye')
+  },
+
+  async captureHandEyeCalibrationPoint(capture: {
+    imageDataUrl: string
+    armPose: ArmPose
+    capturedAt: number
+  }): Promise<HandEyeCalibration> {
+    return jsonRequest<HandEyeCalibration>('/vision/hand_eye/capture', {
+      image_data_url: capture.imageDataUrl,
+      arm_pose: capture.armPose,
+      captured_at: capture.capturedAt,
+    })
+  },
+
+  async solveHandEyeCalibration(): Promise<HandEyeCalibration> {
+    return jsonRequest<HandEyeCalibration>('/vision/hand_eye/solve', {})
+  },
+
+  async resetHandEyeCalibration(): Promise<HandEyeCalibration> {
+    return jsonRequest<HandEyeCalibration>('/vision/hand_eye', undefined, 'DELETE')
   },
 
   async getVisionCalibration(): Promise<VisionCalibration> {

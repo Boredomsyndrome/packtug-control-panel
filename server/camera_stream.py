@@ -9,6 +9,7 @@ color and depth ``sensor_msgs/Image`` topics and serves:
   /depth           colorized depth MJPEG
   /depth_snapshot  colorized depth JPEG
   /depth_stats     nearest/farthest valid depth in metres
+  /camera_info     RGB intrinsics and distortion coefficients
   /health          JSON status
 
 Usage on the Jetson:
@@ -35,7 +36,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
 
 DEPTH_NEAR_M = 0.15
 DEPTH_FAR_M = 1.5
@@ -77,6 +78,31 @@ class LatestJpeg:
 
 COLOR = LatestJpeg()
 DEPTH = LatestJpeg()
+
+
+class LatestCameraInfo:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict | None = None
+
+    def update(self, msg: CameraInfo) -> None:
+        with self._lock:
+            self._data = {
+                "ok": True,
+                "width": int(msg.width),
+                "height": int(msg.height),
+                "distortion_model": str(msg.distortion_model),
+                "k": [float(value) for value in msg.k],
+                "d": [float(value) for value in msg.d],
+                "stamp": time.time(),
+            }
+
+    def get(self) -> dict | None:
+        with self._lock:
+            return dict(self._data) if self._data is not None else None
+
+
+COLOR_INFO = LatestCameraInfo()
 MANAGER: CameraProcess | None = None
 
 
@@ -156,11 +182,20 @@ def _encode(image: np.ndarray) -> bytes | None:
 
 
 class ImageNode(Node):
-    def __init__(self, color_topic: str, depth_topic: str, depth_scale: float) -> None:
+    def __init__(
+        self,
+        color_topic: str,
+        color_info_topic: str,
+        depth_topic: str,
+        depth_scale: float,
+    ) -> None:
         super().__init__("packtug_camera_stream")
         self._depth_scale = depth_scale
         self._color_sub = self.create_subscription(
             Image, color_topic, self._on_color, qos_profile_sensor_data
+        )
+        self._color_info_sub = self.create_subscription(
+            CameraInfo, color_info_topic, COLOR_INFO.update, qos_profile_sensor_data
         )
         self._depth_sub = self.create_subscription(
             Image, depth_topic, self._on_depth, qos_profile_sensor_data
@@ -299,6 +334,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/depth_stats"):
             self._json({"ok": True, **DEPTH.meta()})
             return
+        if self.path.startswith("/camera_info"):
+            info = COLOR_INFO.get()
+            if info is None:
+                self.send_error(503, "no RGB camera info yet")
+                return
+            self._json(info)
+            return
         if self.path.startswith("/depth"):
             self._mjpeg(DEPTH)
             return
@@ -316,6 +358,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--color-topic", default="/d455/color/image_raw")
+    parser.add_argument("--color-info-topic", default="/d455/color/camera_info")
     parser.add_argument("--depth-topic", default="/d455/depth/image_raw")
     parser.add_argument("--depth-scale", type=float, default=0.001)
     parser.add_argument("--port", type=int, default=8080)
@@ -327,7 +370,12 @@ def main() -> None:
     args = parser.parse_args()
 
     rclpy.init()
-    node = ImageNode(args.color_topic, args.depth_topic, args.depth_scale)
+    node = ImageNode(
+        args.color_topic,
+        args.color_info_topic,
+        args.depth_topic,
+        args.depth_scale,
+    )
     spin = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin.start()
 

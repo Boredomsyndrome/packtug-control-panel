@@ -183,7 +183,8 @@ Depth buttons call `/api/camera/mode`; switching restarts the camera and takes
 about 10 seconds. Depth is currently unavailable on the D455's USB2 link and
 needs a USB3 host.
 
-The FastAPI bridge proxies the streams through `/api/camera/*`. Point it at the
+The Jetson bridge also exposes `/camera_info` from the D455 RGB `CameraInfo`
+topic. The FastAPI bridge proxies the streams through `/api/camera/*`. Point it at the
 Jetson (Tailscale IP or LAN IP):
 
 ```bash
@@ -237,12 +238,20 @@ do not paste raw logs.
 
 ## Vision / calibration
 
-`/arm` includes an RGB stream, manual QR ROI detection, and a fixed-camera
-6-point pixel→arm mapping. The camera is being moved to the arm, so the saved
-fixed-camera mapping is only a development aid. The last 6-point fit was about
-19.7 mm RMSE and is **not safe for autonomous motion**; eye-in-hand
-(`T_tool_camera`) calibration and a pick/place state machine are still pending.
-A test lift was aborted by the robot with a collision/motor-trajectory error.
+`/arm` freezes the exact RGB frame selected by the operator, detects the QR in
+the clicked/dragged region, and estimates its camera-frame pose from the known
+35 mm code plus the D455 intrinsics. For an eye-in-hand mount, print
+`docs/calibration/charuco_5x7_30mm_a4_300dpi.png` at 100% and verify the board
+measures 150×210 mm. Keep it fixed and capture 10–15 varied, stationary arm
+poses in the **Wrist-camera calibration** card. Solving stores `T_tool_camera`; later detections combine it
+with the synchronized arm pose to report the QR centre in the arm base frame.
+The Arm card applies a configurable QR-local offset before filling the tool
+target; its default `(0, 0.0525, 0) m` matches the upright paper block's QR
+centre to gripper-web separation and must be changed if the label moves faces.
+The older fixed-camera 6-point pixel→arm endpoints remain for compatibility but
+are no longer used by the Arm UI. A safe autonomous pick state machine and a
+physical QR-to-grasp/TCP offset are still pending. A test lift was aborted by
+the robot with a collision/motor-trajectory error.
 
 ## Five-box demo
 
@@ -258,7 +267,8 @@ control-panel/
 ├── server/
 │   ├── arm_server.py           # FastAPI: Ned1, vision, camera, vehicle proxy
 │   ├── camera_stream.py        # Jetson RGB/depth MJPEG bridge
-│   └── vision_calibration.json # saved fixed-camera mapping (development only)
+│   ├── vision_calibration.json # legacy fixed-camera mapping (development only)
+│   └── hand_eye_calibration.json # local wrist-camera samples/transform
 ├── src/
 │   ├── App.tsx                 # routes + mock-auth gate
 │   ├── main.tsx

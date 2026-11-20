@@ -10,10 +10,10 @@ import {
   type CageFitResult,
   type CageGeometry,
   type ExecutePickResult,
+  type HandEyeCalibration,
   type PickPathResult,
   type PickPathVec3,
   type QrDetection,
-  type VisionCalibration,
 } from '../services/api'
 import { Badge, Card, PageHeader } from '../components/ui'
 import { clock } from '../lib/format'
@@ -219,7 +219,21 @@ export function Arm() {
   const [qr, setQr] = useState<QrDetection | null>(null)
   const [qrPending, setQrPending] = useState(false)
   const [qrError, setQrError] = useState<string | null>(null)
-  const [visionCalib, setVisionCalib] = useState<VisionCalibration | null>(null)
+  const [qrTargetOffset, setQrTargetOffset] = useState(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('packtug.qrTargetOffset') ?? '') as {
+        x?: number; y?: number; z?: number
+      }
+      if ([parsed.x, parsed.y, parsed.z].every((value) => Number.isFinite(value))) {
+        return { x: parsed.x!, y: parsed.y!, z: parsed.z! }
+      }
+    } catch {
+      // Use the current paper block's front-label to gripper-web offset.
+    }
+    return { x: 0, y: 0.0525, z: 0 }
+  })
+  const [frozenVisionFrame, setFrozenVisionFrame] = useState<string | null>(null)
+  const [visionCalib, setVisionCalib] = useState<HandEyeCalibration | null>(null)
   const [visionPending, setVisionPending] = useState(false)
   const [visionMessage, setVisionMessage] = useState<string | null>(null)
 
@@ -300,6 +314,7 @@ export function Arm() {
   )
   const [dragRect, setDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const dragFrameRef = useRef<{ dataUrl: string; capturedAt: number } | null>(null)
   const cameraImgRef = useRef<HTMLImageElement | null>(null)
   const lastCamRetryRef = useRef(0)
   const linearSliderRef = useRef({ x: 0, y: 0, z: 0 })
@@ -327,6 +342,10 @@ export function Arm() {
       // Ignore storage errors (private mode or quota exceeded).
     }
   }, [cageCorners, cageIgnored, pathCage, cageFit, lastStart, pathHome, homeRecorded])
+
+  useEffect(() => {
+    localStorage.setItem('packtug.qrTargetOffset', JSON.stringify(qrTargetOffset))
+  }, [qrTargetOffset])
 
   useEffect(() => {
     try {
@@ -581,7 +600,7 @@ export function Arm() {
         // Sequence list is optional too.
       })
     api
-      .getVisionCalibration()
+      .getHandEyeCalibration()
       .then((calibration) => {
         if (alive) setVisionCalib(calibration)
       })
@@ -826,6 +845,8 @@ export function Arm() {
     setCamSwitching(true)
     setCamTargetMode(mode)
     setCamError(false)
+    setFrozenVisionFrame(null)
+    setQr(null)
     try {
       const res = await fetch(`/api/camera/mode?value=${mode}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -855,10 +876,29 @@ export function Arm() {
     const rect = image.getBoundingClientRect()
     const width = image.naturalWidth || 640
     const height = image.naturalHeight || 480
+    const scale = Math.min(rect.width / width, rect.height / height)
+    const renderedWidth = width * scale
+    const renderedHeight = height * scale
+    const left = rect.left + (rect.width - renderedWidth) / 2
+    const top = rect.top + (rect.height - renderedHeight) / 2
     return {
-      x: Math.max(0, Math.min(width, ((event.clientX - rect.left) / rect.width) * width)),
-      y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height)),
+      x: Math.max(0, Math.min(width, (event.clientX - left) / scale)),
+      y: Math.max(0, Math.min(height, (event.clientY - top) / scale)),
     }
+  }
+
+  function captureVisibleCameraFrame(): { dataUrl: string; capturedAt: number } {
+    const image = cameraImgRef.current
+    if (!image || !image.naturalWidth || !image.naturalHeight) {
+      throw new Error('Camera frame is not ready yet.')
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = image.naturalWidth
+    canvas.height = image.naturalHeight
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Browser could not capture the camera frame.')
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    return { dataUrl: canvas.toDataURL('image/jpeg', 0.92), capturedAt: Date.now() / 1000 }
   }
 
   function normalisedRect(a: { x: number; y: number }, b: { x: number; y: number }) {
@@ -874,12 +914,21 @@ export function Arm() {
     x: number,
     y: number,
     roi?: { x: number; y: number; w: number; h: number },
+    capturedFrame?: { dataUrl: string; capturedAt: number },
   ) {
     setQrPending(true)
     setQrError(null)
     setQr(null)
     try {
-      const result = await api.detectQr(x, y, 60, roi)
+      const frame = capturedFrame ?? captureVisibleCameraFrame()
+      setFrozenVisionFrame(frame.dataUrl)
+      const liveStatus = await api.getArmStatus().catch(() => null)
+      const result = await api.detectQr(x, y, 60, roi, {
+        imageDataUrl: frame.dataUrl,
+        armPose: liveStatus?.pose ?? null,
+        capturedAt: frame.capturedAt,
+        targetOffset: qrTargetOffset,
+      })
       setQr(result)
       if (result.ok) {
         addLog(
@@ -900,6 +949,13 @@ export function Arm() {
     if (camMode !== 'rgb' || camSwitching) return
     event.preventDefault()
     const point = imagePoint(event)
+    try {
+      dragFrameRef.current = captureVisibleCameraFrame()
+      setFrozenVisionFrame(dragFrameRef.current.dataUrl)
+    } catch (err) {
+      setQrError(err instanceof Error ? err.message : String(err))
+      return
+    }
     dragStartRef.current = point
     setDragRect({ x: point.x, y: point.y, w: 0, h: 0 })
     setQr(null)
@@ -928,42 +984,46 @@ export function Arm() {
     } catch {
       // Already released.
     }
+    const capturedFrame = dragFrameRef.current
+    dragFrameRef.current = null
+    if (!capturedFrame) return
+    setFrozenVisionFrame(capturedFrame.dataUrl)
     if (rect.w >= 20 && rect.h >= 20) {
       setDragRect(rect)
-      void runQrDetection(rect.x + rect.w / 2, rect.y + rect.h / 2, rect)
+      void runQrDetection(rect.x + rect.w / 2, rect.y + rect.h / 2, rect, capturedFrame)
     } else {
       setDragRect(null)
-      void runQrDetection(point.x, point.y)
+      void runQrDetection(point.x, point.y, undefined, capturedFrame)
     }
   }
 
   function cancelQrDrag() {
     dragStartRef.current = null
+    dragFrameRef.current = null
     setDragRect(null)
   }
 
   async function captureVisionPoint() {
-    if (!qr?.ok || !qr.center) {
-      setVisionMessage('Click the QR tag in the RGB view first.')
-      return
-    }
-    if (!status?.pose) {
-      setVisionMessage('Arm pose is not available; connect and move the arm first.')
+    if (frozenVisionFrame) {
+      setVisionMessage('Resume the live view before capturing the next board pose.')
       return
     }
     setVisionPending(true)
     setVisionMessage(null)
     try {
-      const calibration = await api.addVisionCalibrationPoint({
-        px: qr.center.x,
-        py: qr.center.y,
-        arm_x: status.pose.x,
-        arm_y: status.pose.y,
+      const frame = captureVisibleCameraFrame()
+      setFrozenVisionFrame(frame.dataUrl)
+      const liveStatus = await api.getArmStatus()
+      if (!liveStatus.pose) throw new Error('Arm pose is unavailable.')
+      const calibration = await api.captureHandEyeCalibrationPoint({
+        imageDataUrl: frame.dataUrl,
+        armPose: liveStatus.pose,
+        capturedAt: frame.capturedAt,
       })
       setVisionCalib(calibration)
-      setVisionMessage(`Captured ${calibration.points.length}/${calibration.needed} points.`)
+      setVisionMessage(`Captured ${calibration.samples.length}/${calibration.needed} wrist poses.`)
       addLog(
-        `Vision point ${calibration.points.length}: px ${qr.center.x.toFixed(1)},${qr.center.y.toFixed(1)} -> arm ${status.pose.x.toFixed(3)},${status.pose.y.toFixed(3)}`,
+        `Hand-eye sample ${calibration.samples.length}: ${calibration.last_capture?.corners ?? 0} ChArUco corners · ${calibration.last_capture?.reprojection_error_px.toFixed(2) ?? '—'} px`,
         'info',
       )
     } catch (err) {
@@ -977,14 +1037,10 @@ export function Arm() {
     setVisionPending(true)
     setVisionMessage(null)
     try {
-      const calibration = await api.solveVisionCalibration()
+      const calibration = await api.solveHandEyeCalibration()
       setVisionCalib(calibration)
-      setVisionMessage(
-        calibration.rmse_m != null
-          ? `Calibration solved; RMSE ${(calibration.rmse_m * 1000).toFixed(1)} mm.`
-          : 'Calibration solved.',
-      )
-      addLog('Vision calibration solved', 'success')
+      setVisionMessage('Wrist-camera transform solved.')
+      addLog('Hand-eye calibration solved', 'success')
     } catch (err) {
       setVisionMessage(err instanceof Error ? err.message : String(err))
     } finally {
@@ -993,11 +1049,11 @@ export function Arm() {
   }
 
   async function resetVisionCalibration() {
-    if (!window.confirm('Reset all vision calibration points?')) return
+    if (!window.confirm('Reset all wrist-camera calibration samples?')) return
     setVisionPending(true)
     setVisionMessage(null)
     try {
-      const calibration = await api.resetVisionCalibration()
+      const calibration = await api.resetHandEyeCalibration()
       setVisionCalib(calibration)
       setVisionMessage('Vision calibration cleared.')
     } catch (err) {
@@ -1008,14 +1064,20 @@ export function Arm() {
   }
 
   async function fillTargetFromQr() {
-    if (!qr?.ok || !qr.center) return
-    try {
-      const mapped = await api.mapVisionPixel(qr.center.x, qr.center.y)
-      setPathTarget((current) => ({ ...current, x: mapped.x, y: mapped.y }))
-      addLog(`Target XY ← QR ${mapped.x.toFixed(3)}, ${mapped.y.toFixed(3)}`, 'info')
-    } catch (err) {
-      setPathError(err instanceof Error ? err.message : String(err))
+    if (!qr?.ok || !qr.target_pose) {
+      setPathError(qr?.pose_error ?? 'Solve wrist-camera calibration before using the QR target.')
+      return
     }
+    setPathTarget((current) => ({
+      ...current,
+      x: qr.target_pose!.x,
+      y: qr.target_pose!.y,
+      z: qr.target_pose!.z,
+    }))
+    addLog(
+      `Target XYZ ← QR offset ${qr.target_pose.x.toFixed(3)}, ${qr.target_pose.y.toFixed(3)}, ${qr.target_pose.z.toFixed(3)}`,
+      'info',
+    )
   }
 
   function setTargetToCageCentre() {
@@ -1607,7 +1669,11 @@ export function Arm() {
                 key={`${camMode}-${camKey}`}
                 ref={cameraImgRef}
                 className="camera-feed"
-                src={`${camMode === 'rgb' ? '/api/camera/stream' : '/api/camera/depth'}?t=${camKey}`}
+                src={
+                  frozenVisionFrame && camMode === 'rgb'
+                    ? frozenVisionFrame
+                    : `${camMode === 'rgb' ? '/api/camera/stream' : '/api/camera/depth'}?t=${camKey}`
+                }
                 alt={camMode === 'rgb' ? 'RealSense RGB camera' : 'RealSense colorized depth'}
                 title={
                   camMode === 'rgb'
@@ -1627,7 +1693,7 @@ export function Arm() {
                   <svg
                     className="camera-overlay"
                     viewBox={`0 0 ${qr?.frame?.w ?? 640} ${qr?.frame?.h ?? 480}`}
-                    preserveAspectRatio="none"
+                    preserveAspectRatio="xMidYMid meet"
                     aria-hidden="true"
                   >
                     {dragRect && (
@@ -1666,7 +1732,8 @@ export function Arm() {
                 )}
             </div>
             {camMode === 'rgb' && (
-              <div className="camera-stats">
+              <div className="camera-stats row between">
+                <span>
                 {qrPending ? (
                   'Detecting QR in selection…'
                 ) : qrError ? (
@@ -1675,9 +1742,26 @@ export function Arm() {
                   <span className="mono">
                     QR center {qr.center.x.toFixed(1)}, {qr.center.y.toFixed(1)} px · angle{' '}
                     {qr.angle_deg?.toFixed(1) ?? '—'}° · area {qr.area_px ?? '—'} px²
+                    {qr.camera_pose
+                      ? ` · depth ${(qr.camera_pose.tvec[2] * 1000).toFixed(0)} mm · ${qr.camera_pose.reprojection_error_px.toFixed(2)} px`
+                      : ''}
+                    {qr.pose_error ? ` · ${qr.pose_error}` : ''}
                   </span>
                 ) : (
                   'Click the QR tag, or drag a box around it if it is too small to click accurately.'
+                )}
+                </span>
+                {frozenVisionFrame && (
+                  <button
+                    className="btn sm"
+                    onClick={() => {
+                      setFrozenVisionFrame(null)
+                      setDragRect(null)
+                      setQr(null)
+                    }}
+                  >
+                    Resume live
+                  </button>
                 )}
               </div>
             )}
@@ -1692,37 +1776,60 @@ export function Arm() {
         )}
       </Card>
 
-      <Card title="Vision calibration" hint="Manual 6-point pixel → arm XY mapping">
+      <Card title="Wrist-camera calibration" hint="Eye-in-hand · fixed 5×7 ChArUco board · 10–15 stationary poses">
         <div className="stack">
           <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>
-            Put the block at six positions covering a 2D grid (left/right and near/far). At each position, jog the
-            tool tip directly over the QR center, select the QR in the RGB view (click or drag a box), then capture
-            the current arm pose.
+            Keep the printed ChArUco board fixed. Move the arm to varied positions and orientations, stop completely,
+            then capture the board and paired arm pose. Resume live before each new pose; do not move the board.
           </p>
           <div className="row between">
             <span className="muted">Points</span>
             <span className="mono">
-              {visionCalib?.points.length ?? 0}/{visionCalib?.needed ?? 6}
+              {visionCalib?.samples.length ?? 0}/{visionCalib?.needed ?? 10}
             </span>
           </div>
           <div className="row between">
-            <span className="muted">Residual</span>
+            <span className="muted">Camera → tool transform</span>
             <span className="mono">
-              {visionCalib?.rmse_m != null ? `${(visionCalib.rmse_m * 1000).toFixed(1)} mm` : '—'}
+              {visionCalib?.camera_to_tool ? 'solved' : '—'}
             </span>
           </div>
+          <div className="row" style={{ gap: 6 }}>
+            <NumberField
+              label="QR→target X (m)"
+              value={qrTargetOffset.x}
+              step={0.005}
+              onChange={(x) => setQrTargetOffset((current) => ({ ...current, x }))}
+            />
+            <NumberField
+              label="QR→target Y (m)"
+              value={qrTargetOffset.y}
+              step={0.005}
+              onChange={(y) => setQrTargetOffset((current) => ({ ...current, y }))}
+            />
+            <NumberField
+              label="QR→target Z (m)"
+              value={qrTargetOffset.z}
+              step={0.005}
+              onChange={(z) => setQrTargetOffset((current) => ({ ...current, z }))}
+            />
+          </div>
+          <span className="faint" style={{ fontSize: 11.5 }}>
+            Offset uses QR-local axes: X right, Y toward the printed top, Z out of the label.
+            Default Y 0.0525 m is the current upright paper block's QR-centre → gripper-web offset.
+          </span>
           <div className="row">
             <button
               className="btn primary"
               onClick={() => void captureVisionPoint()}
-              disabled={!qr?.ok || !status?.pose || visionPending}
+              disabled={!status?.connected || !!frozenVisionFrame || visionPending}
             >
-              {visionPending ? 'Working…' : 'Capture current point'}
+              {visionPending ? 'Working…' : 'Capture board pose'}
             </button>
             <button
               className="btn"
               onClick={() => void solveVisionCalibration()}
-              disabled={(visionCalib?.points.length ?? 0) < (visionCalib?.needed ?? 6) || visionPending}
+              disabled={(visionCalib?.samples.length ?? 0) < (visionCalib?.needed ?? 10) || visionPending}
             >
               Solve
             </button>
@@ -1879,9 +1986,9 @@ export function Arm() {
             <button
               className="btn sm"
               onClick={() => void fillTargetFromQr()}
-              disabled={!qr?.ok || !qr.center}
+              disabled={!qr?.target_pose}
             >
-              Target XY from QR
+              Target XYZ from QR
             </button>
           </div>
 

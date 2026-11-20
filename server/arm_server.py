@@ -27,6 +27,7 @@ Usage (from the control-panel folder):
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import json
 import logging
@@ -74,6 +75,10 @@ CAMERA_SNAPSHOT_URL = os.getenv(
     "CAMERA_SNAPSHOT_URL",
     CAMERA_STREAM_URL.rsplit("/", 1)[0] + "/snapshot",
 )
+CAMERA_INFO_URL = os.getenv(
+    "CAMERA_INFO_URL",
+    CAMERA_STREAM_URL.rsplit("/", 1)[0] + "/camera_info",
+)
 WHEELTEC_WEBCTL_URL = os.getenv("WHEELTEC_WEBCTL_URL", "http://127.0.0.1:8090")
 MAX_STEP_DEG = 60.0       # internal segment size; one segment per manual command
 MAX_REQUEST_DEG = 60.0    # largest joint change accepted per manual command
@@ -85,6 +90,13 @@ MAX_VELOCITY_LIMIT = 20
 POSES_FILE = Path(__file__).resolve().parent / "arm_poses.json"
 SEQUENCES_FILE = Path(__file__).resolve().parent / "arm_sequences.json"
 VISION_CALIBRATION_FILE = Path(__file__).resolve().parent / "vision_calibration.json"
+HAND_EYE_CALIBRATION_FILE = Path(__file__).resolve().parent / "hand_eye_calibration.json"
+CAMERA_INTRINSICS_FILE = Path(__file__).resolve().parent / "camera_intrinsics.json"
+QR_CODE_SIZE_M = float(os.getenv("QR_CODE_SIZE_M", "0.035"))
+CHARUCO_SQUARES_X = 5
+CHARUCO_SQUARES_Y = 7
+CHARUCO_SQUARE_M = 0.030
+CHARUCO_MARKER_M = 0.022
 HOME_TRANSIT = "__home__"   # built-in safe transit: pyniryo move_to_home_pose()
 SEQUENCE_GRIPPER_OPEN = "__gripper_open__"
 SEQUENCE_GRIPPER_CLOSE = "__gripper_close__"
@@ -245,6 +257,15 @@ JOINT_LIMITS_DEG = [
 log = logging.getLogger("arm-server")
 
 
+class VisionPoseIn(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+
+
 class QrIn(BaseModel):
     x: float
     y: float
@@ -253,6 +274,18 @@ class QrIn(BaseModel):
     roi_y: float | None = None
     roi_w: float | None = None
     roi_h: float | None = None
+    image_data_url: str | None = None
+    arm_pose: VisionPoseIn | None = None
+    captured_at: float | None = None
+    target_offset_x_m: float = Field(default=0.0, ge=-0.25, le=0.25)
+    target_offset_y_m: float = Field(default=0.0525, ge=-0.25, le=0.25)
+    target_offset_z_m: float = Field(default=0.0, ge=-0.25, le=0.25)
+
+
+class HandEyeCaptureIn(BaseModel):
+    image_data_url: str
+    arm_pose: VisionPoseIn
+    captured_at: float | None = None
 
 
 class VisionPointIn(BaseModel):
@@ -1695,6 +1728,35 @@ class ArmController:
                     "steps": [{"step": "target_check", "ok": False}],
                     "error": "; ".join(target_issues) + "; arm has not moved",
                 }
+            # Do this check before closing the gripper.  A tool point close to
+            # the base can pass cage clearance checks yet lack wrist room to
+            # turn to the placement yaw; the observed failure was at 0.15 m.
+            preflight = plan_pick_path(
+                PickPathIn(
+                    start=PoseIn(**start),
+                    target=PoseIn(**target),
+                    approach_m=payload.approach_m,
+                    gate_clearance_m=payload.gate_clearance_m,
+                    cage=payload.cage,
+                    corners=payload.corners,
+                    ignored_corners=payload.ignored_corners,
+                ),
+                start,
+                float(snapshot["max_reach_m"]),
+            )
+            pre_gate = next(
+                (point for point in preflight["points"] if point["kind"] == "pre_gate"),
+                None,
+            )
+            pre_gate_issues = pre_gate["issues"] if pre_gate else []
+            if pre_gate_issues:
+                return {
+                    "ok": False,
+                    "stage": "pre_gate_check",
+                    "steps": [{"step": "pre_gate_check", "ok": False}],
+                    "plan": preflight,
+                    "error": "; ".join(pre_gate_issues) + "; arm has not moved",
+                }
             frame_segments = _cage_frame_segments(cage)
 
             # Keep the gripper horizontal while grasping, retracting and placing.
@@ -1833,17 +1895,18 @@ class ArmController:
                 )
             retract_last = retract_points[-1]["pose"]
 
-            # Re-orient at the outer retract point, not at home.  Rotating the
-            # wrist after the base has moved close to the robot makes J5 run
-            # into its upper limit on this Ned; this point is clear of the
-            # base/singular zone and leaves the wrist room to turn.
+            # Keep the pickup yaw at the outer retract point.  The failed
+            # hardware run showed that forcing the cage yaw here put J5 at
+            # 104.4 degrees (close to its +110 limit) while the tool was still
+            # 4.3 degrees short.  The strict pre-gate move below aligns yaw at
+            # a known clear point outside the cage instead.
             oriented_retract = {
                 "x": retract_last["x"],
                 "y": retract_last["y"],
                 "z": retract_last["z"],
                 "roll": target["roll"],
                 "pitch": target["pitch"],
-                "yaw": target["yaw"],
+                "yaw": retract_last["yaw"],
             }
             self.move_pose_deg(
                 oriented_retract["x"],
@@ -1854,7 +1917,14 @@ class ArmController:
                 oriented_retract["yaw"],
             )
             steps.append({"step": "orient_retract", "ok": True, "pose": oriented_retract})
-            _verify_placement_attitude(self.snapshot().get("pose"), target)
+            # The retract point is still outside the cage.  Keep the carried
+            # box level here, but do not require the final cage yaw yet: on the
+            # Ned1 that premature wrist turn can put J5 near its upper limit.
+            # The first strict pre-gate move below must reach and verify the
+            # complete placement attitude before the arm crosses the opening.
+            _verify_level_attitude(
+                self.snapshot().get("pose"), target, stage="outer retract"
+            )
 
             # Do not transit through the recorded home pose here.  On this Ned
             # the home XY is close to the base and forces J5 near its upper
@@ -1867,7 +1937,7 @@ class ArmController:
             home_pose = snapshot.get("pose")
             if home_pose is None:
                 raise HTTPException(502, "home pose is unavailable")
-            _verify_placement_attitude(home_pose, target)
+            _verify_level_attitude(home_pose, target, stage="outer retract")
 
             plan = plan_pick_path(
                 PickPathIn(
@@ -1920,13 +1990,17 @@ class ArmController:
                     pose["yaw"],
                     strict_linear=True,
                 )
-                _verify_placement_attitude(self.snapshot().get("pose"), target)
+                _verify_placement_attitude(
+                    self.snapshot().get("pose"), target, stage=point["kind"]
+                )
                 steps.append(
                     {"step": f"move:{point['kind']}", "ok": True, "pose": pose}
                 )
 
             # A successful motion response alone does not authorize release.
-            _verify_placement_attitude(self.snapshot().get("pose"), target)
+            _verify_placement_attitude(
+                self.snapshot().get("pose"), target, stage="target release"
+            )
             self._gripper_action(False)
             steps.append({"step": "open_gripper", "ok": True})
 
@@ -1939,7 +2013,11 @@ class ArmController:
                         pose["roll"], pose["pitch"], pose["yaw"],
                         strict_linear=True,
                     )
-                    _verify_placement_attitude(self.snapshot().get("pose"), target)
+                    _verify_placement_attitude(
+                        self.snapshot().get("pose"),
+                        target,
+                        stage=f"return {point['kind']}",
+                    )
                 steps.append(
                     {"step": "return_safe_home", "ok": True, "pose": safe_home}
                 )
@@ -2721,17 +2799,19 @@ def _detect_qr_roi(
     best: dict[str, Any] | None = None
     if roi is not None:
         rx, ry, rw, rh = roi
+        pad = max(8.0, min(rw, rh) * 0.15)
         boxes = [
             (
-                max(0, int(rx)),
-                max(0, int(ry)),
-                min(w, int(rx + rw)),
-                min(h, int(ry + rh)),
+                max(0, int(math.floor(rx - pad))),
+                max(0, int(math.floor(ry - pad))),
+                min(w, int(math.ceil(rx + rw + pad))),
+                min(h, int(math.ceil(ry + rh + pad))),
             )
         ]
     else:
         boxes = []
-        for r in (radius, min(220, radius * 2)):
+        radii = (radius, min(220, radius * 2), min(max(w, h), radius * 5))
+        for r in dict.fromkeys(radii):
             boxes.append(
                 (
                     max(0, int(x) - r),
@@ -2745,47 +2825,85 @@ def _detect_qr_roi(
             continue
         crop = image[y0:y1, x0:x1]
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        for scale in (4, 6, 8):
-            scaled = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            variants = (
-                scaled,
-                cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-                cv2.adaptiveThreshold(
-                    scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
-                ),
+        min_dim = min(gray.shape[:2])
+        scales = (1, 2, 4) if min_dim >= 100 else (2, 4, 6)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        attempts: list[tuple[np.ndarray, int]] = []
+        for scale in scales:
+            resized = (
+                gray
+                if scale == 1
+                else cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
             )
-            for variant in variants:
-                result = cv2.QRCodeDetector().detect(variant)
-                if not result or not result[0] or result[1] is None:
-                    continue
-                points = np.asarray(result[1], dtype=np.float32).reshape(-1, 2)
-                if len(points) != 4:
-                    continue
+            attempts.append((resized, scale))
+        enhanced = clahe.apply(gray)
+        fallback_scale = 4 if min_dim >= 50 else 6
+        enhanced = cv2.resize(
+            enhanced,
+            None,
+            fx=fallback_scale,
+            fy=fallback_scale,
+            interpolation=cv2.INTER_CUBIC,
+        )
+        attempts.extend(
+            [
+                (enhanced, fallback_scale),
+                (
+                    cv2.threshold(
+                        enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                    )[1],
+                    fallback_scale,
+                ),
+                (
+                    cv2.adaptiveThreshold(
+                        enhanced,
+                        255,
+                        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv2.THRESH_BINARY,
+                        31,
+                        5,
+                    ),
+                    fallback_scale,
+                ),
+            ]
+        )
+        selection_center = np.asarray(
+            [x if roi is None else rx + rw / 2, y if roi is None else ry + rh / 2],
+            dtype=np.float32,
+        )
+        detector = cv2.QRCodeDetector()
+        for variant, scale in attempts:
+            candidates: list[np.ndarray] = []
+            if hasattr(detector, "detectMulti"):
+                found, multi_points = detector.detectMulti(variant)
+                if found and multi_points is not None:
+                    candidates.extend(np.asarray(multi_points, dtype=np.float32).reshape(-1, 4, 2))
+            if not candidates:
+                found, single_points = detector.detect(variant)
+                if found and single_points is not None:
+                    candidates.append(np.asarray(single_points, dtype=np.float32).reshape(4, 2))
+            stage_best: dict[str, Any] | None = None
+            stage_score = math.inf
+            for points in candidates:
                 full = points / scale + np.array([x0, y0], dtype=np.float32)
-                margin = 3.0
-                if (
-                    np.min(full[:, 0]) <= x0 + margin
-                    or np.max(full[:, 0]) >= x1 - margin
-                    or np.min(full[:, 1]) <= y0 + margin
-                    or np.max(full[:, 1]) >= y1 - margin
-                ):
-                    # A candidate touching the ROI edge is usually a cage bar /
-                    # arm edge, not the tag. Reject it instead of returning a
-                    # plausible-looking false positive.
-                    continue
+                full = _refine_qr_corners(image, full)
                 sides = np.linalg.norm(full - np.roll(full, 1, axis=0), axis=1)
-                if float(sides.min()) < 8.0 or float(sides.max() / sides.min()) > 2.8:
+                if float(sides.min()) < 4.0 or float(sides.max() / sides.min()) > 8.0:
                     continue
-                area = 0.5 * abs(
-                    float(
-                        np.dot(full[:, 0], np.roll(full[:, 1], -1))
-                        - np.dot(full[:, 1], np.roll(full[:, 0], -1))
-                    )
+                contour = full.astype(np.float32).reshape(-1, 1, 2)
+                if not cv2.isContourConvex(contour):
+                    continue
+                area = abs(float(cv2.contourArea(contour)))
+                if area < 36.0:
+                    continue
+                center = _qr_diagonal_center(full)
+                edge = full[1] - full[0]
+                angle = (
+                    math.degrees(math.atan2(float(edge[1]), float(edge[0]))) + 180
+                ) % 360 - 180
+                score = float(np.linalg.norm(center - selection_center)) / max(
+                    1.0, math.hypot(x1 - x0, y1 - y0)
                 )
-                if area < 200.0 or area > 6000.0:
-                    continue
-                center = full.mean(axis=0)
-                angle = float(cv2.minAreaRect(full.astype(np.float32))[2])
                 candidate = {
                     "ok": True,
                     "frame": {"w": w, "h": h},
@@ -2798,11 +2916,381 @@ def _detect_qr_roi(
                     "angle_deg": round(angle, 2),
                     "area_px": round(area, 1),
                 }
-                if best is None or candidate["area_px"] > best["area_px"]:
-                    best = candidate
+                if score < stage_score:
+                    stage_best, stage_score = candidate, score
+            if stage_best is not None:
+                best = stage_best
+                break
         if best is not None:
             break
     return best or {"ok": False, "frame": {"w": w, "h": h}, "error": "QR code not found near click"}
+
+
+def _refine_qr_corners(image: Any, points: np.ndarray) -> np.ndarray:
+    """Refine detector corners at original resolution when a local window fits."""
+    import cv2
+
+    h, w = image.shape[:2]
+    if np.any(points[:, 0] < 4) or np.any(points[:, 0] >= w - 4):
+        return points
+    if np.any(points[:, 1] < 4) or np.any(points[:, 1] >= h - 4):
+        return points
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    refined = points.astype(np.float32).reshape(-1, 1, 2)
+    cv2.cornerSubPix(
+        gray,
+        refined,
+        (3, 3),
+        (-1, -1),
+        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.01),
+    )
+    return refined.reshape(4, 2)
+
+
+def _qr_diagonal_center(points: np.ndarray) -> np.ndarray:
+    """Projectively correct centre: intersection of the two diagonals."""
+    p0, p1, p2, p3 = np.asarray(points, dtype=np.float64)
+    a = np.column_stack((p2 - p0, -(p3 - p1)))
+    try:
+        t = float(np.linalg.solve(a, p1 - p0)[0])
+    except np.linalg.LinAlgError:
+        return np.asarray(points, dtype=np.float32).mean(axis=0)
+    return np.asarray(p0 + t * (p2 - p0), dtype=np.float32)
+
+
+_camera_info_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def _camera_intrinsics(frame_w: int, frame_h: int) -> tuple[np.ndarray, np.ndarray]:
+    """Load D455 RGB intrinsics and scale them to the submitted frame size."""
+    global _camera_info_cache
+
+    data: dict[str, Any] | None = None
+    if CAMERA_INTRINSICS_FILE.exists():
+        try:
+            data = json.loads(CAMERA_INTRINSICS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = None
+    if data is None and _camera_info_cache and time.time() - _camera_info_cache[0] < 60:
+        data = _camera_info_cache[1]
+    if data is None:
+        try:
+            with urllib.request.urlopen(CAMERA_INFO_URL, timeout=3) as response:
+                data = json.loads(response.read())
+            _camera_info_cache = (time.time(), data)
+        except Exception as exc:
+            raise HTTPException(503, f"RGB camera intrinsics unavailable: {exc}") from exc
+    k = np.asarray(data.get("k"), dtype=np.float64)
+    d = np.asarray(data.get("d", []), dtype=np.float64)
+    source_w = int(data.get("width", 0))
+    source_h = int(data.get("height", 0))
+    if k.size != 9 or source_w <= 0 or source_h <= 0:
+        raise HTTPException(503, "RGB camera intrinsics are incomplete")
+    matrix = k.reshape(3, 3).copy()
+    sx, sy = frame_w / source_w, frame_h / source_h
+    matrix[0, 0] *= sx
+    matrix[0, 2] *= sx
+    matrix[1, 1] *= sy
+    matrix[1, 2] *= sy
+    return matrix, d.reshape(-1, 1)
+
+
+def _estimate_qr_camera_pose(
+    corners: list[dict[str, float]], frame_w: int, frame_h: int
+) -> dict[str, Any]:
+    import cv2
+
+    half = QR_CODE_SIZE_M / 2
+    object_points = np.asarray(
+        [
+            [-half, half, 0.0],
+            [half, half, 0.0],
+            [half, -half, 0.0],
+            [-half, -half, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    image_points = np.asarray([[p["x"], p["y"]] for p in corners], dtype=np.float64)
+    camera_matrix, distortion = _camera_intrinsics(frame_w, frame_h)
+    ok, rvec, tvec = cv2.solvePnP(
+        object_points,
+        image_points,
+        camera_matrix,
+        distortion,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE,
+    )
+    if not ok or float(tvec.reshape(3)[2]) <= 0:
+        ok, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            camera_matrix,
+            distortion,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+    if not ok or float(tvec.reshape(3)[2]) <= 0:
+        raise HTTPException(422, "QR pose could not be estimated from its corners")
+    projected, _ = cv2.projectPoints(
+        object_points, rvec, tvec, camera_matrix, distortion
+    )
+    reprojection = float(
+        np.sqrt(np.mean(np.sum((projected.reshape(-1, 2) - image_points) ** 2, axis=1)))
+    )
+    return {
+        "rvec": [round(float(v), 9) for v in rvec.reshape(3)],
+        "tvec": [round(float(v), 9) for v in tvec.reshape(3)],
+        "reprojection_error_px": round(reprojection, 3),
+        "qr_size_m": QR_CODE_SIZE_M,
+    }
+
+
+def _estimate_charuco_camera_pose(image: Any) -> dict[str, Any]:
+    """Estimate a fixed 5x7 ChArUco board pose for hand-eye calibration."""
+    import cv2
+
+    h, w = image.shape[:2]
+    camera_matrix, distortion = _camera_intrinsics(w, h)
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    board = cv2.aruco.CharucoBoard(
+        (CHARUCO_SQUARES_X, CHARUCO_SQUARES_Y),
+        CHARUCO_SQUARE_M,
+        CHARUCO_MARKER_M,
+        dictionary,
+    )
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if hasattr(cv2.aruco, "CharucoDetector"):
+        detector = cv2.aruco.CharucoDetector(board)
+        charuco_corners, charuco_ids, _, _ = detector.detectBoard(gray)
+    else:  # OpenCV 4.9 compatibility on the robot
+        marker_corners, marker_ids, _ = cv2.aruco.detectMarkers(gray, dictionary)
+        if marker_ids is None:
+            charuco_corners, charuco_ids = None, None
+        else:
+            _, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
+                marker_corners,
+                marker_ids,
+                gray,
+                board,
+                cameraMatrix=camera_matrix,
+                distCoeffs=distortion,
+            )
+    count = 0 if charuco_ids is None else len(charuco_ids)
+    if count < 8:
+        raise HTTPException(422, f"ChArUco board needs at least 8 visible corners; found {count}")
+    if hasattr(board, "matchImagePoints"):
+        object_points, image_points = board.matchImagePoints(charuco_corners, charuco_ids)
+        ok, rvec, tvec = cv2.solvePnP(
+            object_points,
+            image_points,
+            camera_matrix,
+            distortion,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+    else:
+        ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
+            charuco_corners,
+            charuco_ids,
+            board,
+            camera_matrix,
+            distortion,
+            None,
+            None,
+        )
+        object_points, image_points = board.matchImagePoints(charuco_corners, charuco_ids)
+    if not ok:
+        raise HTTPException(422, "ChArUco board pose could not be estimated")
+    projected, _ = cv2.projectPoints(
+        object_points, rvec, tvec, camera_matrix, distortion
+    )
+    reprojection = float(
+        np.sqrt(
+            np.mean(
+                np.sum(
+                    (projected.reshape(-1, 2) - np.asarray(image_points).reshape(-1, 2)) ** 2,
+                    axis=1,
+                )
+            )
+        )
+    )
+    return {
+        "rvec": [round(float(v), 9) for v in rvec.reshape(3)],
+        "tvec": [round(float(v), 9) for v in tvec.reshape(3)],
+        "reprojection_error_px": round(reprojection, 3),
+        "corners": count,
+    }
+
+
+def _rpy_rotation(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    rx, ry, rz = map(math.radians, (roll, pitch, yaw))
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    return np.asarray(
+        [
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _pose_transform(pose: dict[str, float]) -> np.ndarray:
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = _rpy_rotation(pose["roll"], pose["pitch"], pose["yaw"])
+    transform[:3, 3] = [pose["x"], pose["y"], pose["z"]]
+    return transform
+
+
+def _transform_pose(transform: np.ndarray) -> dict[str, float]:
+    rotation = transform[:3, :3]
+    pitch = math.atan2(-rotation[2, 0], math.hypot(rotation[0, 0], rotation[1, 0]))
+    if abs(math.cos(pitch)) > 1e-8:
+        roll = math.atan2(rotation[2, 1], rotation[2, 2])
+        yaw = math.atan2(rotation[1, 0], rotation[0, 0])
+    else:
+        roll = 0.0
+        yaw = math.atan2(-rotation[0, 1], rotation[1, 1])
+    return {
+        "x": round(float(transform[0, 3]), 6),
+        "y": round(float(transform[1, 3]), 6),
+        "z": round(float(transform[2, 3]), 6),
+        "roll": round(math.degrees(roll), 4),
+        "pitch": round(math.degrees(pitch), 4),
+        "yaw": round(math.degrees(yaw), 4),
+    }
+
+
+def _load_hand_eye_calibration() -> dict[str, Any]:
+    empty = {"samples": [], "camera_to_tool": None, "needed": 10, "qr_size_m": QR_CODE_SIZE_M}
+    if not HAND_EYE_CALIBRATION_FILE.exists():
+        return empty
+    try:
+        data = json.loads(HAND_EYE_CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    data.setdefault("samples", [])
+    data.setdefault("camera_to_tool", None)
+    data["needed"] = 10
+    data["qr_size_m"] = QR_CODE_SIZE_M
+    return data
+
+
+def _save_hand_eye_calibration(data: dict[str, Any]) -> None:
+    HAND_EYE_CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HAND_EYE_CALIBRATION_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(HAND_EYE_CALIBRATION_FILE)
+
+
+def _solve_hand_eye(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    import cv2
+
+    if len(samples) < 10:
+        raise HTTPException(409, "at least ten stationary wrist-camera samples are required")
+    gripper_rotations: list[np.ndarray] = []
+    gripper_translations: list[np.ndarray] = []
+    target_rotations: list[np.ndarray] = []
+    target_translations: list[np.ndarray] = []
+    for sample in samples:
+        tool = _pose_transform(sample["arm_pose"])
+        gripper_rotations.append(tool[:3, :3])
+        gripper_translations.append(tool[:3, 3].reshape(3, 1))
+        target_rotation, _ = cv2.Rodrigues(
+            np.asarray(sample["camera_rvec"], dtype=np.float64).reshape(3, 1)
+        )
+        target_rotations.append(target_rotation)
+        target_translations.append(
+            np.asarray(sample["camera_tvec"], dtype=np.float64).reshape(3, 1)
+        )
+    camera_to_tool_rotation, camera_to_tool_translation = cv2.calibrateHandEye(
+        gripper_rotations,
+        gripper_translations,
+        target_rotations,
+        target_translations,
+        method=cv2.CALIB_HAND_EYE_PARK,
+    )
+    if not np.all(np.isfinite(camera_to_tool_rotation)) or not np.all(
+        np.isfinite(camera_to_tool_translation)
+    ):
+        raise HTTPException(422, "hand-eye calibration did not produce a finite transform")
+    return {
+        "rotation": camera_to_tool_rotation.tolist(),
+        "translation": camera_to_tool_translation.reshape(3).tolist(),
+    }
+
+
+def _qr_base_pose(
+    arm_pose: dict[str, float],
+    camera_pose: dict[str, Any],
+    camera_to_tool: dict[str, Any],
+    target_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> dict[str, float]:
+    import cv2
+
+    tool_from_camera = np.eye(4, dtype=np.float64)
+    tool_from_camera[:3, :3] = np.asarray(camera_to_tool["rotation"], dtype=np.float64)
+    tool_from_camera[:3, 3] = np.asarray(camera_to_tool["translation"], dtype=np.float64)
+    camera_from_qr = np.eye(4, dtype=np.float64)
+    camera_from_qr[:3, :3], _ = cv2.Rodrigues(
+        np.asarray(camera_pose["rvec"], dtype=np.float64).reshape(3, 1)
+    )
+    camera_from_qr[:3, 3] = np.asarray(camera_pose["tvec"], dtype=np.float64)
+    qr_from_target = np.eye(4, dtype=np.float64)
+    qr_from_target[:3, 3] = target_offset
+    return _transform_pose(
+        _pose_transform(arm_pose) @ tool_from_camera @ camera_from_qr @ qr_from_target
+    )
+
+
+def _decode_submitted_image(data_url: str) -> Any:
+    if len(data_url) > 4_000_000 or not data_url.startswith("data:image/"):
+        raise HTTPException(413, "submitted camera frame is invalid or too large")
+    try:
+        _, encoded = data_url.split(",", 1)
+        payload = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, "submitted camera frame is not valid base64") from exc
+    import cv2
+
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(400, "submitted camera frame is not a valid image")
+    return image
+
+
+def _require_stationary_arm(controller: ArmController, captured_pose: dict[str, float]) -> None:
+    if not all(math.isfinite(float(value)) for value in captured_pose.values()):
+        raise HTTPException(422, "captured arm pose contains non-finite values")
+    after_status = controller.status()
+    after_pose = after_status.get("pose")
+    position_delta = (
+        math.dist(
+            [captured_pose[key] for key in ("x", "y", "z")],
+            [after_pose[key] for key in ("x", "y", "z")],
+        )
+        if after_pose is not None
+        else math.inf
+    )
+    angle_delta = (
+        max(
+            abs((captured_pose[key] - after_pose[key] + 180) % 360 - 180)
+            for key in ("roll", "pitch", "yaw")
+        )
+        if after_pose is not None
+        else math.inf
+    )
+    if (
+        not after_status.get("connected")
+        or after_status.get("busy")
+        or position_delta > 0.002
+        or angle_delta > 1.0
+    ):
+        raise HTTPException(
+            409,
+            "arm moved while the frozen frame was processed; stop the arm and capture again",
+        )
 
 
 def _load_vision_calibration() -> dict[str, Any]:
@@ -3416,13 +3904,71 @@ def _level_placement_pose(cage: CageIn, pose: dict[str, float]) -> dict[str, flo
     return {**pose, "roll": 0.0, "pitch": 0.0, "yaw": (cage.yaw + 270.0) % 360.0 - 180.0}
 
 
-def _verify_placement_attitude(actual: dict[str, float] | None, target: dict[str, float]) -> None:
-    if actual is None or any(
-        not math.isfinite(actual[key])
-        or abs((actual[key] - target[key] + 180) % 360 - 180) > 2.0
-        for key in ("roll", "pitch", "yaw")
-    ):
-        raise HTTPException(409, "placement attitude is not level/aligned within 2 degrees; gripper remains closed")
+def _attitude_errors(
+    actual: dict[str, float] | None, target: dict[str, float]
+) -> dict[str, float] | None:
+    if actual is None:
+        return None
+    errors: dict[str, float] = {}
+    for key in ("roll", "pitch", "yaw"):
+        value = actual.get(key)
+        expected = target.get(key)
+        if value is None or expected is None or not all(
+            math.isfinite(float(item)) for item in (value, expected)
+        ):
+            return None
+        errors[key] = abs((float(value) - float(expected) + 180.0) % 360.0 - 180.0)
+    return errors
+
+
+def _attitude_error_detail(
+    actual: dict[str, float] | None,
+    target: dict[str, float],
+    errors: dict[str, float] | None,
+) -> str:
+    if actual is None or errors is None:
+        return "actual attitude unavailable"
+    return (
+        "actual R/P/Y "
+        f"{actual['roll']:.1f}/{actual['pitch']:.1f}/{actual['yaw']:.1f} deg; "
+        "target "
+        f"{target['roll']:.1f}/{target['pitch']:.1f}/{target['yaw']:.1f} deg; "
+        "error "
+        f"{errors['roll']:.1f}/{errors['pitch']:.1f}/{errors['yaw']:.1f} deg"
+    )
+
+
+def _verify_level_attitude(
+    actual: dict[str, float] | None,
+    target: dict[str, float],
+    *,
+    stage: str = "outer retract",
+) -> None:
+    """Require a level tool outside the cage; yaw is aligned at pre-gate."""
+    errors = _attitude_errors(actual, target)
+    if errors is None or any(errors[key] > 2.0 for key in ("roll", "pitch")):
+        detail = _attitude_error_detail(actual, target, errors)
+        raise HTTPException(
+            409,
+            f"{stage}: gripper is not level within 2 degrees ({detail}); "
+            "gripper remains closed",
+        )
+
+
+def _verify_placement_attitude(
+    actual: dict[str, float] | None,
+    target: dict[str, float],
+    *,
+    stage: str = "placement",
+) -> None:
+    errors = _attitude_errors(actual, target)
+    if errors is None or any(errors[key] > 2.0 for key in ("roll", "pitch", "yaw")):
+        detail = _attitude_error_detail(actual, target, errors)
+        raise HTTPException(
+            409,
+            f"{stage}: placement attitude is not level/aligned within 2 degrees "
+            f"({detail}); gripper remains closed",
+        )
 
 
 def plan_pick_path(
@@ -3595,6 +4141,12 @@ def plan_pick_path(
         zone = "gate" if abs(local[1]) <= 1e-6 else ("inside" if in_box else "outside")
         reach = math.hypot(pose["x"], pose["y"])
         issues: list[str] = list(target_issues) if kind == "target" else []
+        if kind == "pre_gate" and reach < MIN_RETRACT_RADIUS_M - 1e-6:
+            issues.append(
+                f"pre_gate reach {reach:.3f} m is inside the "
+                f"{MIN_RETRACT_RADIUS_M:.3f} m base exclusion zone; "
+                "move or reteach the cage opening before grasping"
+            )
         if reach > max_reach_m + 1e-6:
             issues.append(f"horizontal reach {reach:.3f} m > {max_reach_m:.3f} m")
         if not (MIN_POSE_Z_M <= pose["z"] <= MAX_POSE_Z_M):
@@ -3829,19 +4381,22 @@ def create_app(controller: ArmController) -> FastAPI:
 
     @app.post("/api/vision/qr")
     def vision_qr(body: QrIn) -> dict[str, Any]:
-        """Detect the QR tag near a click in the current RGB snapshot."""
-        try:
-            with urllib.request.urlopen(CAMERA_SNAPSHOT_URL, timeout=6) as response:
-                payload = response.read()
-        except Exception as exc:
-            raise HTTPException(502, f"camera snapshot unavailable: {exc}") from exc
-        try:
-            import cv2
-        except ImportError as exc:  # pragma: no cover
-            raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
-        image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise HTTPException(502, "camera snapshot was not a valid image")
+        """Detect the QR in the exact browser frame and estimate its 3D pose."""
+        if body.image_data_url:
+            image = _decode_submitted_image(body.image_data_url)
+        else:
+            try:
+                with urllib.request.urlopen(CAMERA_SNAPSHOT_URL, timeout=6) as response:
+                    payload = response.read()
+            except Exception as exc:
+                raise HTTPException(502, f"camera snapshot unavailable: {exc}") from exc
+            try:
+                import cv2
+            except ImportError as exc:  # pragma: no cover
+                raise HTTPException(503, "OpenCV is not installed on the arm server") from exc
+            image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                raise HTTPException(502, "camera snapshot was not a valid image")
         roi_values = (body.roi_x, body.roi_y, body.roi_w, body.roi_h)
         roi = None
         if any(value is not None for value in roi_values):
@@ -3851,7 +4406,86 @@ def create_app(controller: ArmController) -> FastAPI:
             if rw < 20 or rh < 20:
                 raise HTTPException(400, "ROI must be at least 20x20 pixels")
             roi = (rx, ry, rw, rh)
-        return _detect_qr_roi(image, body.x, body.y, body.radius, roi)
+        result = _detect_qr_roi(image, body.x, body.y, body.radius, roi)
+        if not result.get("ok"):
+            return result
+        result["captured_at"] = body.captured_at
+        arm_pose = body.arm_pose.model_dump() if body.arm_pose is not None else None
+        result["arm_pose"] = arm_pose
+        if arm_pose is not None:
+            try:
+                _require_stationary_arm(controller, arm_pose)
+            except HTTPException as exc:
+                result["arm_pose"] = None
+                arm_pose = None
+                result["pose_error"] = str(exc.detail)
+        try:
+            camera_pose = _estimate_qr_camera_pose(
+                result["corners"], result["frame"]["w"], result["frame"]["h"]
+            )
+            result["camera_pose"] = camera_pose
+            hand_eye = _load_hand_eye_calibration()
+            if arm_pose is not None and hand_eye.get("camera_to_tool"):
+                result["base_pose"] = _qr_base_pose(
+                    arm_pose, camera_pose, hand_eye["camera_to_tool"]
+                )
+                result["target_pose"] = _qr_base_pose(
+                    arm_pose,
+                    camera_pose,
+                    hand_eye["camera_to_tool"],
+                    (
+                        body.target_offset_x_m,
+                        body.target_offset_y_m,
+                        body.target_offset_z_m,
+                    ),
+                )
+        except HTTPException as exc:
+            result["pose_error"] = str(exc.detail)
+        return result
+
+    @app.get("/api/vision/hand_eye")
+    def hand_eye_calibration() -> dict[str, Any]:
+        return _load_hand_eye_calibration()
+
+    @app.post("/api/vision/hand_eye/capture")
+    def capture_hand_eye_point(body: HandEyeCaptureIn) -> dict[str, Any]:
+        image = _decode_submitted_image(body.image_data_url)
+        camera_pose = _estimate_charuco_camera_pose(image)
+        arm_pose = body.arm_pose.model_dump()
+        _require_stationary_arm(controller, arm_pose)
+        sample = {
+            "arm_pose": arm_pose,
+            "camera_rvec": camera_pose["rvec"],
+            "camera_tvec": camera_pose["tvec"],
+            "captured_at": body.captured_at,
+        }
+        data = _load_hand_eye_calibration()
+        data["samples"].append(sample)
+        data["camera_to_tool"] = None
+        data["last_capture"] = {
+            "corners": camera_pose["corners"],
+            "reprojection_error_px": camera_pose["reprojection_error_px"],
+        }
+        _save_hand_eye_calibration(data)
+        return data
+
+    @app.post("/api/vision/hand_eye/solve")
+    def solve_hand_eye_calibration() -> dict[str, Any]:
+        data = _load_hand_eye_calibration()
+        data["camera_to_tool"] = _solve_hand_eye(data["samples"])
+        _save_hand_eye_calibration(data)
+        return data
+
+    @app.delete("/api/vision/hand_eye")
+    def reset_hand_eye_calibration() -> dict[str, Any]:
+        data = {
+            "samples": [],
+            "camera_to_tool": None,
+            "needed": 10,
+            "qr_size_m": QR_CODE_SIZE_M,
+        }
+        _save_hand_eye_calibration(data)
+        return data
 
     @app.get("/api/vision/calibration")
     def vision_calibration() -> dict[str, Any]:

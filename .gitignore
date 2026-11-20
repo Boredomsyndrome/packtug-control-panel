@@ -10,6 +10,8 @@ __pycache__/
 *.pyc
 
 server/vision_calibration.json
+server/hand_eye_calibration.json
+server/camera_intrinsics.json
 
 # teammate pull-mode source is its own nested git repo
 wheeltec-webctl/

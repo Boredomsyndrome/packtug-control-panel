@@ -6,7 +6,8 @@ from fastapi import HTTPException
 
 from server.arm_server import (
     ArmController, CageIn, ExecutePickIn, PickPathIn, PoseIn,
-    _cage_to_world, decode_hardware_faults, plan_pick_path,
+    _cage_to_world, _verify_level_attitude, _verify_placement_attitude,
+    decode_hardware_faults, plan_pick_path,
 )
 
 
@@ -17,7 +18,7 @@ class PickTargetTests(unittest.TestCase):
 
     def test_demo_targets_enter_through_gate(self):
         for yaw in (0, 90, -90, 37, 180):
-            cage = CageIn(x=0, y=0, z=0.02, yaw=yaw)
+            cage = CageIn(x=.3, y=0, z=0.02, yaw=yaw)
             for local in ((-.080, .160, .055), (.081, .160, .055), (0, .160, .165), (-.080, .065, .055), (.081, .065, .055)):
                 plan = plan_pick_path(PickPathIn(
                     start=self.pose(cage, (local[0], -.08, local[2])),
@@ -112,6 +113,39 @@ class PickTargetTests(unittest.TestCase):
                 arm.move_pose_deg(.25, 0, .2, 180, 0, 0, strict_linear=True)
         arm._robot.inverse_kinematics.assert_not_called()
         arm._robot.move_joints.assert_not_called()
+
+    def test_outer_retract_allows_yaw_error_but_gate_does_not(self):
+        target = dict(x=.2, y=0, z=.2, roll=0, pitch=0, yaw=0)
+        # This matches the hardware reading from the failed run: the gripper
+        # is level, but J5 is near its limit and yaw is still 4.3 degrees away.
+        actual = dict(x=.2, y=-.2, z=.2, roll=-.3, pitch=.1, yaw=-4.3)
+        _verify_level_attitude(actual, target)
+        with self.assertRaises(HTTPException) as caught:
+            _verify_placement_attitude(actual, target)
+        self.assertIn("actual R/P/Y -0.3/0.1/-4.3", caught.exception.detail)
+        self.assertIn("error 0.3/0.1/4.3", caught.exception.detail)
+
+    def test_pre_gate_near_base_blocks_before_grasp(self):
+        cage = CageIn(x=.081, y=-.038, z=.02, yaw=-94.3)
+        start = PoseIn(x=-.1, y=-.25, z=.2, roll=0, pitch=0, yaw=-48.4)
+        target = self.pose(cage, (0, .12, .18))
+        plan = plan_pick_path(PickPathIn(start=start, target=target, cage=cage), None, .47)
+        pre_gate = next(point for point in plan['points'] if point['kind'] == 'pre_gate')
+        self.assertLess(pre_gate['reach_m'], .18)
+        self.assertFalse(plan['ok'])
+        self.assertTrue(any('base exclusion zone' in issue for issue in pre_gate['issues']))
+        arm = ArmController(mock=True)
+        arm._check_motion_locked = Mock()
+        arm.tool = 'GRIPPER_1'
+        arm.pose = start.model_dump()
+        arm.set_velocity = Mock()
+        arm._gripper_action = Mock()
+        arm.move_pose_deg = Mock()
+        result = arm.execute_pick_place(ExecutePickIn(target=target, home=start, cage=cage))
+        self.assertEqual(result['stage'], 'pre_gate_check', result)
+        arm.set_velocity.assert_not_called()
+        arm._gripper_action.assert_not_called()
+        arm.move_pose_deg.assert_not_called()
 
 
 if __name__ == '__main__':

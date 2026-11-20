@@ -83,10 +83,10 @@
 - D455 RGB works at `640x480@15`; D455 depth does **not** produce frames over this USB2 link. The earlier depth data on `/camera` came from the **Orbbec Astra S**, which is used by the S200 navigation stack — do not kill or reconfigure it.
 - D455 uses namespace `camera_name:=d455` and topics `/d455/color/...`, `/d455/depth/...` to avoid colliding with Orbbec on `/camera`.
 - Mode switch (`/api/camera/mode?value=rgb|depth`) restarts the camera and takes ~10 s. RGB is the working mode; Depth will be blank until a USB3 host or D405 is available.
-- `camera_stream.py` also serves color/depth MJPEG and `depth_stats`; the FastAPI proxy must preserve the upstream `Content-Type` including `boundary=frame`, otherwise the browser shows live but no image.
+- `camera_stream.py` also serves color/depth MJPEG, `depth_stats`, and D455 RGB intrinsics at `/camera_info`; the FastAPI proxy must preserve the upstream `Content-Type` including `boundary=frame`, otherwise the browser shows live but no image.
 - Start/stop the Jetson bridge with `fuser -k 8080/tcp` or an anchored kill; do not leave an old `camera_stream.py` holding port 8080.
-- Camera URLs default to `http://100.73.98.69:8080/{stream,depth,mode}` via `CAMERA_STREAM_URL`, `CAMERA_DEPTH_URL`, `CAMERA_MODE_URL`; override if the Tailscale IP changes. `camera_stream.py` also serves `/snapshot`, which the QR endpoint uses.
-- The camera is moving from the temporary cart/tape view to a rigid **arm/wrist mount** (eye-in-hand). Once it is on the arm, the existing fixed-camera 6-point pixel→arm calibration is invalid. Use camera intrinsics + `T_tool_camera` hand-eye calibration, then combine with the current arm pose. Keep the mount rigid and synchronize capture with a stationary arm pose.
+- Camera URLs default to `http://100.73.98.69:8080/{stream,depth,mode,camera_info}` via `CAMERA_STREAM_URL`, `CAMERA_DEPTH_URL`, `CAMERA_MODE_URL`, `CAMERA_INFO_URL`; override if the Tailscale IP changes. QR clicks submit the exact frozen browser frame; `/snapshot` remains the compatibility fallback.
+- For the rigid **arm/wrist mount** (eye-in-hand), the Arm UI uses D455 intrinsics and 10–15 stationary views of the fixed 5x7 ChArUco board (`docs/calibration/charuco_5x7_30mm_a4_300dpi.png`, 30 mm squares) to solve `T_tool_camera`, then combines it with the synchronized arm pose and runtime 35 mm QR PnP. Keep the mount and board rigid. Local samples live in `server/hand_eye_calibration.json` and are user data.
 - D455 may be disconnected independently of the Jetson; camera loss must not be presented as an arm/base fault.
 
 ## Vision / QR
@@ -96,7 +96,7 @@
 - UI: in the Camera card, click the QR or drag a box around it; the overlay shows the center/corners/angle. The **Vision calibration** card records `(QR pixel → current arm x/y)` **only for a fixed camera**.
 - Calibration endpoints: `GET/POST/DELETE /api/vision/calibration`, `POST /api/vision/calibration/point`, `POST /api/vision/calibration/solve`, and `POST /api/vision/map`.
 - Fixed-camera calibration requires **6 2D-spread points**, not 4. A 4-point fit with RMSE 0 is mathematically meaningless; the backend rejects points with less than 80 px x-spread, 20 px y-spread, or 40 mm arm x/y spread.
-- The last saved fixed-camera 6-point calibration is **not usable**: it solved with roughly **19.7 mm RMSE**. Do not use it for autonomous motion, and do not reuse it after the camera is mounted on the arm. For eye-in-hand, calibrate `T_tool_camera` with a fixed ChArUco board over 10–15 arm poses.
+- The legacy fixed-camera 6-point calibration is **not usable**: it solved with roughly **19.7 mm RMSE** and is no longer used by the Arm UI. Do not reuse it after the camera is mounted on the arm. The wrist workflow must still be physically calibrated before QR base coordinates are available.
 - No autonomous pick state machine exists yet. `/api/arm/pose` can move linearly, but a test lift was aborted by the robot with a collision/motor-trajectory error. Do not claim automatic pick/place is working.
 - Do **not** trust the first calibration of a session: verify the residual with at least 6 points and keep the workspace clear.
 

@@ -30,8 +30,10 @@ expect() { # name expected url+curl args...
     echo "  FAIL  $name want=$want got=$got"; fail=1; fi
 }
 
-expect "browser api needs Basic auth (401)"  401 http://127.0.0.1:8901/api/robot
-expect "browser api with auth (200)"         200 -u smokeuser:smokepass http://127.0.0.1:8901/api/robot
+# v3.2 policy: browser password REMOVED (network trust = access control);
+# stale 401 expectation from the Basic-auth era used to make this gate red.
+expect "browser api open, no auth (200)"     200 http://127.0.0.1:8901/api/robot
+expect "browser api tolerant of Basic hdr"   200 -u smokeuser:smokepass http://127.0.0.1:8901/api/robot
 expect "SPA served (200)"                    200 -u smokeuser:smokepass http://127.0.0.1:8901/
 expect "garbage cmd -> 400"                  400 -u smokeuser:smokepass -X POST \
        -H 'Content-Type: application/json' -d '{"vx":"bad"}' \

@@ -1,5 +1,11 @@
 # FULL CODE MERGE PLAN — wheeltec-webctl × packtug-control-panel
 
+> **MIGRATION STATUS 2026-11-21**: executed with packtug-control-panel as the
+> destination repo (per Comet's tasking) instead of wheeltec-webctl. All
+> robotless tiers green + rollbacks drilled → `docs/MERGE/EVIDENCE-v3.7.md`.
+> Phase 2 (CPU budget) + Phase 1 on-robot items + CS-C deferred to one
+> robot power-on session. Deviations are marked inline.
+
 **Date:** 2026-11-20 · **Status: PLANNING ONLY — repo contains ZERO merge code (owner ordered a full revert; this doc is the single source of truth).**
 **Repos & anchors:**
 - `~/wheeltec-webctl` @ **b7c8bcf** (v3.6.6, Django hub :8090 + robotctl client) — CLEAN
@@ -33,8 +39,8 @@ Rules of truth: **robot client/nav/Hub ⇐ our repo. Arm/vision/panel ⇐ packtu
 | D6 | CPU work | run recon first, then decide low-CPU profile go |
 
 ## 2. Phase 0 — Freeze
-- [ ] Tag ours `git tag v3.6.6-premerge-ours`; packtug `git tag v3.6.6-fusion-base ca265cc`.
-- [ ] Recon live robot FIRST (their fork may be what's flashed): `head -25 ~/robotctl/navctl.sh`, `pgrep -af webctl_navctl_ekf`, `cat ~/robotctl/robotctl.env | grep WEBCTL_SERVER` (which hub does the client dial?).
+- [x] Tags exist: `v3.6.6-premerge-ours`, `v3.6.6-fusion-base` (ca265cc).
+- [ ] (deferred → CS-C1, robot offline all migration) Recon live robot FIRST (their fork may be what's flashed): `head -25 ~/robotctl/navctl.sh`, `pgrep -af webctl_navctl_ekf`, `cat ~/robotctl/robotctl.env | grep WEBCTL_SERVER` (which hub does the client dial?).
 - Verify: tags exist both repos; recon output saved to this plan's folder.
 
 ## 3. Phase 1 — Robot client merge (our repo = destination)
@@ -42,8 +48,8 @@ All in `~/wheeltec-webctl`. Robot deploys ONLY via `tools/deploy_robot.py` after
 
 ### 1.0 P0 — real-route bug on Humble (theirs proved ours broken)
 Verified vs `ros2/rclpy@humble` source: `ClientGoalHandle` has **only `get_result_async()`**; our `robotctl/navd.py:299` uses `goal.result_future` → AttributeError → every REAL route instantly fails; `_result_cb` also misses the `GetResult.Response` wrapper (`res.result`). Dry-FSM tests never reach this path → hidden.
-- [ ] Port both hunks from `packtug .../deploy/nav/navd.py` route start/result callbacks.
-- [ ] Harden shim: fake `ClientGoalHandle.get_result_async()` → future resolving to Response-wrapping-Result; new integration check "route completes via get_result_async".
+- [x] Ported + fixed (commit fc8db69, get_result_async/GetResult.Response).
+- [x] CS-B1 exact-Humble shim gate + sim_fleet route lifecycle green.
 - Verify: shim gate + integration; then on-robot route smoke (ordered by Comet).
 
 ### 1.1 Port INTO ours (file → file, with locator)
@@ -74,32 +80,32 @@ Full analysis: `2026-11-20-jetson-cpu-budget.md` (keep). Key: nav stack is ALREA
 - Never touch raw `mapper_rplidar_a1.yaml` in-place (keep as A/B baseline).
 
 ## 5. Phase 3 — Arm bridge co-location on potatoserver2 (pre-fusion stage)
-- [ ] `run_bridge.sh` (loopback bind, `--mock` until real-arm topology decided) + tmux session `packtug`.
-- [ ] Their tests green here: `PYTHONPATH=. .venv/bin/pytest tests -q` (23 pass) + `node tests/digitalTwin.test.mjs`.
-- [ ] `/api/health`, `/api/vehicle` (live s2000-1 via hub) verified — re-verify after each pull.
+- [x] SUPERSEDED by direct fusion: standalone :8020 bridge skipped; bridge mounts in-process on the single port (v3.7 phase4, commit 370fb52).
+- [x] 23 pytest + 6 node green in-tree (CS-A5).
+- [x] Both served through the ONE fused port (CS-B3 [13]); live verify at cutover.
 - [ ] Re-sync policy: vendor = `git pull` their tag; NEVER hand-edit vendored code.
 
 ## 6. Phase 4 — Backend fusion (Option A — in-process ASGI mount; zero rewrite)
 Their `create_app(controller)` is a pure ASGI factory; URL spaces disjoint (`/api/robot|ws|robotctl` vs `/api/arm|camera|vision|vehicle|health`); same py3.14+uvicorn 0.54.
-- [ ] Vendor `server/` → `backend/armbridge/` (plain package); add fastapi/pydantic/opencv-python-headless to hub `requirements.txt`; `PACKTUG_MOCK=1` env.
-- [ ] `backend/webctl/asgi.py`: prefix router BEFORE StaticFilesRouter (same pattern as ws-match) — bridge paths → FastAPI scope verbatim; import-guard ⇒ bridge optional.
-- [ ] Panel build: `vite base:'/panel/'` + `<BrowserRouter basename>`; hub whitenoise serves `dist/panel/`.
-- [ ] New integration checks through :8090 ONLY: bridge health, arm status mock, `/api/vehicle` loopback, ws latency still <150 ms under MJPEG proxy load.
-- [ ] Gates 1→5 all green with bridge imported = fused release; rollback = one asgi.py revert.
+- [x] DEVIATION: `server/` stays in place (this repo IS its origin — no vendored copy, zero hand edits; CS-I1 `git diff ca265cc -- server/` empty). Deps + `PACKTUG_MOCK` (defaults 1) in requirements/settings.
+- [x] asgi.py bridge match before everything; import-guard = bridge-absent mode (sim in [13]).
+- [x] DEVIATION (better single-site): panel at ROOT '/' (dist/), AGV console at /agv/ (agv-console/, vite base /agv/); '/panel/' additionally serves the panel index (CS-B4 check). Deep links via index_view.
+- [x] CS-B3 section [13] on the fused test port; live :8090 rerun at cutover.
+- [x] CS-A/B/I green (docs/MERGE/EVIDENCE-v3.7.md); rollback DRILLED pre-phase states incl. phase-4 revert point.
 - [ ] Later hygiene: split 470-ln `create_app` into 3 APIRouters (their repo first, then vendor).
 
 ## 7. Phase 5 — Operator UI unification (panel = THE surface; webctl console = emergency/drive)
-- [ ] Fleet: live nav snapshot via bridge passthrough + LiDAR canvas port (from our `frontend/src/App.jsx` sweep) through `/api/vehicle/<id>/scan`.
-- [ ] "AGV Console" page = iframe of hub root (network-trusted).
-- [ ] Mock-badge fix: bridge `/api/health` expose `vehicle_backend` state; chip reads it (Fleet = LIVE when hub answers).
+- [x] DEVIATION: single-origin lets Fleet read `/api/robot/<id>/scan` directly (no bridge hop); sweep port = src/components/LidarSweep.tsx; odom/nav_mode from fleet snapshot.
+- [x] /drive page iframes /agv/ (commit 60f6613).
+- [x] Implemented as two probed chips (AGV=fleet probe, bridge=mock flag) in src/lib/vehicleStatus.ts + 4 unit tests — simpler than a new backend field.
 - [ ] Map import placeholder ← hub `/api/robot/<id>/maps/*.pgm` fetched + drawn as warehouse base layer.
-- [ ] `npm run typecheck && npm run build` green + screenshots sign-off.
+- [x] green (panel + agv-console); screenshots sign-off pending (C tier).
 - UI spec reminder: v3.4 rules (LiDAR-only, no AGV camera pane) apply to webctl console; panel's arm-camera exempt.
 
 ## 8. Phase 6 — Decommission & hygiene
 - [ ] Robot both env files → hub list URLs only (no Mac); re-arm `watchdog_vpn.sh` cron.
 - [ ] Token: rotate if Mac hub logs saw it; `~/.config/wheeltec-hub-token` stays backup.
-- [ ] packtug `deploy/nav/` → generated copies with "source = wheeltec-webctl" header.
+- [x] generated-from: ca265cc headers + FROZEN REFERENCE README (commit 7f04ed0).
 - [ ] Docs: hub `docs/API.md` + bridge endpoints; their `AGENTS.md` + hub-canonical note.
 
 ## 9. Global verification matrix

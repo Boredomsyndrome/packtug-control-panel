@@ -1,5 +1,10 @@
 # MERGE COMPLETION STANDARD — CS-01…CS-9x
 **"Flawless" defined as: every CS below PASSes with archived evidence. Robot NOT required for CS-A/CS-B/CS-I tiers (robot will be offline during migration). CS-C tier is a deferred, single power-on session.**
+
+> **STATUS 2026-11-21**: CS-A1–A5, B1–B5, I1–I6 GREEN with archived runs in
+> `docs/MERGE/EVIDENCE-v3.7.md` (B2 = tools/sim_fleet.py 16/16; I6 drilled ×4).
+> CS-A6 :8020 leg SUPERSEDED by in-process fusion (live :8090/api/health check
+> belongs to cutover); CS-C deferred — robot offline the whole window.
 Baseline captured 2026-11-21 19:11 UTC on `~/wheeltec-webctl` @ `876e044` + `~/packtug-control-panel` @ `ca265cc`. Evidence dir: `~/wheeltec-webctl/.hermes/plans/baseline/` (per-phase reruns go to `baseline/phaseN/`).
 
 ---

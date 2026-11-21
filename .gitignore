@@ -27,3 +27,4 @@ __MACOSX/
 
 # robot deploy tarballs + scratch
 *.tar.gz
+.env.server

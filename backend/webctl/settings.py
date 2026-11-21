@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent   # backend/
 PROJECT_ROOT = BASE_DIR.parent                      # wheeltec-webctl/
 
+# Hub runtime secrets live in .env.server (gitignored, 600) — the tracked
+# .env is the VITE build config and must never carry tokens (CS-I4).
+load_dotenv(PROJECT_ROOT / ".env.server")
 load_dotenv(PROJECT_ROOT / ".env")
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
@@ -69,7 +72,7 @@ ROOT_URLCONF = "webctl.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [PROJECT_ROOT / "frontend" / "dist"],
+        "DIRS": [PROJECT_ROOT / "dist"],
         # APP_DIRS True: drf_spectacular's redoc template ships in its own
         # app dir; without this /api/redoc 500s (TemplateDoesNotExist)
         "APP_DIRS": True,
@@ -89,8 +92,10 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# Serve the built React app (frontend/dist) directly: /assets/* etc.
-WHITENOISE_ROOT = PROJECT_ROOT / "frontend" / "dist"
+# Fused site (2026-11-21): the panel SPA builds to repo-root dist/ and is
+# the site root; the AGV console builds to dist/agv/ (served at /agv/).
+# WhiteNoise serves both; index routing lives in robot/views.index_view.
+WHITENOISE_ROOT = PROJECT_ROOT / "dist"
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "WHEELTEC WebCtl API",

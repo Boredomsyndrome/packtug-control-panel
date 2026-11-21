@@ -59,6 +59,11 @@ ENV = {
     "MAX_LIN": "0.5", "MAX_ROT": "0.7", "CMD_TIMEOUT": "0.5",
     "DJANGO_SECRET_KEY": "itest", "DJANGO_DEBUG": "true",
     "ALLOWED_HOSTS": "127.0.0.1,localhost",
+    # v3.7 fusion: the in-process FastAPI bridge proxies OUR hub — point it
+    # at the test instance (default would dial live prod :8090). MOCK is the
+    # asgi default; pinned here anyway (CS-B3 never touches real hardware).
+    "WHEELTEC_WEBCTL_URL": BASE,
+    "PACKTUG_MOCK": "1",
     # own lock so the suite coexists with the live prod server
     "WEBCTL_DATA_DIR": os.path.join(ROOT, ".itest-nav"),
     "WEBCTL_LOCK": os.path.join(ROOT, ".server.test.lock"),
@@ -81,10 +86,10 @@ procs = {}
 failures = []
 
 
-def start(name, args):
+def start(name, args, env=None):
     os.makedirs(LOGDIR, exist_ok=True)
     fh = open(os.path.join(LOGDIR, name + ".log"), "wb")
-    p = subprocess.Popen(args, cwd=ROOT, env=ENV, stdout=fh,
+    p = subprocess.Popen(args, cwd=ROOT, env=env or ENV, stdout=fh,
                          stderr=subprocess.STDOUT, start_new_session=True)
     procs[name] = (p, fh)
     return p
@@ -664,6 +669,91 @@ try:
     check("beta OFFLINE after client dies", wait_for(
         lambda: robots_map()["beta"]["online"] is False, 6))
     check("alpha still online", robots_map()["alpha"]["online"] is True)
+
+    # ================= v3.7 CS-B3: fused hub contract =====================
+    # Everything below hits the ONE fused port :8100 — Django robot plane
+    # and the in-process FastAPI arm/vision bridge share it (browser sees
+    # a single site). Mock mode: hardware is never dialled.
+    print("[13] v3.7 fused hub contract (bridge in-process)")
+    st, _, b = req(BASE + "/api/health", auth=False)
+    try:
+        hj = json.loads(b)
+    except ValueError:
+        hj = {}
+    check("CS-B3 bridge /api/health answers through the hub port (mock)",
+          st == 200 and hj.get("status") == "ok" and hj.get("mock") is True,
+          f"{st} {b[:90]}")
+    st, _, b = req(BASE + "/api/arm/status", auth=False)
+    try:
+        aj = json.loads(b)
+    except ValueError:
+        aj = {}
+    check("CS-B3 /api/arm/status served mock", st == 200 and aj.get("mock") is True,
+          f"{st} {b[:90]}")
+    st, _, b = req(BASE + "/api/vehicle", auth=False)
+    try:
+        vj = json.loads(b)
+    except ValueError:
+        vj = {}
+    check("CS-B3 /api/vehicle shows the live test fleet (loopback proxy)",
+          st == 200 and {"alpha", "beta"} <= {r.get("id")
+                                              for r in vj.get("robots", [])},
+          f"{st} {b[:110]}")
+
+    # import-guard sim: with the bridge disabled the robot plane must be
+    # completely unaffected (bridge-absent mode).
+    start("asgi-nobridge", uvicorn(8112),
+          {**ENV, "PACKTUG_DISABLED": "1",
+           "WEBCTL_LOCK": os.path.join(ROOT, ".server.nobridge.lock"),
+           "WEBCTL_DATA_DIR": os.path.join(ROOT, ".itest-nav-off")})
+    time.sleep(2.5)
+    st, _, _ = req("http://127.0.0.1:8112/api/health", auth=False)
+    st2, _, _ = req("http://127.0.0.1:8112/api/robot", auth=False)
+    st3, _, _ = req("http://127.0.0.1:8112/", auth=False)
+    check("CS-B3 import-guard: bridge-absent hub 404s bridge paths but "
+          "serves the robot plane + SPA",
+          st == 404 and st2 == 200 and st3 == 200,
+          f"health={st} robot={st2} spa={st3}")
+
+    # ws push latency while an MJPEG-proxy stream is held open (bridge
+    # /api/vehicle/alpha/camera -> hub /cam relay -> live alpha frames).
+    import threading as _th13
+    cam_err = []
+
+    def _cam_hold():
+        try:
+            r = urllib.request.urlopen(BASE + "/api/vehicle/alpha/camera",
+                                       timeout=8)
+            end = time.time() + 3.0
+            n = 0
+            while time.time() < end:
+                chunk = r.read(4096)
+                if not chunk:
+                    break
+                n += len(chunk)
+            r.close()
+            return n
+        except Exception as e:                      # noqa: BLE001
+            cam_err.append(repr(e))
+            return 0
+
+    tc13 = _th13.Thread(target=_cam_hold, daemon=True)
+    tc13.start()
+    time.sleep(0.6)
+    probe13 = StdWs(ws_url("/ws/robotctl/gamma?token="), timeout=5)
+    probe13.connect()
+    ws_recv_json(probe13, types={"welcome"})
+    _lat = []
+    for _i in range(3):
+        _t0 = time.monotonic()
+        req(API + "/gamma/cmd", {"vx": 0.1, "wz": 0.0})
+        ws_recv_json(probe13, types={"cmd"})
+        _lat.append(time.monotonic() - _t0)
+    check("CS-B3 ws push latency <150 ms while MJPEG-proxy stream held",
+          max(_lat) < 0.15 and not cam_err,
+          f"lat={['%.0fms' % (x * 1000) for x in _lat]} err={cam_err[:1]}")
+    probe13.close()
+    tc13.join(6)
 
     print()
     if failures:

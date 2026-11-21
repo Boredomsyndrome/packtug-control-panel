@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# generated-from: packtug upstream ca265cc:deploy/nav/webctl_scan_filter.py — FROZEN REFERENCE, not deployed (see README.md)
 """webctl_scan_filter — /scan -> /scan_filtered (vendor-proven pre-slam stage).
 
 WHY (2026-11-17): the vendor stack runs EVERY slam/nav2 consumer on

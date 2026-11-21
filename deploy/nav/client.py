@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# generated-from: packtug upstream ca265cc:deploy/nav/client.py — FROZEN REFERENCE, not deployed (see README.md)
 """wheeltec-webctl ROBOT CLIENT — runs on the robot Jetson/SBC.
 
 ZERO INSTALLS, ZERO THIRD-PARTY DEPS: only the Python 3 standard library,

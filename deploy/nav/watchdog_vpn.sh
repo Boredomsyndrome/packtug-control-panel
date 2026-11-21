@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# generated-from: packtug upstream ca265cc:deploy/nav/watchdog_vpn.sh — FROZEN REFERENCE, not deployed (see README.md)
 # watchdog_vpn.sh — robot-side link self-heal (cron */2).
 # If the hub stops answering from the robot's own view, first redial the
 # NetworkManager L2TP VPN; if the link is STILL down one cycle later,

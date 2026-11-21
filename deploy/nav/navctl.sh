@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# generated-from: packtug upstream ca265cc:deploy/nav/navctl.sh — FROZEN REFERENCE, not deployed (see README.md)
 # navctl.sh — vendor Nav2/slam_toolbox bring-up for autonomous navigation.
 # Repo-managed (deploy/), installed to ~/robotctl/. NEVER edits ~/wheeltec_ros2;
 # only launches vendor packages with vendor parameter files.

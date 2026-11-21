@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# generated-from: packtug upstream ca265cc:deploy/nav/webctl_odom_relay.py — FROZEN REFERENCE, not deployed (see README.md)
 """webctl_odom_relay — mirror odom_combined->base_footprint on live /tf.
 
 Why this exists: the vendor base node publishes no odom TF; the robotctl

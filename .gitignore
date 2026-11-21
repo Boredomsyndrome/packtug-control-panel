@@ -31,3 +31,4 @@ __MACOSX/
 
 .server.*.lock
 .itest-nav*/
+.scratch-simfleet/

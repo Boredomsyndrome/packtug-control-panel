@@ -755,6 +755,23 @@ try:
     probe13.close()
     tc13.join(6)
 
+    # CS-B4 literal: the built panel must also answer at /panel/ (same
+    # hashed index as '/') and its referenced JS asset must come back as
+    # real JS through WhiteNoise — the SPA catch-all answering HTML for an
+    # asset is the blank-page trap.
+    st, _, b_root = req(BASE + "/", auth=False)
+    stp, _, b_panel = req(BASE + "/panel/", auth=False)
+    import re as _re13
+    m13 = _re13.search(rb'src="(/assets/[^"]+\.js)"', b_panel)
+    ok13 = stp == 200 and b_panel == b_root and bool(m13)
+    asset_txt = ""
+    if ok13 and m13 is not None:
+        sta, _, ba = req(BASE + m13.group(1).decode(), auth=False)
+        ok13 = sta == 200 and not ba.lstrip().startswith(b"<") and len(ba) > 1000
+        asset_txt = f"{m13.group(1).decode()} {sta} {len(ba)}B"
+    check("CS-B4 /panel/ 200, index hashes match '/', JS asset real",
+          ok13, asset_txt)
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILURE(S): {failures}")

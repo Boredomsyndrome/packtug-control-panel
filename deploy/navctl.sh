@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# navctl.sh — vendor Nav2/slam_toolbox bring-up for autonomous navigation.
+# navctl.sh v3.7.0 — vendor Nav2/slam_toolbox bring-up for autonomous navigation.
 # Repo-managed (deploy/), installed to ~/robotctl/. NEVER edits ~/wheeltec_ros2;
 # only launches vendor packages with vendor parameter files.
 #

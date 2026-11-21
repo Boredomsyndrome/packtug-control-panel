@@ -1,3 +1,4 @@
+# generated-from: packtug upstream ca265cc:deploy/nav/navd.py — FROZEN REFERENCE, not deployed (see README.md)
 """navd.py — optional autonomous-navigation helper for the robotctl client
 (enable with WEBCTL_NAV=1; with the flag OFF this module is never imported
 and client behaviour is byte-identical to v3.2).

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# generated-from: packtug upstream ca265cc:deploy/nav/webctl_tf_repeater.py — FROZEN REFERENCE, not deployed (see README.md)
 """webctl_tf_repeater — continuous base_footprint->laser transform, humble-safe.
 
 WHY THIS EXISTS (v3.6.5, the 'queue is full' saga finale):

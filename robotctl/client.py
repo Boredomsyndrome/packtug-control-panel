@@ -74,7 +74,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.6.3-stdlib")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.7.0")
 
 SERVERS = [s.rstrip("/") for s in
            os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000")

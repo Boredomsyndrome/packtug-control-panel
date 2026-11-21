@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useApp } from '../store/AppStore'
+import { vehicleApi } from '../services/vehicle'
+import { armChip, vehicleChip, type Chip } from '../lib/vehicleStatus'
 import { Badge } from './ui'
 import type { Role } from '../types'
 
@@ -11,6 +13,7 @@ const NAV = [
   { to: '/packing', label: '3D Packing', ico: '▣' },
   { to: '/missions', label: 'Missions', ico: '➤' },
   { to: '/fleet', label: 'Fleet', ico: '⬢' },
+  { to: '/drive', label: 'AGV Drive', ico: '◈' },
   { to: '/zones', label: 'Zones', ico: '▤' },
   { to: '/commands', label: 'Commands', ico: '⌘' },
   { to: '/arm', label: 'Arm Control', ico: '⚙' },
@@ -24,6 +27,28 @@ export function Layout() {
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(t)
+  }, [])
+
+  // v3.7 CS-B4: chips are PROBED, never hardcoded. AGV chip = does the
+  // fused hub's fleet endpoint answer; bridge chip = its own mock flag.
+  // Pure logic + unit test: src/lib/vehicleStatus.ts.
+  const [chip, setChip] = useState<Chip>({ label: 'AGV DATA · …', tone: 'amber' })
+  const [arm, setArm] = useState<Chip>({ label: 'bridge · …', tone: 'amber' })
+  useEffect(() => {
+    let alive = true
+    const probe = () => {
+      vehicleApi
+        .getFleet()
+        .then((f) => alive && setChip(vehicleChip(!!f && Array.isArray(f.robots))))
+        .catch(() => alive && setChip(vehicleChip(false)))
+      vehicleApi.getHealth().then((h) => alive && setArm(armChip(h)))
+    }
+    probe()
+    const t = window.setInterval(probe, 6000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
   }, [])
 
   return (
@@ -68,15 +93,15 @@ export function Layout() {
       <div className="main">
         <header className="topbar">
           <h1>Operator Control Panel</h1>
-          <Badge tone="amber" dot>
-            AGV DATA · mock
+          <Badge tone={chip.tone} dot>
+            {chip.label}
           </Badge>
           <div className="spacer" />
           <span className="faint mono" style={{ fontSize: 12 }}>
             {now.toLocaleTimeString('en-GB')}
           </span>
-          <Badge tone="grey" dot>
-            ROS bridge: offline
+          <Badge tone={arm.tone} dot>
+            {arm.label}
           </Badge>
         </header>
         <main className="content">

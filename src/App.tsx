@@ -9,6 +9,7 @@ import { Goods } from './pages/Goods'
 import { Packing } from './pages/Packing'
 import { Missions } from './pages/Missions'
 import { Fleet } from './pages/Fleet'
+import { AgvConsole } from './pages/AgvConsole'
 import { Zones } from './pages/Zones'
 import { Commands } from './pages/Commands'
 import { Arm } from './pages/Arm'
@@ -28,6 +29,7 @@ function Shell() {
         <Route path="/packing/:orderId" element={<Packing />} />
         <Route path="/missions" element={<Missions />} />
         <Route path="/fleet" element={<Fleet />} />
+        <Route path="/drive" element={<AgvConsole />} />
         <Route path="/zones" element={<Zones />} />
         <Route path="/commands" element={<Commands />} />
         <Route path="/arm" element={<Arm />} />

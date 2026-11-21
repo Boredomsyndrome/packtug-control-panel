@@ -7,13 +7,14 @@
 # !! whichever socket holds the hub — never race the real robot.
 #    (v3.2: no browser password anymore; API needs no creds.)
 set -u
-cd /home/ubuntu/wheeltec-webctl
+cd "$(dirname "$0")/.."   # repo-relative: fused packtug hub == its own proof
+ENVF=".env.server"; [ -f "$ENVF" ] || ENVF=".env"   # packtug keeps server secrets in .env.server
 if [ "$(curl -s http://127.0.0.1:8090/api/robot/s2000-1 | python3 -c \
       'import json,sys; print(json.load(sys.stdin).get("online"))' 2>/dev/null)" != "False" ]; then
   echo "ABORT: s2000-1 appears ONLINE — stop the real robot client first (this test takes over its hub slot)"
   exit 1
 fi
-TOK=$(grep WEBCTL_ROBOTS .env | cut -d: -f2)
+TOK=$(grep WEBCTL_ROBOTS "$ENVF" | head -1 | cut -d: -f2 | tr -d ', "')
 rm -f /tmp/webctl-e2e.json /tmp/e2e-client.log
 WEBCTL_SERVER=http://127.0.0.1:8090 WEBCTL_ROBOT_ID=s2000-1 \
 WEBCTL_ROBOT_TOKEN=$TOK WEBCTL_DRY_RUN=1 WEBCTL_SINK=/tmp/webctl-e2e.json \

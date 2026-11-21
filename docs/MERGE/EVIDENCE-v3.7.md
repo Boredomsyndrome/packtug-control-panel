@@ -69,3 +69,26 @@ lines below are the verbatim result lines from the runs.
 
 Not executed — robot offline window is for migration only. No robot-
 affecting claims made until CS-C1–C9 run (plan doc tracks it).
+
+## CUTOVER — 2026-11-21 ~21:13 UTC (robot offline window, CS-I5)
+
+- Old hub (wheeltec-webctl tmux `webctl`) stopped; fused packtug hub
+  started in tmux `webctl` from `~/packtug-control-panel`
+  (`bash scripts/run_server.sh 0.0.0.0 8090`). Same token plane
+  (hub token verified sha256-identical to `~/.config/wheeltec-hub-token`).
+- Live single-site checks on :8090: `/api/robot` 200 · `/api/health`
+  `{"status":"ok","mock":true}` · `/api/arm/status` 200 ·
+  `/api/vehicle` shows `[s2000-1 offline, s2000-sim offline]` ·
+  `/` 200 · `/agv/` 200 · `/panel/` 200 · asset
+  `/assets/index-CvCTk1y8.js` → `text/javascript` (727 kB).
+- CS-B2 RE-RUN against the LIVE port: `tools/sim_fleet.py --server
+  :8090 --rid s2000-sim` → `SIM FLEET: ALL CHECKS PASSED`.
+- `tools/e2e_prod_check.sh` (fixed: was hardcoded `cd
+  ~/wheeltec-webctl` + read `.env` instead of `.env.server`) now runs
+  repo-relative: v3.7.0 client drove the live hub over real ws
+  (`drive ok, clamped=false`), hub returned to `online:false` after.
+- s2000-sim added to `WEBCTL_ROBOTS` (random token in `.env.server`,
+  harness copy `.scratch-simfleet-token`, both 600 + gitignored).
+- Legacy standalone bridge :8020 NOT relaunched — retired by the fused
+  design (one port now serves everything).
+- Tag `v3.7.6-live-fused`.

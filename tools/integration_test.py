@@ -534,6 +534,68 @@ try:
                    headers=robot_auth("beta"))
     check("map upload with wrong robot creds refused", st in (401, 403))
 
+    # v3.7 single-websocket policy: with a ws session, the map plane rides
+    # the SAME socket ({"type":"map"} -> hub -> map_ack). Gamma is the raw-
+    # ws robot, so this never kicks a live client.
+    wsm = StdWs(ws_url("/ws/robotctl/gamma?token="), timeout=5)
+    wsm.connect()
+    wsm.send(json.dumps({"type": "hello", "id": "gamma", "cam": False,
+                         "scan": False, "sw": "itest"}))
+
+    def _ws_await(ws, want, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            op, payload = ws.recv(0.3)
+            if op == "text":
+                try:
+                    m37 = json.loads(payload)
+                except ValueError:
+                    continue
+                if m37.get("type") == want:
+                    return m37
+        return None
+
+    check("ws map session gets welcome", _ws_await(wsm, "welcome") is not None)
+    _rid37 = time.time()
+    wsm.send(json.dumps({"type": "map", "rid": _rid37, "name": "wsmapi",
+                         "enc": "gz",
+                         "pgm_gz_b64": base64.b64encode(
+                             _zl.compress(pgm, 6)).decode(),
+                         "yaml": "image: wsmapi.pgm\n"}))
+    ack = None
+    end = time.time() + 5.0
+    while time.time() < end and not (ack and ack.get("rid") == _rid37):
+        op, payload = wsm.recv(0.3)
+        if op == "text":
+            try:
+                mm = json.loads(payload)
+            except ValueError:
+                continue
+            if mm.get("type") == "map_ack":
+                ack = mm
+    check("v3.7 ws-plane map upload lands + map_ack(ok)",
+          ack is not None and ack.get("ok") is True, str(ack))
+    st, _, b37 = req(BASE + "/api/robot/gamma/maps/wsmapi.pgm")
+    check("ws-plane map artifact served byte-identical",
+          st == 200 and b37 == pgm, str(st))
+    _rid38 = time.time() + 1
+    wsm.send(json.dumps({"type": "map", "rid": _rid38, "name": "x",
+                         "pgm_b64": "@@bad"}))
+    ack2 = None
+    end = time.time() + 5.0
+    while time.time() < end and not (ack2 and ack2.get("rid") == _rid38):
+        op, payload = wsm.recv(0.3)
+        if op == "text":
+            try:
+                mm = json.loads(payload)
+            except ValueError:
+                continue
+            if mm.get("type") == "map_ack":
+                ack2 = mm
+    check("v3.7 ws-plane garbage map -> map_ack ok=false (socket alive)",
+          ack2 is not None and ack2.get("ok") is False, str(ack2))
+    wsm.close()
+
     st, _, _ = req(API + "/alpha/nav", {"action": "bogus"})
     check("bad nav action rejected 400", st == 400)
     st, _, b = req(API + "/alpha/nav", {"action": "route", "waypoints": ["nope"]})

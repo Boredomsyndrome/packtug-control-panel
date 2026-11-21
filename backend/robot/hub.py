@@ -71,6 +71,7 @@ class RobotHub:
         self.scan = None                  # latest packed LaserScan (dict)
         self.scan_ts = 0.0
         self.last_cam_ok = False          # robot-side self-flags (telemetry)
+        self.last_odom = None             # v3.7: latest /odom [x, y, yaw]
         self.last_scan_ok = False
         self.ros_topics = {}              # robot's live graph (diagnostics)
 
@@ -280,6 +281,9 @@ class RobotHub:
                 self.watchdog_trips = w
             self.last_cam_ok = bool(data.get("cam_ok"))
             self.last_scan_ok = bool(data.get("scan_ok"))
+            od = data.get("odom")           # v3.7: /odom x,y,yaw passthrough
+            if isinstance(od, list) and len(od) == 3:
+                self.last_odom = [float(v) for v in od]
             rt = data.get("ros_topics")
             if isinstance(rt, dict):
                 self.ros_topics = rt
@@ -380,6 +384,7 @@ class RobotHub:
                 "scan_age": (now - self.scan_ts) if self.scan_ts else None,
                 "robot_cam_ok": self.last_cam_ok,
                 "robot_scan_ok": self.last_scan_ok,
+                "odom": self.last_odom,
                 "ros_topics": dict(self.ros_topics),
                 "nav_mode": self.nav_mode,
                 "nav": dict(self.nav_state),

@@ -30,6 +30,7 @@ import json
 import logging
 import struct
 import time
+import zlib
 from urllib.parse import parse_qs
 
 from django.conf import settings
@@ -140,6 +141,29 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
                     hub.set_scan(ser.validated_data)
                 else:
                     log.debug("scan rejected: %s", ser.errors)
+            elif kind == "map":
+                # v3.7 single-websocket policy: map uploads ride the ws
+                # (the HTTP /robotctl/<id>/map endpoint only answers in
+                # degraded fallback mode). Same validation + storage path
+                # as the HTTP plane via save_map_payload.
+                if len(txt) > 12 * 1024 * 1024:
+                    await _send_json(send, {"type": "map_ack",
+                                            "rid": obj.get("rid"),
+                                            "ok": False,
+                                            "detail": "map too large"})
+                    continue
+                from robot.robotctl import save_map_payload
+                try:
+                    maps = await asyncio.to_thread(save_map_payload,
+                                                   hub.robot_id, obj)
+                    await _send_json(send, {"type": "map_ack",
+                                            "rid": obj.get("rid"),
+                                            "ok": True, "maps": maps})
+                except (ValueError, OSError, TypeError, zlib.error) as e:
+                    await _send_json(send, {"type": "map_ack",
+                                            "rid": obj.get("rid"),
+                                            "ok": False,
+                                            "detail": str(e)[:200]})
             elif kind == "bye":
                 await reader_q.put(("disc", None))
                 return

@@ -38,8 +38,27 @@ def main():
     ap.add_argument("--servers", required=True,
                     help='space-separated hub URL list, best first')
     ap.add_argument("--id", default="s2000-1")
+    ap.add_argument("--i-know-robot-is-offline", action="store_true",
+                    dest="robot_offline_ok",
+                    help="CS-I5 guard override: deploy while the hub sees "
+                         "this robot online (robot moves/clients race!)")
     args = ap.parse_args()
     pw = open(args.pass_file).read().strip()
+
+    # ---- CS-I5 no-merge-during-flight guard: ask the hub first.
+    import json as _json
+    import urllib.request as _url
+    hub0 = args.servers.split()[0]
+    try:
+        with _url.urlopen(f"{hub0}/api/robot/{args.id}", timeout=4) as r:
+            _online = bool(_json.load(r).get("online"))
+    except Exception:
+        _online = False
+    if _online and not args.robot_offline_ok:
+        sys.exit(f"REFUSED (CS-I5): robot '{args.id}' is ONLINE at {hub0}. "
+                 "Deploying over a live client races watchdog/TF state. "
+                 "Confirm it is parked+safe and re-run with "
+                 "--i-know-robot-is-offline, or wait for the offline window.")
 
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -75,7 +94,7 @@ def main():
     sftp.put("deploy/navctl.sh", f"/home/{args.user}/robotctl/navctl.sh")
     run(ssh, "mkdir -p ~/robotctl/nav_params", show=False)
     import glob
-    for f in sorted(glob.glob("robotctl/nav_params/*.yaml")):
+    for f in sorted(glob.glob("robotctl/nav_params/*")):
         sftp.put(f, "/home/%s/robotctl/nav_params/%s" % (args.user, f.rsplit("/", 1)[-1]))
     sftp.chmod(f"/home/{args.user}/robotctl/run_client.sh", 0o755)
     sftp.chmod(f"/home/{args.user}/robotctl/navctl.sh", 0o755)
@@ -95,14 +114,14 @@ for ln in lines:
         ln = 'WEBCTL_SERVER="' + servers + '"'; seen.add(k)
     elif k == "WEBCTL_ROBOT_ID":
         ln = "WEBCTL_ROBOT_ID=" + robot_id; seen.add(k)
-    elif k == "WEBCTL_NAV":
-        continue
+    elif k == "WEBCTL_NAV" or k == "WEBCTL_TRANSPORT":
+        continue          # re-appended below (v3.7 policy wins over stale)
     else:
         seen.add(k)
     out.append(ln)
 for extra in (["WEBCTL_ROBOT_ID=" + robot_id] if "WEBCTL_ROBOT_ID" not in seen else []) \
         + (['WEBCTL_SERVER="' + servers + '"'] if "WEBCTL_SERVER" not in seen else []) \
-        + ["WEBCTL_NAV=1"]:
+        + ["WEBCTL_NAV=1", "WEBCTL_TRANSPORT=ws"]:   # v3.7 single-websocket policy
     out.append(extra)
 if not any(l.startswith("WEBCTL_ROBOT_TOKEN=") for l in out):
     sys.exit("ABORT: no WEBCTL_ROBOT_TOKEN anywhere — refusing to deploy a "

@@ -78,6 +78,15 @@ class NavDaemon:
         self._buffer = None                 # tf2 Buffer (lazy)
         self._pose_pub = None               # /initialpose publisher (lazy)
         self._map_timer = 0.0
+        # v3.7 (merge, teammate-fork ACCEPT): direct-rclpy /map capture —
+        # slam_toolbox only publishes /map while a subscriber exists and the
+        # transient-local latch never reaches late joiners on this Jetson,
+        # so map_saver_cli routinely exits empty. A watcher armed BEFORE
+        # slam starts caches the grid; map save serializes it directly.
+        self._map_lock = threading.Lock()
+        self._map_msg = None
+        self._map_msg_ts = 0.0
+        self._map_sub = None
         self._uploaded = set()              # maps confirmed present on the hub
         self._ip_stop = None                # Event of the running initialpose loop
         self._amcl_rx = 0.0                 # monotonic ts of last /amcl_pose seen
@@ -145,7 +154,14 @@ class NavDaemon:
             self._navctl(["map-on"], ok_mode="mapping", timeout=300)
         elif action == "map_save":
             name = self._safe(m.get("name"), "room1")
-            if self._navctl(["map-save", name], ok_mode=None, timeout=120):
+            # v3.7 (merge ACCEPT): direct rclpy save first — the cached
+            # /map grid does not depend on map_saver_cli's 2 s default
+            # timeout losing the DDS discovery race on this Jetson.
+            ok = self._save_map_python(name)
+            if not ok:
+                ok = self._navctl(["map-save", name], ok_mode=None,
+                                  timeout=120)
+            if ok:
                 self._upload_map(name)
         elif action == "map_off":
             self._navctl(["stop"], ok_mode="off")
@@ -418,6 +434,7 @@ class NavDaemon:
             threading.Thread(target=ex.spin, daemon=True,
                              name="webctl-navd-spin").start()
             self._own_node = node
+            self._map_watch(node)
         return self._own_node
 
     def _action_client(self):
@@ -720,6 +737,142 @@ class NavDaemon:
             return "running" in (r.stdout or "")
         except Exception:
             return False
+
+    # ------------------------------------------------------------ map capture
+    def _map_watch(self, node):
+        """Keep the latest /map grid in memory for the save action.
+
+        slam_toolbox only publishes /map while it has a matched subscriber,
+        and this Jetson will not deliver its transient-local latch to a late
+        joiner (map_saver_cli times out, metadata works, services do not
+        match). A watcher created BEFORE SLAM starts receives the live 1 Hz
+        publish, so a save can serialize the cached grid without touching
+        map_saver_cli at all."""
+        try:
+            from nav_msgs.msg import OccupancyGrid
+            from rclpy.qos import (QoSProfile, DurabilityPolicy,
+                                   ReliabilityPolicy, HistoryPolicy)
+            qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            self._map_sub = node.create_subscription(
+                OccupancyGrid, "/map", self._map_cb, qos)
+            log.info("nav: /map watcher up (map saves use a cached grid)")
+        except Exception as e:                            # noqa: BLE001
+            log.warning("nav: /map watcher failed: %s", e)
+
+    def _map_cb(self, msg):
+        with self._map_lock:
+            self._map_msg = msg
+            self._map_msg_ts = time.monotonic()
+
+    def _save_map_python(self, name, timeout=8.0):
+        """Serialize the live /map grid straight to MAPS_DIR (v3.7 merge:
+        teammate-proven path; map_saver_cli remains the fallback)."""
+        if self.dry:
+            return False
+        with self._map_lock:
+            cached, cached_ts = self._map_msg, self._map_msg_ts
+        if cached is not None:
+            info = getattr(cached, "info", None)
+            if info is not None and info.width > 0 and info.height > 0:
+                log.info("map save: using cached /map (%.0fs old)",
+                         time.monotonic() - cached_ts)
+                return self._write_map_files(name, info, cached.data)
+
+        node = self._node()
+        if node is None:
+            return False
+        try:
+            from nav_msgs.msg import OccupancyGrid
+        except Exception as e:                            # noqa: BLE001
+            log.warning("map save: nav_msgs unavailable: %s", e)
+            return False
+
+        box = {}
+        ev = threading.Event()
+
+        def _cb(msg):
+            box["msg"] = msg
+            ev.set()
+
+        # sensor-data QoS (best-effort/volatile) is compatible with both the
+        # reliable transient-local slam publisher and a best-effort one; a
+        # latched map_server-only topic is left to the CLI fallback.
+        try:
+            from rclpy.qos import qos_profile_sensor_data
+        except Exception:                                 # noqa: BLE001
+            qos_profile_sensor_data = 10
+        sub = None
+        try:
+            sub = node.create_subscription(
+                OccupancyGrid, "/map", _cb, qos_profile_sensor_data)
+        except Exception as e:                            # noqa: BLE001
+            log.warning("map save: subscribe failed: %s", e)
+            return False
+        try:
+            if not ev.wait(timeout):
+                log.warning("map save: no /map message within %.0fs", timeout)
+                return False
+        finally:
+            try:
+                node.destroy_subscription(sub)
+            except Exception:                             # noqa: BLE001
+                pass
+
+        msg = box.get("msg")
+        info = getattr(msg, "info", None)
+        if msg is None or info is None or info.width <= 0 or info.height <= 0:
+            log.warning("map save: /map message is empty")
+            return False
+        return self._write_map_files(name, info, msg.data)
+
+    def _write_map_files(self, name, info, data):
+        """Write an OccupancyGrid as the nav2 PGM+YAML pair (trinary)."""
+        w, h = int(info.width), int(info.height)
+        if len(data) < w * h:
+            log.warning("map save: /map data truncated (%d < %d)",
+                        len(data), w * h)
+            return False
+        # nav2 trinary colouring: occupied=0 (black), free=254 (white),
+        # unknown=205 (grey). PGM rows are top-down; the grid starts at the
+        # map origin (bottom-left), so flip vertically.
+        pix = bytearray(w * h)
+        for row in range(h):
+            src = (h - 1 - row) * w
+            dst = row * w
+            for col in range(w):
+                v = data[src + col]
+                if v < 0:
+                    pix[dst + col] = 205
+                elif v >= 65:
+                    pix[dst + col] = 0
+                elif v <= 25:
+                    pix[dst + col] = 254
+                else:
+                    pix[dst + col] = 205
+        q = info.origin.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        base = os.path.join(MAPS_DIR, name)
+        try:
+            with open(base + ".pgm", "wb") as f:
+                f.write(b"P5\n%d %d\n255\n" % (w, h))
+                f.write(pix)
+            with open(base + ".yaml", "w") as f:
+                f.write("image: %s.pgm\n" % name)
+                f.write("mode: trinary\n")
+                f.write("resolution: %.6f\n" % float(info.resolution))
+                f.write("origin: [%.6f, %.6f, %.6f]\n" %
+                        (info.origin.position.x,
+                         info.origin.position.y, yaw))
+                f.write("negate: 0\noccupied_thresh: 0.65\n"
+                        "free_thresh: 0.25\n")
+        except OSError as e:
+            log.warning("map save: write failed: %s", e)
+            return False
+        log.info("map save: %s (%dx%d) written via rclpy", name, w, h)
+        return True
 
     # ------------------------------------------------------------ map upload
     def _upload_map(self, name, dry=False):

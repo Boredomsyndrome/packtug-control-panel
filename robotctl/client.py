@@ -396,6 +396,7 @@ class Client:
         self._scan = None              # latest-only pending scan dict
         self._scan_lock = threading.Lock()
         self._scan_last_tx = 0.0       # monotonic of last scan upload (pacing)
+        self._map_acks = {}            # rid -> {"ev","ok"} for ws map uploads
         self.cam_ts = 0.0              # monotonic stamps for telemetry OK flags
         self.scan_ts = 0.0
         self._topics_cache = (0.0, {})  # (checked_at, {"image": [...], "scan": [...]})
@@ -471,6 +472,40 @@ class Client:
             raise LinkError(str(e)) from e
 
     # ---------- networking (single thread owns the ws) ----------
+    # ---------- unified server post (single-websocket policy) ----------
+    def _server_post(self, method, path, body=None, headers=None, timeout=6.0):
+        """v3.7 (merge): the ws is THE robot<->server channel. Map uploads
+        (the last flow that used raw HTTP even while ws was healthy) now
+        ride it as a {\"type\":\"map\"} text frame and wait for the hub's
+        map_ack. HTTP is only ever touched when there is NO ws at all
+        (degraded fallback mode) — a ws-connected client does zero HTTP."""
+        ws = self.ws
+        if ws is not None and path.endswith("/map"):
+            try:
+                payload = json.loads(body or b"{}")
+            except ValueError:
+                return (400, b'{"detail": "bad map payload"}')
+            rid = time.time()
+            payload.update({"type": "map", "rid": rid})
+            slot = {"ev": threading.Event(), "ok": False}
+            self._map_acks[rid] = slot
+            try:
+                ws.send(json.dumps(payload))
+                if slot["ev"].wait(timeout or 30.0):
+                    return ((200, b'{"ok": true}') if slot["ok"]
+                            else (400, b'{"ok": false}'))
+                return (-1, b'{"detail": "map ack timeout"}')
+            finally:
+                self._map_acks.pop(rid, None)
+        return self._http(method, path, body=body, headers=headers,
+                          timeout=timeout)
+
+    def _map_ack(self, m):
+        slot = self._map_acks.get(m.get("rid"))
+        if slot is not None:
+            slot["ok"] = bool(m.get("ok"))
+            slot["ev"].set()
+
     def net_loop(self):
         want_ws = TRANSPORT in ("auto", "ws")
         last_try = 0.0
@@ -560,6 +595,8 @@ class Client:
                         navm = m.get("nav")
                         if navm and self.navd:
                             self.navd.handle(navm)
+                    elif kind == "map_ack":
+                        self._map_ack(m)
                     elif kind == "takeover":
                         log.warning("another robotctl connection took over; idling 5s")
                         try:
@@ -676,6 +713,7 @@ class Client:
                         "ws" if self.ws else "http",
                     "cam_ok": self.cam_ts and now - self.cam_ts < 5.0,
                     "scan_ok": self.scan_ts and now - self.scan_ts < 5.0,
+                    "odom": getattr(self.sink, "odom", None),
                     "ros_topics": self.ros_topics()}
             if self.navd:
                 body["nav"] = self.navd.snapshot()
@@ -819,7 +857,7 @@ class Client:
                     raise ImportError("navd.py not found next to client.py")
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                self.navd = mod.NavDaemon(self.sink, post=self._http,
+                self.navd = mod.NavDaemon(self.sink, post=self._server_post,
                                           dry=DRY_RUN, robot_id=ROBOT_ID)
                 log.info("autonomous nav helper ACTIVE (WEBCTL_NAV=1)")
             except Exception as e:
@@ -898,12 +936,29 @@ class RosSink:
                     Float32, topic, lambda m, t=topic: self._batt(m, t), qos)
             except Exception as e:
                 log.warning("battery topic %s unavailable: %s", topic, e)
+        # v3.7 (merge): /odom telemetry passthrough — VALUES ONLY for the
+        # fleet view (panel map). The client never broadcasts TF: pose->TF
+        # stays the EKF's sole job (frozen merge verdict).
+        self.odom = None
+        try:
+            from nav_msgs.msg import Odometry
+            self.node.create_subscription(Odometry, "/odom", self._odom, 10)
+        except Exception as e:
+            log.debug("odom topic unavailable (telemetry key stays null): %s", e)
         ex = SingleThreadedExecutor()
         ex.add_node(self.node)
         threading.Thread(target=ex.spin, daemon=True, name="rclpy-spin").start()
 
     def _batt(self, msg, topic):
         self.battery_v = float(msg.data)
+
+    def _odom(self, msg):
+        import math
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.odom = [round(p.x, 3), round(p.y, 3), round(yaw, 3)]
 
     def publish(self, vx, wz, state):
         m = self._Twist()

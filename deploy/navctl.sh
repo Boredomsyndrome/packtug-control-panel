@@ -29,6 +29,43 @@ PARAM="$WS/src/wheeltec_robot_nav2/param/wheeltec_param/param_four_wheel_diff_bs
 MAPPER="$NAVHOME/nav_params/mapper_rplidar_a1.yaml"
 FILTER_PARAMS="$NAVHOME/nav_params/laser_filter.yaml"
 
+# v3.7 (merge, teammate-fork ACCEPT): render a Nav2 PARAM COPY — the vendor
+# tree stays untouched. Two proven injections:
+#  1. costmap/AMCL scan topics -> /scan_filtered (the box-masked, odom-
+#     restamped stream slam already uses; raw /scan sees the towed cage as
+#     an obstacle welded to the chassis — their fleet runs the whole stack
+#     on /scan_filtered, matching our own v3.6.5 lesson);
+#  2. default_nav_to_pose_bt_xml -> no-spin/no-backup recovery tree (a
+#     towed cage must never spin in place or reverse for recovery).
+# Frozen scope: cage velocity/footprint tuning is NOT included (awaits a
+# Comet cage-profile decision, see docs/MERGE plan §1.1 note).
+PARAM_COPY="$NAVHOME/nav_params/param_four_wheel_diff_bs.webctl.yaml"
+if [ -f "$PARAM" ]; then
+  mkdir -p "$NAVHOME/nav_params"
+  if python3 - "$PARAM" "$PARAM_COPY" "$NAVHOME" <<'PY'
+import os
+import sys
+
+src, dst, navhome = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(src, encoding="utf-8").read()
+s = s.replace("    scan_topic: scan", "    scan_topic: /scan_filtered")
+s = s.replace("          topic: /scan", "          topic: /scan_filtered")
+if "default_nav_to_pose_bt_xml" not in s:
+    s = s.replace("bt_navigator:\n  ros__parameters:\n",
+                  "bt_navigator:\n  ros__parameters:\n"
+                  "    default_nav_to_pose_bt_xml: "
+                  "\"%s/nav_params/navigate_no_spin_backup.xml\"\n"
+                  % navhome, 1)
+open(dst + ".tmp", "w", encoding="utf-8").write(s)
+os.replace(dst + ".tmp", dst)
+print("param-render scan_remap=%s bt=%s" %
+      ("scan_topic: scan" not in s, "default_nav_to_pose_bt_xml" in s))
+PY
+  then
+    PARAM="$PARAM_COPY"
+  fi
+fi
+
 cmd="$1"
 [ $# -gt 0 ] && shift
 

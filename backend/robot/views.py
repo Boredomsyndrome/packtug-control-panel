@@ -114,11 +114,26 @@ def _no_cache_index(response):
 
 
 def index_view(request):
-    dist = Path(settings.PROJECT_ROOT) / "frontend" / "dist" / "index.html"
-    if not dist.exists():
+    """Serve the fused site's two SPAs.
+
+    '/'  -> panel SPA (repo-root dist/, built by `npm run build`)
+    /agv -> AGV console (dist/agv/, built by `cd agv-console && npm run
+            build`; vite base '/agv/')
+    Deep links (any client-side route) fall through to the matching
+    index.html; real files are served by WhiteNoise before ever
+    reaching this view.
+    """
+    root = Path(settings.PROJECT_ROOT) / "dist"
+    path = request.path.lstrip("/")
+    agv = path == "agv" or path.startswith("agv/")
+    index = root / "agv" / "index.html" if agv else root / "index.html"
+    if not index.exists():
+        hint = ("cd agv-console && npm ci && npm run build" if agv else
+                "npm run build")
         return HttpResponse(
-            "<h1>wheeltec-webctl</h1><p>Frontend not built yet. "
-            "Run <code>cd frontend && npm ci && npm run build</code>.</p>",
-            status=200,
-        )
-    return _no_cache_index(TemplateResponse(request, "index.html"))
+            f"<h1>PackTug hub</h1><p>Frontend not built yet. Run "
+            f"<code>{hint}</code>.</p>", status=200)
+    response = HttpResponse(index.read_bytes(),
+                            content_type="text/html; charset=utf-8")
+    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response

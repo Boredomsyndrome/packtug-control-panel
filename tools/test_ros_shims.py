@@ -99,6 +99,10 @@ _mod("geometry_msgs.msg", Twist=_Twist)
 _mod("std_msgs.msg", Float32=type("Float32", (), {}))
 _mod("sensor_msgs.msg", Image=type("Image", (), {}),
      LaserScan=type("LaserScan", (), {}))
+_mod("nav_msgs")
+_mod("nav_msgs.msg",
+     Odometry=type("Odometry", (), {}),
+     OccupancyGrid=type("OccupancyGrid", (), {}))
 
 # fake cv2: pass-through geometry, imencode hands back a marker payload
 cv2 = _mod("cv2", COLOR_RGB2BGR=0, COLOR_RGBA2BGR=1, COLOR_BGRA2BGR=2,
@@ -583,6 +587,90 @@ _tnet.join(3)
 client36.running = _running_old
 check("half-open ws starved -> forced reconnect (v3.6.3)", _ho_ok,
       f"ws_now={cz.ws} rot0={str(_rot[:1])[:60]}")
+
+# ================= v3.7 single-websocket plane + odom passthrough ===========
+# (1) map upload: with the ws UP it rides the ws as a {"type":"map"} frame
+#     and resolves on map_ack — HTTP must be touched ZERO times. Only with
+#     no ws at all (degraded mode) may it fall to HTTP.
+import json as _j37
+
+
+class _StubWs:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, s, binary=False):
+        self.sent.append(s)
+
+
+cw = client.Client.__new__(client.Client)
+cw.ws = _StubWs()
+cw._map_acks = {}
+
+
+def _no_http(*a, **k):
+    raise AssertionError("ws-connected client touched HTTP!")
+
+
+cw._http = _no_http
+
+
+def _ack_later():
+    _time.sleep(0.15)
+    for _rid, slot in list(cw._map_acks.items()):
+        slot["ok"] = True
+        slot["ev"].set()
+
+
+threading.Thread(target=_ack_later, daemon=True).start()
+_code37, _ = cw._server_post("POST", "/robotctl/bot/map",
+                             body=b'{"name":"m1","enc":"gz"}', timeout=3.0)
+check("v3.7: ws-up map upload rides the ws (type=map frame) with zero HTTP",
+      _code37 == 200 and cw.ws.sent
+      and _j37.loads(cw.ws.sent[0]).get("type") == "map",
+      f"code={_code37} sent={len(cw.ws.sent)}")
+cw2 = client.Client.__new__(client.Client)
+cw2.ws = None
+cw2._map_acks = {}
+_hits37 = []
+cw2._http = lambda m, p, **k: (_hits37.append(p), (200, b"{}"))[1]
+_code37b, _ = cw2._server_post("POST", "/robotctl/bot/map", body=b"{}",
+                               timeout=1.0)
+check("v3.7: HTTP map path only when there is NO ws at all (degraded)",
+      _code37b == 200 and _hits37 == ["/robotctl/bot/map"], str(_hits37))
+
+# (2) /odom telemetry passthrough: VALUES only (no TF broadcast — frozen).
+# msg.pose is PoseWithCovariance (msg.pose.pose = Pose) — like nav_msgs.
+_odcb = next(cb for _t, cb in sink.node.subs if _t == "/odom")
+_odcb(types.SimpleNamespace(pose=types.SimpleNamespace(
+    pose=types.SimpleNamespace(
+        position=types.SimpleNamespace(x=1.0, y=-2.0),
+        orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.7071, w=0.7071)))))
+check("v3.7: sink /odom -> [x, y, yaw] telemetry values",
+      sink.odom and abs(sink.odom[0] - 1.0) < 1e-6
+      and abs(sink.odom[1] + 2.0) < 1e-6 and abs(sink.odom[2] - 1.5708) < 1e-3,
+      str(sink.odom))
+
+# (3) direct-rclpy map save from the cached /map grid (teammate ACCEPT).
+_info37 = types.SimpleNamespace(
+    width=2, height=2, resolution=0.05,
+    origin=types.SimpleNamespace(position=types.SimpleNamespace(x=0.0, y=0.0),
+                                 orientation=types.SimpleNamespace(
+                                     x=0.0, y=0.0, z=0.0, w=1.0)))
+nd9 = navd.NavDaemon(sink=None, post=None, dry=False, robot_id="shimbot")
+nd9._map_msg = types.SimpleNamespace(info=_info37, data=[0, 100, -1, 50])
+nd9._map_msg_ts = _time.monotonic()
+check("v3.7: direct-rclpy map save writes trinary PGM (rows flipped) + yaml",
+      nd9._save_map_python("cachedmap")
+      and open(_os.path.join(_mapdir, "cachedmap.pgm"), "rb").read()
+      == b"P5\n2 2\n255\n" + bytes([205, 205, 254, 0])
+      and "free_thresh: 0.25" in open(_os.path.join(_mapdir, "cachedmap.yaml")).read())
+nd9._map_msg = None
+nd9._own_node = type("N", (), {
+    "create_subscription": lambda s, t, topic, cb, qos: object(),
+    "destroy_subscription": lambda s, sub: None})()
+check("v3.7: no /map within timeout -> False so the CLI fallback takes over",
+      nd9._save_map_python("nocache", timeout=0.3) is False)
 
 # ================= v3.7 CS-B1: REAL action-client route path ================
 # The P0 lesson: Humble rclpy.action.ClientGoalHandle exposes ONLY

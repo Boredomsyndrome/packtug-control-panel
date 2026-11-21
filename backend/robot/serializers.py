@@ -80,6 +80,9 @@ class TelemetrySerializer(serializers.Serializer):
                                               min_value=0, max_value=10**9)
     cam_ok = serializers.BooleanField(required=False, default=False)
     scan_ok = serializers.BooleanField(required=False, default=False)
+    odom = serializers.ListField(required=False, allow_null=True,
+                                 child=serializers.FloatField(),
+                                 min_length=3, max_length=3)   # v3.7 x,y,yaw
     ros_topics = serializers.DictField(required=False)
     nav = serializers.DictField(required=False)   # v3.3 nav state block
 
@@ -87,6 +90,9 @@ class TelemetrySerializer(serializers.Serializer):
         for value in attrs.values():
             if isinstance(value, float) and not math.isfinite(value):
                 raise serializers.ValidationError("values must be finite")
+        od = attrs.get("odom")
+        if od and not all(math.isfinite(v) for v in od):
+            raise serializers.ValidationError("odom values must be finite")
         return attrs
 
 

@@ -8,7 +8,11 @@
 # the setsid'd nav plane survives; navd resyncs mode on boot.
 ENVF="$HOME/robotctl/robotctl.env"
 LOG=/tmp/watchdog_vpn.log
-HUBS=$(sed -n 's/^WEBCTL_SERVER="//; s/"$//p' "$ENVF" 2>/dev/null | tr ',' ' ')
+# v3.7 (merge): superset parse from the teammate fork — handles quoted AND
+# unquoted WEBCTL_SERVER values (our old parse only matched the quoted form;
+# an unquoted line left the watchdog blind, which is how a robot bounces
+# went unhealed).
+HUBS=$(sed -n 's/^WEBCTL_SERVER=//p' "$ENVF" 2>/dev/null | head -1 | tr -d '"' | tr ',' ' ')
 [ -n "$HUBS" ] || HUBS="http://192.168.42.1:8090"
 RID=$(sed -n 's/^WEBCTL_ROBOT_ID=//p' "$ENVF" 2>/dev/null | tr -d '"' | head -1)
 [ -n "$RID" ] || RID="s2000-1"

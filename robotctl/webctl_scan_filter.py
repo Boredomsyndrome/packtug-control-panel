@@ -97,8 +97,15 @@ class ScanFilter(Node):
 
 
 def main():
-    vals = [float(v) for v in sys.argv[1:5]] if len(sys.argv) >= 5 else \
-        [-0.50, 0.30, -0.35, 0.35]
+    if len(sys.argv) >= 5:
+        vals = [float(v) for v in sys.argv[1:5]]
+    else:
+        # v3.7 (merge): the box rear mask is parameterized — the cage-
+        # towing profile sets WEBCTL_MASK_X_BACK=1.10 in robotctl.env;
+        # the default stays the proven 0.50.
+        import os
+        x_back = float(os.getenv("WEBCTL_MASK_X_BACK", "0.50"))
+        vals = [-x_back, 0.30, -0.35, 0.35]
     rclpy.init()
     node = ScanFilter(*vals)
     ex = SingleThreadedExecutor()

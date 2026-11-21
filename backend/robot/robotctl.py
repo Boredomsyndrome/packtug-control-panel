@@ -112,12 +112,39 @@ def frame(request, robot_id):
     return JsonResponse({"ok": True})
 
 
+def save_map_payload(robot_id, data):
+    """Validate + persist one map-upload payload (JSON dict, pgm gz/b64).
+
+    SHARED by the HTTP /robotctl/<id>/map fallback endpoint and the v3.7
+    ws {\"type\":\"map\"} plane (single-websocket policy: while the ws is
+    up, uploads ride it and this function is what lands them). Raises
+    ValueError/OSError on rejection; returns the stored map list."""
+    from robot import navstore
+    import base64 as _b64
+    if not isinstance(data, dict):
+        raise ValueError("map upload must be a JSON object")
+    if data.get("enc") == "gz":      # v3.5: zlib'd pgm (flaky-link safe)
+        blob = _b64.b64decode(data.get("pgm_gz_b64") or "", validate=True)
+        dobj = zlib.decompressobj()
+        pgm = dobj.decompress(blob, navstore.MAX_PGM + 1)
+        pgm += dobj.flush()
+        if len(pgm) > navstore.MAX_PGM:
+            raise ValueError(f"decompressed pgm exceeds {navstore.MAX_PGM} B")
+    else:
+        pgm = _b64.b64decode(data.get("pgm_b64") or "", validate=True)
+    navstore.save_map(robot_id, str(data.get("name") or ""), pgm,
+                      str(data.get("yaml") or ""))
+    return navstore.list_maps(robot_id)
+
+
 @csrf_exempt
 @require_POST
 def map_upload(request, robot_id):
     """v3.3: the robot uploads a saved map (navctl map-save output) right
     after saving: JSON {name, pgm_b64, yaml}. Robot-authenticated plane.
-    Stored via navstore -> browser GETs /api/robot/<id>/maps/<name>.<ext>."""
+    Stored via navstore -> browser GETs /api/robot/<id>/maps/<name>.<ext>.
+    v3.7: only reached in HTTP-fallback mode — with a healthy ws the client
+    ships the same payload as a ws 'map' frame (robot/ws.py reader)."""
     hub, err = _authenticate(request, robot_id)
     if err:
         return err
@@ -127,25 +154,11 @@ def map_upload(request, robot_id):
         data = json.loads(request.body or b"{}")
     except ValueError:
         return _err(400, "map upload must be valid JSON")
-    if not isinstance(data, dict):
-        return _err(400, "map upload must be a JSON object")
-    from robot import navstore
     try:
-        import base64 as _b64
-        if data.get("enc") == "gz":      # v3.5: zlib'd pgm (flaky-link safe)
-            blob = _b64.b64decode(data.get("pgm_gz_b64") or "", validate=True)
-            dobj = zlib.decompressobj()
-            pgm = dobj.decompress(blob, navstore.MAX_PGM + 1)
-            pgm += dobj.flush()
-            if len(pgm) > navstore.MAX_PGM:
-                raise ValueError(f"decompressed pgm exceeds {navstore.MAX_PGM} B")
-        else:
-            pgm = _b64.b64decode(data.get("pgm_b64") or "", validate=True)
-        navstore.save_map(robot_id, str(data.get("name") or ""), pgm,
-                          str(data.get("yaml") or ""))
+        maps = save_map_payload(robot_id, data)
     except (ValueError, OSError, TypeError, zlib.error) as e:
         return _err(400, f"map rejected: {e}")
-    return JsonResponse({"ok": True, "maps": navstore.list_maps(robot_id)})
+    return JsonResponse({"ok": True, "maps": maps})
 
 
 @csrf_exempt

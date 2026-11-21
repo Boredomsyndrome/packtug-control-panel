@@ -28,3 +28,6 @@ __MACOSX/
 # robot deploy tarballs + scratch
 *.tar.gz
 .env.server
+
+.server.*.lock
+.itest-nav*/

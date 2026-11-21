@@ -8,10 +8,22 @@ dist-ssr
 server/*.tmp
 __pycache__/
 *.pyc
-
 server/vision_calibration.json
 server/hand_eye_calibration.json
 server/camera_intrinsics.json
+.venv/
+node_modules/
+.env
+.logs/
+bridge.lock
+frontend/dist/
+db.sqlite3
+.server.lock
+.bridge.lock
+__MACOSX/
+.data/
+.itest-nav/
+.robotctl.*.lock
 
-# teammate pull-mode source is its own nested git repo
-wheeltec-webctl/
+# robot deploy tarballs + scratch
+*.tar.gz

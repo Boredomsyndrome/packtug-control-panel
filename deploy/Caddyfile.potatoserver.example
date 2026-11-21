@@ -1,0 +1,7 @@
+# /etc/caddy/Caddyfile — potatoserver webctl edge (Option B, docs/ACCESS.md)
+# HTTPS on :8443 -> uvicorn on 127.0.0.1:8090 (WebSocket upgrades automatic).
+comet13579.duckdns.org:8443 {
+	tls /etc/letsencrypt/live/comet13579.duckdns.org/fullchain.pem \
+	    /etc/letsencrypt/live/comet13579.duckdns.org/privkey.pem
+	reverse_proxy 127.0.0.1:8090
+}

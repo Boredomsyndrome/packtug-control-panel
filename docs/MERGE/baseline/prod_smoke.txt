@@ -1,0 +1,11 @@
+  PASS  browser api open, no auth (200) (200)
+  PASS  browser api tolerant of Basic hdr (200)
+  PASS  SPA served (200) (200)
+  PASS  garbage cmd -> 400 (400)
+  PASS  good cmd -> 200 (200)
+  PASS  robotctl NOT gated by browser auth (200 w/ robot token) (200)
+  PASS  robotctl wrong robot token -> 401 (401)
+  PASS  stop -> 200 (200)
+  PASS  cam without frames -> 503 (async view under ASGI) (503)
+  PASS  ws robot handshake + welcome + bad-token refusal
+PROD SMOKE: ALL CHECKS PASSED

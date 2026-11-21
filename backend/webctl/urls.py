@@ -1,0 +1,32 @@
+from django.urls import path, re_path
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView
+from rest_framework.routers import SimpleRouter
+
+from robot import robotctl, views
+from robot.viewsets import RobotViewSet
+
+router = SimpleRouter(trailing_slash=False)
+router.register("api/robot", RobotViewSet, basename="robot")
+# robot ids are validated to [A-Za-z0-9_-]+ at settings parse, so the default
+# DRF lookup pattern ([^/.]+) matches them all.
+
+urlpatterns = [
+    # browser-facing (open since v3.2 — network trust; robot plane keeps tokens)
+    path("cam/<str:robot_id>", views.cam_view, name="cam"),
+    *router.urls,   # /api/robot, /api/robot/<id>, /api/robot/<id>/cmd|stop|estop
+    # robot-facing (per-robot token auth inside the views — the server's only credential)
+    path("robotctl/<str:robot_id>/cmd", robotctl.cmd_poll, name="robotctl-cmd"),
+    path("robotctl/<str:robot_id>/telemetry", robotctl.telemetry, name="robotctl-telemetry"),
+    path("robotctl/<str:robot_id>/frame", robotctl.frame, name="robotctl-frame"),
+    path("robotctl/<str:robot_id>/scan", robotctl.scan, name="robotctl-scan"),
+    path("robotctl/<str:robot_id>/map", robotctl.map_upload, name="robotctl-map"),
+    # v3.3 saved-map artifacts for the browser (browser plane: network trust)
+    path("api/robot/<str:robot_id>/maps/<str:name>.<str:ext>",
+         views.map_file_view, name="map-file"),
+    # API docs (LAN/VPN network-trusted like everything browser-facing)
+    path("api/schema", SpectacularAPIView.as_view(), name="schema"),
+    path("api/redoc", SpectacularRedocView.as_view(url_name="schema"),
+         name="redoc"),
+    # SPA catch-all (assets themselves are served by WhiteNoise from frontend/dist)
+    re_path(r"^(?!api/|cam/|robotctl/).*$", views.index_view, name="index"),
+]

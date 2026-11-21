@@ -1,0 +1,62 @@
+PASS  sink QoSProfile built with depth=1 and NO durability/reliability enums  {'depth': 1}
+PASS  client.py names no durability/reliability enum members
+PASS  sink executor spins (battery callbacks will fire)
+PASS  sink publishes Twist on /cmd_vel
+PASS  cam node created and SPUN (executor added + spinning)
+PASS  padded Image msg decodes to a JPEG frame via subscription callback  (8 bytes)
+PASS  yuyv422 packed msg decodes (usb_cam raw default)
+PASS  nv12 planar msg decodes
+camera: unsupported encoding 'bgra16' (topic dropped)
+PASS  unknown encoding returns None without raising
+PASS  watchdog margin sane: ping interval < watchdog/2  (ping 0.8s, watchdog 2.5s)
+PASS  frame uploader is latest-wins (stale frames dropped, not queued)  b'new-frame'
+PASS  pack_scan: 360 rays downsampled to <=180 with ainc scaled by stride  n=180
+PASS  pack_scan: inf/nan/neg/over-12m/sub-rmin -> 0 (no return), valid rounded to mm  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.123, 0.15]
+PASS  pack_scan: empty ranges -> None
+PASS  pack_scan: missing header tolerated
+PASS  scan node subscribes candidates + executor spins
+PASS  received LaserScan -> packed dict via read()
+PASS  scan auto-discovery: live LaserScan topics on graph get subscribed (non-LaserScan skipped)
+PASS  camera auto-discovery: unknown vendor Image topic self-heals (no config, no restart)
+PASS  scan uploader is latest-wins too  {'seq': 2}
+PASS  post_scan stamped scan_ts
+PASS  dry daemon does NOT warm ros2 (v3.6.2)
+PASS  navd dry: map_on -> mode=mapping  mapping
+PASS  navd: stale/duplicate rid replay ignored
+PASS  navd dry: nav_on -> localizing, map remembered  room1
+PASS  navd dry: record echoes name+pose+point_rid for the hub handshake  {'rid': 999.5, 'name': 'wpA', 'x': 0.5, 'y': -0.5, 'yaw': 1.57, 'frame': 'map'}
+PASS  navd dry: route -> driving owns /cmd_vel  route
+PASS  navd dry: simulated route releases topic, mode->localizing, count=2  {'mode': 'localizing', 'map': 'room1', 'route_total': 2, 'route_done': 2, 'error': None, 'record': {'rid': 999.5, 'name': 'wpA', 'x': 0.5, 'y': -0.5, 'yaw': 1.57, 'frame': 'map'}, 'driving': False, 'pose': (-0.32083599837891047, 0.38348958544425654, 2.2674726798999982), 'frame': 'map', 'local_maps': []}
+PASS  navd dry: align accepted, still localizing, no error  None
+nav HALT (shim-test, soft)
+PASS  navd: soft halt -> not driving, stack PRESERVED, reason stamped  halted: shim-test
+nav HALT (nav_off, hard)
+PASS  navd: hard halt (nav_off) -> mode off  off
+PASS  client: teleop publisher SILENT while navd drives /cmd_vel  []
+PASS  client: autonomy release flushes a zero and drops held velocity  [(0.0, 0.0), (0.0, 0.0)]
+PASS  client: teleop resumes at held velocity after release  [(0.25, 0.0), (0.25, 0.0), (0.25, 0.0)]
+PASS  navd snapshot reports robot-local maps  ['corridor']
+PASS  real daemon warms ros2 node at startup (v3.6.2)
+map upload attempt 1/3 for 'corridor': http -1 'timed out'
+PASS  upload retry rides out one fake link failure  ok=True calls=2
+PASS  map upload body is gzip-encoded and byte-round-trips
+PASS  successful upload marks map uploaded (heal won't resend)
+PASS  delete_map action removes the robot-side map files
+PASS  initialpose republishes while AMCL is silent (nav2 pattern)
+PASS  republish stops once amcl_pose seen  2 -> 2
+PASS  route on an IDLE stack auto-arms Nav2 then drives (v3.6)  mode=route map=corridor
+PASS  auto-arm refuses AMBIGUOUS map choice with surfaced error  route: several maps saved — press 🎯 nav on the one you want first
+PASS  WEBCTL_SERVER list parses (space+comma separated)  ['http://lan:8090', 'http://vpn:8090']
+server failover -> http://vpn:8090 (t)
+server failover -> http://lan:8090 (t)
+PASS  endpoint rotation round-robins
+server failover -> http://vpn:8090 (GET /x: unreachable)
+PASS  _http link failure rotates to next endpoint
+websocket RX starved > 0s (half-open link) -> reconnect
+ws connect failed (1): tcp connect: [Errno 111] Connection refused — using HTTP fallback
+cmd poll failed: stub
+cmd poll failed: stub
+cmd poll failed: stub
+cmd poll failed: stub
+PASS  half-open ws starved -> forced reconnect (v3.6.3)  ws_now=None rot0=['ws rx starved']
+RESULT: ALL CHECKS PASSED

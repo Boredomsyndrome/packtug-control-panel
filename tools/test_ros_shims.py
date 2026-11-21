@@ -584,5 +584,134 @@ client36.running = _running_old
 check("half-open ws starved -> forced reconnect (v3.6.3)", _ho_ok,
       f"ws_now={cz.ws} rot0={str(_rot[:1])[:60]}")
 
+# ================= v3.7 CS-B1: REAL action-client route path ================
+# The P0 lesson: Humble rclpy.action.ClientGoalHandle exposes ONLY
+# get_result_async(), whose future resolves to FollowWaypoints.GetResult
+# .Response WRAPPING the .result (missed_waypoints). Dry-FSM tests never
+# touched the action client, so every real route failed silently for
+# releases. This section fakes the EXACT Humble surface — no legacy
+# property-style future attribute anywhere on the fake — and drives a
+# non-dry route all the way through _goal_cb -> _result_cb.
+_mod("nav2_msgs")
+
+
+class _FWGoal:
+    def __init__(self):
+        self.poses = []
+
+
+class _FWResult:
+    def __init__(self, missed):
+        self.missed_waypoints = list(missed)
+        self.return_code = 1
+
+
+class _FWGetResult:
+    class Response:
+        def __init__(self, result=None):
+            self.result = result
+
+
+class _FollowWaypoints:
+    Goal = _FWGoal
+    GetResult = _FWGetResult
+
+
+_mod("nav2_msgs.action", FollowWaypoints=_FollowWaypoints)
+
+
+class _RF:                                  # minimal rclpy Future lookalike
+    def __init__(self):
+        self._cbs = []
+        self._done = False
+        self._res = None
+
+    def add_done_callback(self, cb):
+        self._cbs.append(cb)
+        if self._done:
+            cb(self)
+
+    def _resolve(self, r):
+        self._res = r
+        self._done = True
+        for cb in list(self._cbs):
+            cb(self)
+
+    def result(self):
+        if not self._done:
+            raise RuntimeError("in flight")
+        return self._res
+
+
+class _GoalHandle:
+    """Humble ClientGoalHandle: .accepted + get_result_async(). Nothing."""
+    MISSED = 0
+    DELAY = 0.2
+
+    def __init__(self):
+        self.accepted = True
+
+    def get_result_async(self):
+        f = _RF()
+
+        def _later():
+            _time.sleep(self.DELAY)
+            f._resolve(_FWGetResult.Response(
+                result=_FWResult([0.0] * self.MISSED)))
+        threading.Thread(target=_later, daemon=True).start()
+        return f
+
+
+class _ActionClient:
+    def __init__(self, node, type_, name):
+        self.name = name
+
+    def wait_for_server(self, timeout_sec=0.0):
+        return True
+
+    def send_goal_async(self, goal, feedback_callback=None):
+        f = _RF()
+        f._resolve(_GoalHandle())
+        return f
+
+
+_mod("rclpy.action", ActionClient=_ActionClient)
+sys.modules["geometry_msgs.msg"].PoseStamped = lambda: types.SimpleNamespace(
+    header=types.SimpleNamespace(frame_id="", stamp=None),
+    pose=types.SimpleNamespace(
+        position=types.SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)))
+
+nd7 = navd.NavDaemon(sink=None, post=None, dry=False, robot_id="shimbot")
+nd7._own_node = _Node()                     # clock stub for goal stamps
+nd7.mode = "localizing"                     # stack already up
+nd7._await_pose = lambda timeout=20.0: True  # pose-gate seam (tested above)
+nd7._start_route([[1.0, 1.0, 0.0], [2.0, 2.0, 0.5]])
+s = _wait_nav(nd7, lambda s: s["driving"], timeout=2.0)
+check("CS-B1: real (non-dry) route sends goal, mode=route driving",
+      s["driving"] and s["mode"] == "route", f"mode={s['mode']} drv={s['driving']}")
+s = _wait_nav(nd7, lambda s: not s["driving"], timeout=4.0)
+check("CS-B1: route COMPLETES via get_result_async (exact Humble API)",
+      s["mode"] == "localizing" and not s["driving"] and not s.get("error"),
+      str(s.get("error")))
+
+_GoalHandle.MISSED = 2                      # missed-waypoint propagation
+nd8 = navd.NavDaemon(sink=None, post=None, dry=False, robot_id="shimbot")
+nd8._own_node = _Node()
+nd8.mode = "localizing"
+nd8._await_pose = lambda timeout=20.0: True
+nd8._start_route([[1.0, 1.0, 0.0]])
+s = _wait_nav(nd8, lambda s: s["error"], timeout=4.0)
+check("CS-B1: missed_waypoints unwrap through GetResult.Response",
+      s["error"] == "2 waypoint(s) missed", str(s.get("error")))
+
+check("CS-B1: fake goal handle = Humble surface only (no legacy future attr)",
+      not hasattr(_GoalHandle(), "result_" + "future"))
+_banned = "result_" + "future"
+_hits = sorted(p.name for p in (CLIENT.parent).glob("*.py")
+               if _banned in p.read_text())
+check("CS-B1: banned legacy future attribute absent from robotctl/*.py",
+      not _hits, str(_hits))
+
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")
 sys.exit(1 if failures else 0)

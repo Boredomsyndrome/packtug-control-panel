@@ -296,15 +296,22 @@ class NavDaemon:
                     self.error = "route: goal rejected"
                     self.mode, self.driving = "localizing", False
                 return
-            goal.result_future.add_done_callback(self._result_cb)
+            # Humble ClientGoalHandle exposes get_result_async() as the ONLY
+            # result accessor; the legacy property-style future that existed
+            # nowhere on Humble AttributeError'd every REAL route at
+            # goal-callback time (invisible to dry tests — CS-B1 gate bans
+            # touching any such attribute in robotctl/).
+            goal.get_result_async().add_done_callback(self._result_cb)
         except Exception as e:
             with self.lock:
                 self.error, self.driving, self.mode = f"goal: {e}", False, "localizing"
 
     def _result_cb(self, fut):
         try:
-            res = fut.result()
-            missed = len(getattr(res, "missed_waypoints", []) or [])
+            # future resolves to a GetResult.Response wrapping the action's
+            # Result; unwrap `.result` (getattr keeps dry fakes tolerant).
+            payload = getattr(fut.result(), "result", None) or fut.result()
+            missed = len(getattr(payload, "missed_waypoints", []) or [])
             msg = None if not missed else f"{missed} waypoint(s) missed"
         except Exception as e:
             msg = f"route result error: {e}"

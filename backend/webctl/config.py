@@ -8,11 +8,21 @@ clamps, frame caps), so deploy env files keep working unchanged.
 Hub runtime secrets live in .env.server (gitignored, 600) — the tracked
 .env is the VITE build config and must never carry tokens (CS-I4).
 """
+import logging
 import os
 import re
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# App-level INFO visibility: uvicorn's CLI configures only its OWN loggers,
+# so robot-plane events (robot.api / robot.hub / robot.ws) were silently
+# dropped — ws lifecycle was invisible exactly when you needed it. Standard
+# guard: basicConfig iff nothing has configured root logging yet.
+logging.basicConfig(
+    level=os.getenv("WEBCTL_LOG_LEVEL", "INFO").upper(),
+    format="%(levelname)s %(name)s: %(message)s",
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent          # backend/
 PROJECT_ROOT = BASE_DIR.parent                              # repo root

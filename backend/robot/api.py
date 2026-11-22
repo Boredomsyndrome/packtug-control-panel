@@ -352,7 +352,7 @@ async def _json_or_empty(request: Request):
 @router.get("/robotctl/{robot_id}/cmd")
 def cmd_poll(robot_id: str, request: Request, seq: str = None, wait: str = "0.4"):
     """Long-poll (SYNC on purpose: blocks a threadpool worker, mirroring the
-    old Django view). Query: seq (last applied generation, omit on first
+    pre-FastAPI view). Query: seq (last applied generation, omit on first
     call), wait (0..1 s, default 0.4). Always returns the *effective*
     command: zero if latched e-stop or the held command went stale."""
     hub, err = _authenticate(request, robot_id)

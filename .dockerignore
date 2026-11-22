@@ -12,14 +12,11 @@ __pycache__
 node_modules
 agv-console/node_modules
 agv-console/src
-robotctl
+robot
 deploy
 docs
-scripts
 tests
 tools
 dist/**/*.map
 *.tar.gz
 *.zip
-error_log.txt
-ROBOT-PPP*

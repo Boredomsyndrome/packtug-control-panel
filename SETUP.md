@@ -16,8 +16,8 @@ copy-pasteable. Two machines involved:
 
 | | runs | address |
 |---|---|---|
-| **Laptop** (control PC) | Django server (the ONLY server) | `:8000` on the shared WiFi |
-| **Each robot** | ROS2 base driver + `robotctl/client.py` | nothing — it calls OUT |
+| **Laptop** (control PC) | FastAPI hub (the ONLY server) | `:8000` on the shared WiFi |
+| **Each robot** | ROS2 base driver + `robot/client.py` | nothing — it calls OUT |
 
 Both must end up on the SAME WiFi: either your router's LAN, or the **laptop's
 own hotspot** (recommended for school demos — no internet needed, GNOME
@@ -43,7 +43,6 @@ Generate one random token per robot:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # DJANGO_SECRET_KEY
 ```
 
 ```ini
@@ -52,9 +51,6 @@ WEBCTL_ROBOTS="s2000-1:<tokenA>,s2000-2:<tokenB>"   # id:token, comma-separated
 MAX_LIN=0.5            # m/s hard clamp (server-side, always)
 MAX_ROT=0.7            # rad/s hard clamp
 CMD_TIMEOUT=0.5        # held cmd older than this -> zero served
-DJANGO_SECRET_KEY=<th…>
-DJANGO_DEBUG=false
-ALLOWED_HOSTS=*
 # v3.2: browser password removed — network trust (VPN/LAN) only.
 ```
 
@@ -82,7 +78,7 @@ bash tools/prod_smoke_test.sh        # optional: production launcher 8/8
 ### 1.5 Run the server (exactly ONE process)
 
 ```bash
-tmux new -s webctl -d 'bash scripts/run_server.sh 0.0.0.0 8000'
+tmux new -s webctl -d 'bash backend/run_server.sh 0.0.0.0 8000'
 tmux attach -t webctl          # Ctrl-b d to detach;  tmux kill-session -t webctl to stop
 ```
 
@@ -124,7 +120,7 @@ rsync -a --exclude .venv --exclude node_modules --exclude .logs \
 
 ```bash
 cd ~/wheeltec-webctl
-sudo bash scripts/robot_wifi_join.sh "<YOUR_SSID>" '<PSK>'
+sudo bash robot/wifi_join.sh "<YOUR_SSID>" '<PSK>'
 ```
 
 The script joins as a client (autoconnect, top priority) and disables every
@@ -153,7 +149,7 @@ from the WHEELTEC image. Copying the folder in 2.2 was the entire deploy.
 
 ```bash
 mkdir -p ~/.config
-cp ~/wheeltec-webctl/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+cp ~/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
 chmod 600 ~/.config/wheeltec-robotctl.env
 nano ~/.config/wheeltec-robotctl.env     # the values that matter:
 #   WEBCTL_SERVER=http://10.42.0.1:8000    laptop from 1.4 (hotspot example)
@@ -161,7 +157,7 @@ nano ~/.config/wheeltec-robotctl.env     # the values that matter:
 #   WEBCTL_ROBOT_TOKEN=<tha…ken>         # ...and its token
 #   WEBCTL_WATCHDOG=1.0                    no contact this long -> motors zero
 #   WEBCTL_CAM_MODE=auto                   camera per ROBOT_SETUP.md §6 (optional)
-tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+tmux new -s robotctl 'bash ~/robotctl/run_client.sh'
 # want: websocket up -> ws://<server>/ws/robotctl/s2000-1
 ```
 

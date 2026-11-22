@@ -8,7 +8,7 @@ robot has no internet access and nothing gets installed on it: `client.py`
 runs on the Python 3 standard library alone (its WebSocket is hand-rolled
 over `socket`); `rclpy` / `cv2` are used from the WHEELTEC image as-is.
 The robot turns its factory hotspot OFF, joins the WiFi the control laptop
-lives on, and only dials OUT to the Django server (WebSocket primary, HTTP
+lives on, and only dials OUT to the FastAPI hub (WebSocket primary, HTTP
 long-poll automatic fallback). No rosbridge, no listening ports, no
 per-robot IP juggling — and the fleet scales by adding registry entries.
 
@@ -16,14 +16,14 @@ per-robot IP juggling — and the fleet scales by adding registry entries.
  [S2000 chassis]──UART──[SBC: ROS2 + robotctl client]
                             │ WiFi STA (client), outbound HTTP only
         ════════════════════╪═══════════════════════════
- [robot #2 client] ──────── ╪ ──── [laptop: Django server :8000] ── browser
+ [robot #2 client] ──────── ╪ ──── [laptop: FastAPI hub :8090] ── browser
                             └────────── (same WiFi / laptop hotspot)
 ```
 
 ## 0. What to bring
 
 - Robots (batteries charged!), 24 V charger(s)
-- Control laptop running the Django server (README.md section A)
+- Control laptop running the FastAPI hub (README.md)
 - The WiFi both use: a home/school router LAN, **or** the laptop's own
   WiFi hotspot with no internet (recommended for school demos — nothing else
   touches it; GNOME hotspots use subnet 10.42.0.0/24, laptop = 10.42.0.1)
@@ -54,7 +54,7 @@ ssh wheeltec@192.168.0.100      # factory AP mode, last time
 #   scp -r wheeltec-webctl wheeltec@192.168.0.100:~/
 
 cd ~/wheeltec-webctl
-sudo bash scripts/robot_wifi_join.sh <YOUR_SSID> '<PSK>' [wlan0]
+sudo bash robot/wifi_join.sh <YOUR_SSID> '<PSK>' [wlan0]
 ```
 
 The script: connects as a station, marks that profile autoconnect with top
@@ -95,10 +95,10 @@ system-wide is required:
 
 ```bash
 mkdir -p ~/.config
-cp ~/wheeltec-webctl/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+cp ~/robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
 chmod 600 ~/.config/wheeltec-robotctl.env
 nano ~/.config/wheeltec-robotctl.env       # SERVER + this robot's ID/TOKEN
-tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+tmux new -s robotctl 'bash ~/robotctl/run_client.sh'
 ```
 
 Within ~1 s you should see a whole boot story (every step logs BEFORE it
@@ -131,7 +131,7 @@ create `~/.config/autostart/wheeltec-robotctl.desktop`:
 [Desktop Entry]
 Type=Application
 Name=wheeltec robotctl
-Exec=bash -lc 'exec bash ~/wheeltec-webctl/robotctl/run_client.sh >> /tmp/robotctl.log 2>&1'
+Exec=bash -lc 'exec bash ~/robotctl/run_client.sh >> /tmp/robotctl.log 2>&1'
 X-GNOME-Autostart-enabled=true
 ```
 
@@ -142,7 +142,7 @@ retries forever, order doesn't matter.)
 
 **No rosbridge. No ROS ports exposed. Nothing installed. Nothing to
 port-forward or firewall.** The transport auto-negotiates: WebSocket when
-the server speaks ASGI (`scripts/run_server.sh`), HTTP long-poll otherwise
+the server speaks ASGI (`backend/run_server.sh`), HTTP long-poll otherwise
 (`/api` and `/robotctl` are identical either way).
 
 ## 6. Camera (optional, per robot — and all sources come from the image)
@@ -194,7 +194,7 @@ permission / `ls -l /dev/wheeltec_lidar`).
 | computer | **Jetson Orin Nano Dev Kit** (L4T R35.3.1, Ubuntu 22.04, Python 3.10, aarch64) — NOT a Pi |
 | ROS | `/opt/ros/humble` + vendor ws `~/wheeltec_ros2` (colcon-built; `turn_on_wheeltec_robot`, `lslidar_driver`, `usb_cam-ros2`, `web_video_server-ros2`, nav2, slam…) |
 | serials | 3× CH343: `/dev/wheeltec_controller` = MCU base @115200 (launch `base_serial.launch.py`, publishes `/PowerVoltage` `/odom`), `/dev/wheeltec_lidar` = **LSLidar M10P** (±120° FOV), `/dev/wheeltec_mic` |
-| tmux | NOT installed — use nohup (`deploy/stack_up.sh` handles all of it; crontab `@reboot` keeps the stack up: base + lidar + webctl client, idempotent). Vendor `lslidar_driver_node` also **crashes at runtime** (observed -6 heap-abort and -11 SIGSEGV while streaming) → `deploy/watchdog_lidar.sh` on `*/2 * * * *` cron revives it; the webctl client self-heals once `/scan` returns |
+| tmux | NOT installed — use nohup (`robot/start-all.sh` handles all of it; crontab `@reboot` keeps the stack up: base + lidar + webctl client, idempotent). Vendor `lslidar_driver_node` also **crashes at runtime** (observed -6 heap-abort and -11 SIGSEGV while streaming) → `robot/watchdog_lidar.sh` on `*/2 * * * *` cron revives it; the webctl client self-heals once `/scan` returns |
 | camera | **NO working camera.** CSI: no IMX219 module electrically present — driver bind on both CSI ports i2c-probes with `-121` (both `rbpcv2_imx219_a/c` nodes exist but nothing answers; the vendor DT enables them by default). USB: an **Orbbec ASTRA S** (2bc5:0402) is plugged in but exposes only Vendor-Specific/OpenNI interfaces (no UVC → no /dev/video) and the vendor `ros2_astra_camera` pkg does NOT support model S (only DaBai/Gemini). Any UVC webcam plugged in → /dev/video0 → stack_up + client auto-discovery light it up with zero changes. Earlier "CSI works" belief was WRONG — past frames were the client's synthetic test pattern. |
 | VPN | robot is the hwdsl2 client: tunnel iface `ppp0` = 192.168.42.11 → server at 192.168.42.1:8090 (`~/robotctl/robotctl.env`) |
 
@@ -249,7 +249,7 @@ Open `http://<laptop>:8000` in a browser:
 - **robot joined but no IP** → router DHCP full / captive portal: school WiFi
   with captive portals is NOT supported (as before); laptop hotspot is.
 - **hotspot came back after reboot** → an AP profile still has
-  `connection.autoconnect yes`: rerun `scripts/robot_wifi_join.sh`.
+  `connection.autoconnect yes`: rerun `robot/wifi_join.sh`.
 - **moves then stops after ~1 s while holding a button** → your browser tab
   isn't focused/visible; heartbeat stopped — intended behavior.
 - **camera unavailable, driving fine** → no source resolved per §6; the

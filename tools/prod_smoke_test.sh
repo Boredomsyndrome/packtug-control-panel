@@ -52,7 +52,7 @@ expect "cam without frames -> 503 (async view under ASGI)" 503 \
 
 if .venv/bin/python - <<'PY'
 import sys, json
-sys.path.insert(0, "robotctl")
+sys.path.insert(0, "robot")
 from client import StdWs
 w = StdWs("ws://127.0.0.1:8901/ws/robotctl/smoke?token=tok-smoke", timeout=5)
 w.connect()

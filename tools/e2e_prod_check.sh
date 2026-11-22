@@ -19,7 +19,7 @@ rm -f /tmp/webctl-e2e.json /tmp/e2e-client.log
 WEBCTL_SERVER=http://127.0.0.1:8090 WEBCTL_ROBOT_ID=s2000-1 \
 WEBCTL_ROBOT_TOKEN=$TOK WEBCTL_DRY_RUN=1 WEBCTL_SINK=/tmp/webctl-e2e.json \
 WEBCTL_CAM_MODE=off WEBCTL_LOG_LEVEL=INFO \
-  .venv/bin/python robotctl/client.py >/tmp/e2e-client.log 2>&1 &
+  .venv/bin/python robot/client.py >/tmp/e2e-client.log 2>&1 &
 CPID=$!
 sleep 4
 echo "drive: $(curl -s -H 'Content-Type: application/json' \

@@ -21,7 +21,7 @@ bt_navigator:
   ros__parameters:
     plugin: Nav2Backup
 EOF
-HOME="$TMP" bash "$REPO/deploy/navctl.sh" status >/dev/null 2>&1 || true
+HOME="$TMP" bash "$REPO/robot/navctl.sh" status >/dev/null 2>&1 || true
 OUT="$TMP/robotctl/nav_params/param_four_wheel_diff_bs.webctl.yaml"
 fail=0
 [ -f "$OUT" ] || { echo "FAIL: param copy not rendered"; exit 1; }

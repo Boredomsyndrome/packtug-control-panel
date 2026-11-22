@@ -20,8 +20,8 @@ them into 15° internal steps.
 
 Usage (from the control-panel folder):
 
-    conda run --no-capture-output -n ned python server/arm_server.py --port 8020
-    conda run --no-capture-output -n ned python server/arm_server.py --mock
+    conda run --no-capture-output -n ned python backend/arm_server.py --port 8020
+    conda run --no-capture-output -n ned python backend/arm_server.py --mock
 """
 
 from __future__ import annotations

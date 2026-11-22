@@ -1,7 +1,13 @@
 """Harness: v3.4.6 halt semantics — soft halts keep the nav stack, hard stop it."""
-import sys
-sys.path.insert(0, ".")
-from robotctl.navd import NavDaemon
+import importlib.util
+import pathlib
+
+_spec = importlib.util.spec_from_file_location(
+    "webctl_navd",
+    pathlib.Path(__file__).resolve().parents[1] / "robot" / "navd.py")
+_navd = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_navd)
+NavDaemon = _navd.NavDaemon
 
 d = NavDaemon(sink=None, dry=True)
 

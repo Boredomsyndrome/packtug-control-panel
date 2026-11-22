@@ -96,7 +96,7 @@ fields: response `{"ok": false, "error": "invalid command", "errors": {...}}`.
 
 ---
 
-## 2. Robot-facing API (what `robotctl/client.py` speaks)
+## 2. Robot-facing API (what `robot/client.py` speaks)
 
 Robots make **outbound calls only** (no listening ports, ever).
 
@@ -181,7 +181,7 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1}}" -r 10   # b
 ```bash
 tmux attach -t webctl                                   # watch server log
 tmux new-session -d -s webctl "cd ~/wheeltec-webctl && \
-  bash scripts/run_server.sh 0.0.0.0 8090 2>&1 | tee -a .logs/server-8090.log"
+  bash backend/run_server.sh 0.0.0.0 8090 2>&1 | tee -a .logs/server-8090.log"
 bash tools/e2e_prod_check.sh    # loopback dry-robot drives through the LIVE instance
 curl -u comet:*** http://127.0.0.1:8090/api/robot     # fleet
 ```
@@ -192,7 +192,7 @@ restart the tmux session, point a client at it — the fleet is data, not code.
 ## 6. Autonomy (v3.3) — quick reference
 
 Full design: `docs/NAV.md`. Robot-side stack is opt-in via `WEBCTL_NAV=1`
-in `~/robotctl/robotctl.env` (deploy_to_robot.sh flips it); navd is inert
+in `~/robotctl/robotctl.env` (deploy_robot.py flips it); navd is inert
 and launches NOTHING until a browser action arrives.
 
 - `GET  /api/robot/<id>/nav` → `{mode, nav, waypoints{name:{x,y,yaw}}, maps[]}`

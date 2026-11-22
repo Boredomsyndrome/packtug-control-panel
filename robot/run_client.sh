@@ -22,7 +22,7 @@ if [ -f "$ENV_FILE" ]; then
   . <(tr -d '\r' <"$ENV_FILE") || echo "robotctl: WARNING: env file failed to source" >&2
   set +a
 else
-  echo "robotctl: no env file at $ENV_FILE — copy robotctl/robotctl.env.example"
+  echo "robotctl: no env file at $ENV_FILE — copy robot/robotctl.env.example"
   echo "          there (chmod 600) and fill in SERVER/ID/TOKEN. Trying anyway."
 fi
 
@@ -46,5 +46,5 @@ if [ -z "$PYBIN" ]; then
   echo "robotctl: FATAL: no python3 on PATH (impossible on stock Jetson image — check PATH)" >&2
   exit 1
 fi
-echo "robotctl: exec $PYBIN -u $DIR/robotctl/client.py"
-exec "$PYBIN" -u "$DIR/robotctl/client.py"
+echo "robotctl: exec $PYBIN -u $DIR/robot/client.py"
+exec "$PYBIN" -u "$DIR/robot/client.py"

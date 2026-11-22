@@ -1,7 +1,7 @@
 FROM python:3.14-slim
 
 LABEL org.opencontainers.image.title="packtug webctl hub" \
-      org.opencontainers.image.description="Fused FastAPI hub: robot plane + arm/vision bridge + combined SPA (v4.0.0)"
+      org.opencontainers.image.description="Fused FastAPI hub: robot plane + arm/vision bridge + combined SPA (v4.1.0)"
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
 
@@ -16,10 +16,11 @@ RUN apt-get update \
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install -r /app/backend/requirements.txt
 
-# the app: server code + arm bridge + BUILT frontend (dist/ is committed)
+# the app: ONE FastAPI backend (robot plane + arm/vision bridge) + BUILT
+# frontend (dist/ is gitignored — run both npm builds before docker build;
+# see docker.md). robot/ is NOT in the image: the robot is never containerized.
 COPY VERSION /app/VERSION
 COPY backend/ /app/backend/
-COPY server/ /app/server/
 COPY dist/ /app/dist/
 
 # waypoints + lock live outside the image

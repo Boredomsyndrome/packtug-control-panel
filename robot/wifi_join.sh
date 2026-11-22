@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Turn a WHEELTEC SBC from the factory hotspot (AP mode) into a WiFi CLIENT
-# (STA) on the LAN where the wheeltec-webctl Django server runs. After this,
+# (STA) on the LAN where the FastAPI webctl hub runs. After this,
 # the robot broadcasts NOTHING and only makes outbound HTTP calls.
 #
 #   sudo ./robot_wifi_join.sh <SSID> <PASSWORD> [iface=wlan0]

@@ -16,7 +16,7 @@ it likes, forever, even after being power-cycled a hundred times.
   ┌───▼───────────── router (LAN 192.168.50.0/24, WAN unplugged) ──────┐
   │  SSID: WT-FLEET (WPA2-PSK)                                         │
   │   ├─ laptop 192.168.50.50  ← DHCP RESERVATION (the only fixed IP)  │
-  │   │                 Django :8000  ◀── browser UIs (phones too)     │
+  │   │                 FastAPI hub :8090  ◀── browser UIs (phones too)     │
   │   ├─ robot s2000-1 (any DHCP lease) ── ws to server (http fallback) ─▶ │
   │   └─ robot s2000-2 (any DHCP lease) ── telemetry + frames ─▶       │
   └─────────────────────────────────────────────────────────────────────┘
@@ -81,8 +81,8 @@ Each robot — join it to `WT-FLEET` and point the client at the reservation
 
 ```bash
 cd ~/wheeltec-webctl
-sudo bash scripts/robot_wifi_join.sh "WT-FLEET" '<router-psk>'
-mkdir -p ~/.config && cp robotctl/robotctl.env.example ~/.config/wheeltec-robotctl.env
+sudo bash robot/wifi_join.sh "WT-FLEET" '<router-psk>'
+mkdir -p ~/.config && cp robot/robotctl.env.example ~/.config/wheeltec-robotctl.env
 chmod 600 ~/.config/wheeltec-robotctl.env
 nano ~/.config/wheeltec-robotctl.env          # values below
 ```
@@ -93,7 +93,7 @@ WEBCTL_ROBOT_ID=s2000-1                       # + its token, as in server .env
 ```
 
 ```bash
-tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'
+tmux new -s robotctl 'bash ~/robotctl/run_client.sh'
 # want: websocket up -> ws://192.168.50.50:8000/ws/robotctl/s2000-1
 # (zero installs — the robot's internet is never needed; boot autostart:
 #  desktop autostart entry per ROBOT_SETUP.md §5)
@@ -131,10 +131,10 @@ video over congested school 2.4 GHz gets choppy; 640 stays smooth.
    ("No internet" icon is EXPECTED and correct — ignore every captive-portal
    popup; on Windows also answer *Yes/private network* to the discoverable
    prompt, its firewall blocks inbound 8000 otherwise).
-3. Start the server: `tmux new -d -s webctl 'bash scripts/run_server.sh
+3. Start the server: `tmux new -d -s webctl 'bash backend/run_server.sh
    0.0.0.0 8000'` (from `~/wheeltec-webctl`) — uvicorn ASGI, WebSockets on.
 4. Power robots (base driver autostart per ROBOT_SETUP.md; client per Part B
-   — else `tmux new -s robotctl 'bash ~/wheeltec-webctl/robotctl/run_client.sh'`).
+   — else `tmux new -s robotctl 'bash ~/robotctl/run_client.sh'`).
    Within ~90 s all chips green + transport `ws` at `http://192.168.50.50:8000`.
 5. E-stops reachable, wheels up for first spin, go.
 

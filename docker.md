@@ -4,7 +4,7 @@ What this is: the fused FastAPI hub (robot plane + arm/vision bridge + combined
 SPA, one process on `:8090`) packaged as a Docker image and deployed on the
 **server** via docker compose.
 
-The **robot side is never containerized** — `robotctl/client.py` runs natively on
+The **robot side is never containerized** — `robot/client.py` runs natively on
 the robot (it needs the ROS/DDS environment and device access; the image doesn't
 include the client at all).
 
@@ -95,7 +95,7 @@ derived Dockerfile with `pip install pyniryo==1.1.2 --no-deps`.
 ```bash
 WEBCTL_SERVER=http://<server-lan-ip>:8090 \
 WEBCTL_ROBOT_ID=robot-1 WEBCTL_ROBOT_TOKEN=<token from .env.server> \
-python3 robotctl/client.py
+python3 robot/client.py
 ```
 
 The v4.0.0 client is **websocket-only**: telemetry/scan/frames/commands all ride

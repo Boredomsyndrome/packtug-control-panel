@@ -529,7 +529,7 @@ export const api = {
     }
   },
 
-  // ---------- Ned1 arm bridge (live via server/arm_server.py) ----------
+  // ---------- Ned1 arm bridge (live via backend/arm_server.py) ----------
 
   async getArmStatus(): Promise<ArmStatus> {
     if (MOCK_MODE) {

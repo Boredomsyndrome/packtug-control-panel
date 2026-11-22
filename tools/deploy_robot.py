@@ -7,12 +7,13 @@
         --id s2000-1
 
 Does: recon running client (owner + env path) -> backup old files ->
-upload client.py/navd.py/run_client.sh -> MERGE env (SERVER list + NAV=1,
+upload everything in robot/ (start-all.sh, client, navd, nav plane, watchdogs, camera bridge) -> MERGE env (SERVER list + NAV=1,
 token/ID preserved in-place, chmod 600) -> restart as the same user ->
 verify banner + hub reachability + LAN probe. Never prints secrets.
 """
 import argparse
 import datetime
+import os
 import re
 import sys
 import time
@@ -81,25 +82,30 @@ def main():
             break
     print("env base:", base_env, "candidates:", envs or "none")
 
-    # ---- backup + upload
+    # ---- backup + upload: the WHOLE robot/ folder IS the deployment
+    # (v4.1 layout — robot/ carries every robot function; the same tree
+    # lives on the Jetson as ~/robotctl/). The live robotctl.env, maps and
+    # lock files on the robot are never touched.
     ts = datetime.datetime.now().strftime("%H%M%S")
-    run(ssh, f"cd ~/robotctl 2>/dev/null && for f in client.py navd.py run_client.sh; do "
-             f"[ -f $f ] && cp -a $f $f.bak-{ts}; done; mkdir -p ~/robotctl; echo backed-up")
+    run(ssh, f"rm -rf ~/robotctl.bak-{ts} && cp -a ~/robotctl ~/robotctl.bak-{ts} 2>/dev/null; "
+             f"mkdir -p ~/robotctl; echo backed-up")
     sftp = ssh.open_sftp()
-    for name in ("client.py", "navd.py", "run_client.sh", "webctl_tf_repeater.py", "webctl_scan_filter.py"):
-        sftp.put(f"robotctl/{name}", f"/home/{args.user}/robotctl/{name}")
-    # v3.6.5: the nav plane lives in deploy/ (script) + robotctl/nav_params/
-    # (vendor-proven slam/filter profiles) — deploy them all or the robot
-    # silently runs an old navctl.
-    sftp.put("deploy/navctl.sh", f"/home/{args.user}/robotctl/navctl.sh")
-    run(ssh, "mkdir -p ~/robotctl/nav_params", show=False)
     import glob
-    for f in sorted(glob.glob("robotctl/nav_params/*")):
-        sftp.put(f, "/home/%s/robotctl/nav_params/%s" % (args.user, f.rsplit("/", 1)[-1]))
-    sftp.chmod(f"/home/{args.user}/robotctl/run_client.sh", 0o755)
-    sftp.chmod(f"/home/{args.user}/robotctl/navctl.sh", 0o755)
-    print("uploaded client.py navd.py run_client.sh webctl_tf_repeater.py "
-          "navctl.sh nav_params/*.yaml")
+    n = 0
+    for f in sorted(glob.glob("robot/**", recursive=True)):
+        if os.path.isdir(f) or "__pycache__" in f or f.endswith((".lock", ".log")):
+            continue
+        base = f[len("robot/"):]
+        if base == "robotctl.env":            # token lives on the robot only
+            continue
+        remote = f"/home/{args.user}/robotctl/{base}"
+        run(ssh, f"mkdir -p '{os.path.dirname(remote)}'", show=False)
+        sftp.put(f, remote)
+        if base.endswith(".sh"):
+            sftp.chmod(remote, 0o755)
+        n += 1
+    print(f"uploaded {n} files: everything in robot/ -> ~/robotctl/ "
+          "(env/lock/maps on the robot left alone)")
 
     # ---- env merge ON THE ROBOT (token never leaves the robot)
     merge = r'''

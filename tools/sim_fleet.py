@@ -129,7 +129,7 @@ def main():
                 "WEBCTL_SINK": sink_path,
                 "WEBCTL_WATCHDOG": "2.5"}
         cfh = open(os.path.join(LOGDIR, "client.log"), "wb")
-        client = subprocess.Popen([PY, "robotctl/client.py"], cwd=ROOT,
+        client = subprocess.Popen([PY, "robot/client.py"], cwd=ROOT,
                                   env=cenv, stdout=cfh,
                                   stderr=subprocess.STDOUT,
                                   start_new_session=True)

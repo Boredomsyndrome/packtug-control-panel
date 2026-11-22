@@ -10,16 +10,16 @@
 - On this Mac, Node/npm live in `/usr/local/bin`; if `npm` is not found:
   `PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin npm run build`.
 - FastAPI bridge (serves `dist` plus `/api/arm/*`, `/api/camera/*`, `/api/vehicle/*`):
-  `/opt/anaconda3/bin/conda run --no-capture-output -n ned python server/arm_server.py --port 8020`
+  `/opt/anaconda3/bin/conda run --no-capture-output -n ned python backend/arm_server.py --port 8020`
   Add `--mock` when no arm is attached. `conda` is not always on the tool PATH; use `/opt/anaconda3/bin/conda` or a login shell.
 - Use conda env `ned` (Python 3.11, `pyniryo==1.1.2`). Never install pyniryo into `wheeltec`.
-- Python syntax check: `python3 -m py_compile server/arm_server.py server/camera_stream.py`.
+- Python syntax check: `python3 -m py_compile backend/arm_server.py robot/camera_stream.py`.
 - Restart `arm_server.py` after Python changes; rebuild `dist` after frontend changes. There is no backend reloader.
 - Restart `8020` by the actual listener, not `pgrep` alone:
   `lsof -tiTCP:8020 -sTCP:LISTEN | xargs kill -9`, confirm the port is free, then start a fresh server. A conda wrapper can hide a stale child.
 - `arm_server.py` reads `CAMERA_*` and `WHEELTEC_WEBCTL_URL` directly; it does not load `.env`. Export env vars before starting it. Frontend `.env` only controls Vite (`VITE_MOCK`, `VITE_API_BASE`).
 - Teammate pull-mode AGV server (separate nested repo):
-  `cd wheeltec-webctl && nohup bash scripts/run_server.sh 0.0.0.0 8090 >/tmp/wheeltec-webctl.log 2>&1 &`
+  `cd packtug-control-panel && nohup bash backend/run_server.sh 0.0.0.0 8090 >/tmp/webctl.log 2>&1 &`
   It requires `wheeltec-webctl/.venv` and its local `.env`; bind `0.0.0.0:8090` or the robot cannot dial it over Tailscale.
 - Do not commit/push unless asked; the working tree is normally dirty. `wheeltec-webctl/` has its own `.git` and is gitignored by this repo.
 
@@ -32,14 +32,14 @@
 - The UI connection preset **Jetson relay · 127.0.0.1** uses this tunnel. The **Ethernet** preset is for an arm server running on the Jetson (or direct arm Ethernet).
 - Before restarting `arm_server.py`, call `POST /api/arm/disconnect` or it may leave a stale arm TCP session. `HostNotReachableException` after a restart usually means the arm service has a stale session; power-cycle the arm controller if a normal reconnect does not clear it.
 - If the arm link stays up but ping loss/`HostNotReachableException` returns, reset the NetworkManager connection (`nmcli con down arm-link && nmcli con up arm-link`). The `arm-link` profile is 169.254.200.1/16 on eth0 and autoconnects.
-- The UGREEN/arm link must be **100 Mb/s full duplex**, not 1 Gb/s autoneg. At 1 Gb/s it showed 50-75% packet loss and `HostNotReachableException`; forcing 100 Mb/s restored 0% loss and a stable PyNiryo session. Use `deploy/setup_arm_link.sh`; do not toggle EEE as a fix (it made the link worse).
+- The UGREEN/arm link must be **100 Mb/s full duplex**, not 1 Gb/s autoneg. At 1 Gb/s it showed 50-75% packet loss and `HostNotReachableException`; forcing 100 Mb/s restored 0% loss and a stable PyNiryo session. Use `robot/setup_arm_link.sh`; do not toggle EEE as a fix (it made the link worse).
 - Tailscale is currently Mac `100.86.19.104` and Jetson `100.73.98.69`; it may use a DERP relay instead of a direct path.
 
 ## Fleet / AGV integration
 
 - `wheeltec-webctl/` is the teammate’s **pull-mode** control repo, nested under `control-panel/` as a separate git checkout. Do not confuse it with the old `/Users/wuliao/Desktop/wheeltec-webctl` rosbridge/push snapshot.
 - The live AGV UI is the teammate’s console at `http://<Mac-host>:8090/`, linked from our Fleet page as **Open AGV control**. Do not re-add our custom `LiveVehicle` drive pad; that component and the `/api/vehicle/*/cmd|stop|estop` proxy were removed. `/api/vehicle` is Fleet status only.
-- Architecture: browser/django hub on the Mac (`:8090`) + `robotctl/client.py` on the Jetson dialing **out**; the robot exposes no ports and uses WebSocket with HTTP long-poll fallback.
+- Architecture: browser/FastAPI hub (`:8090`) + `robot/client.py` on the Jetson dialing **out**; the robot exposes no ports and uses WebSocket with HTTP long-poll fallback.
 - Robot registry and clamps live in `wheeltec-webctl/.env` (`WEBCTL_ROBOTS=wheeltec:<token>`, currently `MAX_LIN=0.4`, `MAX_ROT=0.7`). The matching robot env is `/home/wheeltec/.config/wheeltec-robotctl.env` with `WEBCTL_SERVER=http://100.86.19.104:8090`. Never print, commit, or paste the token. Rotate it if it appears in logs.
 - The robot client is `/home/wheeltec/robotctl/run_client.sh` (copy of `wheeltec-webctl/robotctl`); it uses the Jetson ROS environment and publishes `/cmd_vel`. Camera upload is disabled (`WEBCTL_CAM_MODE=off`); LiDAR upload is enabled (`WEBCTL_SCAN_MODE=auto`) and subscribes to `/scan` at ~12 Hz.
 - Start it detached:
@@ -51,7 +51,7 @@
   `wheeltec-webctl/.venv/bin/python -u tools/integration_test.py` (uses fake ports 8100/8111/9103).
 - The teammate browser/API has **no browser password**; access control is network trust (Tailscale/trusted LAN) plus the per-robot token. Do not expose `:8090` publicly.
 - The ASGI access log can print the robot token from the WebSocket query string. Do not paste raw server logs into chat/commits; rotate `WEBCTL_ROBOTS` if a token is exposed.
-- The old `wheeltec-webctl/backend/robot/bridge.py` push/rosbridge code is not the active path. Use the pull-mode `robotctl` + Django ASGI server.
+- The old `wheeltec-webctl/backend/robot/bridge.py` push/rosbridge code is not the active path. Use the pull-mode `robot/` client + FastAPI ASGI hub.
 
 ## Arm / robot
 
@@ -73,11 +73,11 @@
 - The S200 SBC is a **Jetson Orin Nano**, host `wheeltec`, Ubuntu 22.04 `tegra` + ROS 2 Humble. Current Tailscale node: `100.73.98.69` (verify with `tailscale status`; DHCP can change).
 - HKU `Wi-Fi.HK via HKU` has client isolation; use Tailscale, not direct SSH over that SSID.
 - Default WHEELTEC credentials/AP are in `../WHEELTEC ROS2 S200 Brushless Mobile Robot.pdf`: AP `WHEELTEC_ORINNANO_HUMBLE`, robot `192.168.0.100`. Do not put passwords in this repo.
-- The arm link through the UGREEN RTL8153 is a persistent NetworkManager profile named `arm-link` (169.254.200.1/16, 100 Mb/s full duplex, autoconnect). Install/repair it with `sudo deploy/setup_arm_link.sh eth0` (run on the Jetson; the repo copy is the source). Confirm with `ip -br link`; the interface may swap between `eth0` and `eth1`.
-- Camera bridge runs on the Jetson, not the Mac, as the enabled systemd service **`packtug-camera.service`** (D455 RGB, port 8080; auto-starts at boot and restarts on failure). The unit is in this repo at `deploy/packtug-camera.service`; install with `sudo deploy/setup_camera_service.sh`. Check with `systemctl status packtug-camera.service`; manual fallback:
+- The arm link through the UGREEN RTL8153 is a persistent NetworkManager profile named `arm-link` (169.254.200.1/16, 100 Mb/s full duplex, autoconnect). Install/repair it with `sudo robot/setup_arm_link.sh eth0` (run on the Jetson; the repo copy is the source). Confirm with `ip -br link`; the interface may swap between `eth0` and `eth1`.
+- Camera bridge runs on the Jetson, not the Mac, as the enabled systemd service **`packtug-camera.service`** (D455 RGB, port 8080; auto-starts at boot and restarts on failure). The unit is in this repo at `robot/packtug-camera.service`; install with `sudo robot/setup_camera_service.sh`. Check with `systemctl status packtug-camera.service`; manual fallback:
   `source /opt/ros/humble/setup.bash && python3 ~/camera_stream.py --manage-camera --mode rgb --port 8080`.
   It owns the `realsense2_camera` child process; do not also launch a separate realsense node.
-- The service can stay `active` while its frame stream is frozen. Check `curl http://127.0.0.1:8080/health`: if `color.age_sec` grows beyond a few seconds, restart `packtug-camera.service`; QR/vision will otherwise keep detecting on a stale snapshot. A pause/resume of the realsense child can leave it in this state. `deploy/setup_camera_watchdog.sh` installs a 30 s timer that restarts a stale bridge.
+- The service can stay `active` while its frame stream is frozen. Check `curl http://127.0.0.1:8080/health`: if `color.age_sec` grows beyond a few seconds, restart `packtug-camera.service`; QR/vision will otherwise keep detecting on a stale snapshot. A pause/resume of the realsense child can leave it in this state. `robot/setup_camera_watchdog.sh` installs a 30 s timer that restarts a stale bridge.
 - If `/health` has `color.age_sec: null` and the journal says `No RealSense devices were found`, the D455 USB is unplugged or not enumerated; restarting the service will not help. Reseat the camera; `lsusb` must show `ID 8086:0b5c`.
 - D455 is on USB2 (`480M`); the Jetson USB3 root (`Bus 002`, 10000M) has no devices and no accessible USB3 port has been found. Do not claim USB3.
 - D455 RGB works at `640x480@15`; D455 depth does **not** produce frames over this USB2 link. The earlier depth data on `/camera` came from the **Orbbec Astra S**, which is used by the S200 navigation stack — do not kill or reconfigure it.
@@ -86,7 +86,7 @@
 - `camera_stream.py` also serves color/depth MJPEG, `depth_stats`, and D455 RGB intrinsics at `/camera_info`; the FastAPI proxy must preserve the upstream `Content-Type` including `boundary=frame`, otherwise the browser shows live but no image.
 - Start/stop the Jetson bridge with `fuser -k 8080/tcp` or an anchored kill; do not leave an old `camera_stream.py` holding port 8080.
 - Camera URLs default to `http://100.73.98.69:8080/{stream,depth,mode,camera_info}` via `CAMERA_STREAM_URL`, `CAMERA_DEPTH_URL`, `CAMERA_MODE_URL`, `CAMERA_INFO_URL`; override if the Tailscale IP changes. QR clicks submit the exact frozen browser frame; `/snapshot` remains the compatibility fallback.
-- For the rigid **arm/wrist mount** (eye-in-hand), the Arm UI uses D455 intrinsics and 10–15 stationary views of the fixed 5x7 ChArUco board (`docs/calibration/charuco_5x7_30mm_a4_300dpi.png`, 30 mm squares) to solve `T_tool_camera`, then combines it with the synchronized arm pose and runtime 35 mm QR PnP. Keep the mount and board rigid. Local samples live in `server/hand_eye_calibration.json` and are user data.
+- For the rigid **arm/wrist mount** (eye-in-hand), the Arm UI uses D455 intrinsics and 10–15 stationary views of the fixed 5x7 ChArUco board (`docs/calibration/charuco_5x7_30mm_a4_300dpi.png`, 30 mm squares) to solve `T_tool_camera`, then combines it with the synchronized arm pose and runtime 35 mm QR PnP. Keep the mount and board rigid. Local samples live in `backend/hand_eye_calibration.json` and are user data.
 - D455 may be disconnected independently of the Jetson; camera loss must not be presented as an arm/base fault.
 
 ## Vision / QR

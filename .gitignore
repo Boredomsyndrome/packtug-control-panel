@@ -5,12 +5,12 @@ dist-ssr
 .DS_Store
 .vite
 *.tsbuildinfo
-server/*.tmp
+backend/*.tmp
 __pycache__/
 *.pyc
-server/vision_calibration.json
-server/hand_eye_calibration.json
-server/camera_intrinsics.json
+backend/vision_calibration.json
+backend/hand_eye_calibration.json
+backend/camera_intrinsics.json
 .venv/
 node_modules/
 .env
@@ -20,6 +20,8 @@ frontend/dist/
 db.sqlite3
 .server.lock
 .bridge.lock
+robot/robotctl.env
+robot/*.lock
 __MACOSX/
 .data/
 .itest-nav/

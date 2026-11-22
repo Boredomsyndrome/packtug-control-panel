@@ -11,7 +11,7 @@ Safety model (v1 invariants preserved, watchdog now two-layered):
     the robot via its next poll)
   * e-stop latches: effective command stays zero until /stop or a fresh cmd
   * client-side watchdog additionally zeroes the robot if the server itself
-    disappears (see robotctl/client.py)
+    disappears (see robot/client.py)
   * exactly one server process may serve the API (flock); others answer 503
 """
 import errno

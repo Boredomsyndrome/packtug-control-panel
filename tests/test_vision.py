@@ -5,7 +5,10 @@ import cv2
 import numpy as np
 from fastapi import HTTPException
 
-from server.arm_server import (
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "backend"))
+
+from arm_server import (
     _detect_qr_roi,
     _estimate_charuco_camera_pose,
     _estimate_qr_camera_pose,
@@ -76,7 +79,7 @@ class EyeInHandTests(unittest.TestCase):
         h, w = image.shape[:2]
         camera = np.asarray([[2500, 0, w / 2], [0, 2500, h / 2], [0, 0, 1]])
         with patch(
-            "server.arm_server._camera_intrinsics",
+            "arm_server._camera_intrinsics",
             return_value=(camera, np.zeros((5, 1))),
         ):
             result = _estimate_charuco_camera_pose(image)
@@ -100,7 +103,7 @@ class EyeInHandTests(unittest.TestCase):
             {"x": float(x), "y": float(y)} for x, y in image_points.reshape(4, 2)
         ]
         with patch(
-            "server.arm_server._camera_intrinsics", return_value=(camera, distortion)
+            "arm_server._camera_intrinsics", return_value=(camera, distortion)
         ):
             result = _estimate_qr_camera_pose(corners, 640, 480)
         np.testing.assert_allclose(result["rvec"], expected_rvec, atol=1e-6)

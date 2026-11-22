@@ -10,7 +10,7 @@
 services:
   webctl:
     build: .
-    image: packtug-webctl:v4.0.0
+    image: packtug-webctl:v4.1.0
     container_name: webctl
     restart: unless-stopped
     ports:

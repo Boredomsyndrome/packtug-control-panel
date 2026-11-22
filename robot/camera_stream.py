@@ -15,7 +15,7 @@ color and depth ``sensor_msgs/Image`` topics and serves:
 Usage on the Jetson:
 
     source /opt/ros/humble/setup.bash
-    python3 server/camera_stream.py --port 8080
+    python3 ~/camera_stream.py --port 8080
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ Run (production AND dev):
         --ws-ping-timeout 120
 
 `application` routes:
-  http      → the arm/vision bridge (FastAPI, server/arm_server.py) owns
+  http      → the arm/vision bridge (FastAPI, backend/arm_server.py) owns
               /api/arm|camera|vision|vehicle|health|docs prefixes;
               everything else → the robot-plane FastAPI app.
   websocket → /ws/robotctl/<id> (robot uplink) and /ws/cam/<id>
@@ -44,7 +44,7 @@ log = logging.getLogger("webctl.asgi")
 ROBOT_APP = build_app()
 
 # ---------------------------------------------------------------------------
-# Arm/vision bridge (FastAPI, server/arm_server.py) mounted IN-PROCESS.
+# Arm/vision bridge (FastAPI, backend/arm_server.py) mounted IN-PROCESS.
 # Same process, same port: browser sees ONE site.
 # ---------------------------------------------------------------------------
 BRIDGE = None
@@ -55,7 +55,7 @@ BRIDGE_PREFIXES = (
 
 if os.environ.get("PACKTUG_DISABLED") != "1":
     try:
-        from server.arm_server import ArmController, create_app  # noqa: E402
+        from arm_server import ArmController, create_app  # noqa: E402
 
         _mock = os.environ.get("PACKTUG_MOCK", "1") != "0"
         _arm_host = os.environ.get("PACKTUG_ARM_HOST", "")

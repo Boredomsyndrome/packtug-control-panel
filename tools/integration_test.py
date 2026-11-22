@@ -3,7 +3,7 @@
 
 Spawns as CHILD processes: fake MJPEG cam (:9103), the ASGI server (uvicorn,
 :8100), a duplicate server (:8111, flock guard), and TWO real robot clients
-(robotctl/client.py, WEBCTL_DRY_RUN, velocities recorded to sink files):
+(robot/client.py, WEBCTL_DRY_RUN, velocities recorded to sink files):
   alpha -> WebSocket transport (auto) + MJPEG camera pushed as ws frames
   beta  -> forced HTTP long-poll transport, no camera
 plus a raw protocol probe on robot 'gamma' (empty-token dev robot).
@@ -45,7 +45,7 @@ LOGDIR = os.path.join(ROOT, ".logs")
 BASE = "http://127.0.0.1:8100"
 API = BASE + "/api/robot"
 
-sys.path.insert(0, os.path.join(ROOT, "robotctl"))
+sys.path.insert(0, os.path.join(ROOT, "robot"))
 os.environ.setdefault("WEBCTL_SERVER", BASE)
 from client import StdWs                                   # noqa: E402
 
@@ -54,11 +54,9 @@ TOKEN = {"alpha": "tok-alpha", "beta": "tok-beta", "gamma": ""}
 BROWSER = ("itest", "itest-pw")
 
 ENV = {
-    **{k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"},
+    **os.environ,
     "WEBCTL_ROBOTS": ROBOTS,
     "MAX_LIN": "0.5", "MAX_ROT": "0.7", "CMD_TIMEOUT": "0.5",
-    "DJANGO_SECRET_KEY": "itest", "DJANGO_DEBUG": "true",
-    "ALLOWED_HOSTS": "127.0.0.1,localhost",
     # v3.7 fusion: the in-process FastAPI bridge proxies OUR hub — point it
     # at the test instance (default would dial live prod :8090). MOCK is the
     # asgi default; pinned here anyway (CS-B3 never touches real hardware).
@@ -273,7 +271,7 @@ try:
                "WEBCTL_WS_PING_INTERVAL": "0.5",
                "WEBCTL_SINK": os.path.join(LOGDIR, f"sink-{rid}.json"), **extra}
         fh = open(os.path.join(LOGDIR, f"client-{rid}.log"), "wb")
-        p = subprocess.Popen([PY, "robotctl/client.py"], cwd=ROOT, env=env,
+        p = subprocess.Popen([PY, "robot/client.py"], cwd=ROOT, env=env,
                              stdout=fh, stderr=subprocess.STDOUT,
                              start_new_session=True)
         procs[f"client-{rid}"] = (p, fh)
@@ -671,8 +669,8 @@ try:
     check("alpha still online", robots_map()["alpha"]["online"] is True)
 
     # ================= v3.7 CS-B3: fused hub contract =====================
-    # Everything below hits the ONE fused port :8100 — Django robot plane
-    # and the in-process FastAPI arm/vision bridge share it (browser sees
+    # Everything below hits the ONE fused port :8100 — FastAPI robot plane
+    # and the in-process arm/vision bridge share it (browser sees
     # a single site). Mock mode: hardware is never dialled.
     print("[13] v3.7 fused hub contract (bridge in-process)")
     st, _, b = req(BASE + "/api/health", auth=False)

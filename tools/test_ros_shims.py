@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Robotless regression tests for the rclpy code paths of robotctl/client.py.
+"""Robotless regression tests for the rclpy code paths of robot/client.py.
 
 The robot is the only place rclpy exists, so the two bugs this suite gates
 were shipped-to-hardware classes before:
@@ -22,7 +22,7 @@ import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CLIENT = HERE.parent / "robotctl" / "client.py"
+CLIENT = HERE.parent / "robot" / "client.py"
 
 # ---------------------------------------------------------------- fake rclpy
 SPINS = []            # (executor, started_event) for every executor built
@@ -285,7 +285,7 @@ check("post_scan stamped scan_ts", c2.scan_ts > 0)
 # ------------------------------------------------ 7. navd dry state machine
 import time as _time                                          # noqa: E402
 _navd_spec = importlib.util.spec_from_file_location(
-    "robotctl_navd", HERE.parent / "robotctl" / "navd.py")
+    "robotctl_navd", HERE.parent / "robot" / "navd.py")
 navd = importlib.util.module_from_spec(_navd_spec)
 _navd_spec.loader.exec_module(navd)
 
@@ -798,7 +798,7 @@ check("CS-B1: fake goal handle = Humble surface only (no legacy future attr)",
 _banned = "result_" + "future"
 _hits = sorted(p.name for p in (CLIENT.parent).glob("*.py")
                if _banned in p.read_text())
-check("CS-B1: banned legacy future attribute absent from robotctl/*.py",
+check("CS-B1: banned legacy future attribute absent from robot/*.py",
       not _hits, str(_hits))
 
 print("RESULT:", "ALL CHECKS PASSED" if not failures else f"FAILURES: {failures}")

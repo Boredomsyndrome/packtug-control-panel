@@ -2,7 +2,7 @@
 # Run the wheeltec-webctl server (the ONLY server) — ASGI with WebSocket
 # support. Exactly one process at a time (flock enforces it; a second copy
 # boots but answers 503).  Token split inside so this file runs everywhere.
-#   bash scripts/run_server.sh [host] [port]     defaults: 0.0.0.0 8000
+#   bash backend/run_server.sh [host] [port]     defaults: 0.0.0.0 8000
 set -eu
 cd "$(dirname "$0")/.."
 HOST="${1:-0.0.0.0}"

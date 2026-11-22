@@ -36,11 +36,11 @@ Waypoints: JSON file .data/waypoints.json (thread-safe atomic replace; no DB)
   behaviour is byte-identical to v3.2.
 
 ## Robot-side files (repo → deploy)
-* `robotctl/navd.py` — mode machine: off|mapping|localizing|route; TF pose
+* `robot/navd.py` — mode machine: off|mapping|localizing|route; TF pose
   lookups (`map→base_footprint`, fallback `odom_combined→base_footprint`
   flagged `frame`); ActionClient `/follow_waypoints`; `/initialpose` align;
   map upload after save. Dry-run complete (fake poses) for the harness.
-* `deploy/navctl.sh` — subcommands `map-on | map-save <name> | stack-on
+* `robot/navctl.sh` — subcommands `map-on | map-save <name> | stack-on
   <mapname> [align_wp] | stop | status`. Sources ROS **without** `set -eu`
   (pitfall doc). `stop` kills `component_container_isolated` +
   `bringup_launch.py` + `async_slam_toolbox_node` (TERM, then -9).

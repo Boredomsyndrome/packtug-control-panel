@@ -388,8 +388,7 @@ class RobotHub:
                 "ros_topics": dict(self.ros_topics),
                 "nav_mode": self.nav_mode,
                 "nav": dict(self.nav_state),
-                "transport": "ws" if self.ws_connected else (
-                    "http" if self.last_poll else None),
+                "transport": "ws" if self.ws_connected else self.transport,
                 "ws_connected": self.ws_connected,
                 "cmd_timeout": self.cmd_timeout,
                 "max_lin": self.max_lin,

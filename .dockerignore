@@ -1,0 +1,25 @@
+# Everything the image builds from explicit COPYs; keep the context tiny.
+.git
+.gitignore
+.venv
+.env
+.env.server
+.hermes
+.data
+__pycache__
+**/__pycache__
+*.pyc
+node_modules
+agv-console/node_modules
+agv-console/src
+robotctl
+deploy
+docs
+scripts
+tests
+tools
+dist/**/*.map
+*.tar.gz
+*.zip
+error_log.txt
+ROBOT-PPP*

@@ -74,7 +74,7 @@ sudo chmod 600 /etc/letsencrypt/duckdns.ini
 sudo pip3 install certbot-dns-duckdns --break-system-packages
 sudo certbot certonly -a dns-duckdns \
   --dns-duckdns-credentials /etc/letsencrypt/duckdns.ini \
-  -d comet13579.duckdns.org
+  -d <your-domain>
 sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh >/dev/null <<'EOF'
 #!/bin/bash
 systemctl reload caddy
@@ -85,13 +85,13 @@ sudo systemctl enable --now caddy && sudo caddy reload
 ```
 
 Router: forward external **8443 → 192.168.1.142:8443**. Then
-`https://comet13579.duckdns.org:8443` serves everything (Caddy proxies
+`https://<your-domain>:8443` serves everything (Caddy proxies
 http→8090 and handles WebSocket upgrades automatically). Add
-`comet13579.duckdns.org` to `ALLOWED_HOSTS` (already in `.env`).
+`<your-domain>` to `ALLOWED_HOSTS` (already in `.env`).
 Robot uses the same https URL as `WEBCTL_SERVER` — always use https here,
 the robot token rides in Basic auth.
 
 DNS-01 (certbot above) means ports 80/443 stay untouched — those are
 foreign root services on this box. DuckDNS sub-subdomains resolve to the
-same IP, so `webctl.comet13579.duckdns.org` also works if you later split
+same IP, so `webctl.<your-domain>` also works if you later split
 services.

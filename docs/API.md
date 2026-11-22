@@ -8,7 +8,7 @@ process. Secrets in repo `.env` (chmod 600, never committed).
 URL                                      What
 http://127.0.0.1:8090                    localhost
 http://192.168.1.142:8090                LAN
-https://comet13579.duckdns.org:8443      WAN via Caddy (see SETUP.md §VPN/HTTPS — pending port-forward)
+https://<your-domain>:8443      WAN via Caddy (see SETUP.md §VPN/HTTPS — pending port-forward)
 http://<tailscale-ip>:8090               robot's planned VPN path
 ```
 

@@ -286,7 +286,7 @@ WEBCTL_SERVER=http://<potato-tailscale-100.x.y.z>:8090
 ```
 
 or the HTTPS edge once Caddy :8443 exists (ACCESS.md option B):
-`WEBCTL_SERVER=https://comet13579.duckdns.org:8443`. Remember the
+`WEBCTL_SERVER=https://<your-domain>:8443`. Remember the
 `ALLOWED_HOSTS` + server-restart step after any IP change. Robots still
 dial out; still zero exposed robot ports. Keep clamps and watchdogs —
 and expect 100–300 ms latency on cellular: crawl speed only.

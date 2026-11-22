@@ -62,4 +62,4 @@ Split the 470-line `create_app` into `armrouter.py / camera_router.py / vision_r
 ## Open questions for Comet
 1. Fuse now vs after their demo deadline? (vendoring churn both ways until they stabilize)
 2. Panel base path: `/panel/` OK, or do we flip (panel at `/`, hub console at `/console/`)?
-3. Arm bridge with REAL arm lives where? Bridge-in-hub runs on potatoserver2, which cannot see the Ned1 (arm is on the robot's Jetson via UGREEN link) — real-arm mode forces either bridge-on-Jetson (→ Option C!) or Tailscale/VPN route to the arm IP. **This geographic constraint is the strongest argument for hybrid: mock/fused here, real bridge stays on the Jetson.**
+3. Arm bridge with REAL arm lives where? Bridge-in-hub runs on the server, which cannot see the Ned1 (arm is on the robot's Jetson via UGREEN link) — real-arm mode forces either bridge-on-Jetson (→ Option C!) or Tailscale/VPN route to the arm IP. **This geographic constraint is the strongest argument for hybrid: mock/fused here, real bridge stays on the Jetson.**

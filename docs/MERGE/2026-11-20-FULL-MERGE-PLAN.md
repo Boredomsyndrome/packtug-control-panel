@@ -21,7 +21,7 @@
 ```
 [Browser panel /panel/] ──▶ ONE fused hub :8090 ── Django (robot/nav/fleet plane)
                               │  └─ asgi prefix-router → FastAPI bridge (arm/vision plane, mounted in-proc)
-                              │        (mock mode on potatoserver2; REAL arm mode ⇒ bridge on Jetson)
+                              │        (mock mode on the server; REAL arm mode ⇒ bridge on Jetson)
         ws /ws/robotctl ──────┤
 [robot s2000-1] client.py+navd.py+navctl.sh ← deployed ONLY from ~/wheeltec-webctl
    └ Jetson also runs: packtug-camera.service (:8080) + arm-link net config (packtug repo scripts)
@@ -31,7 +31,7 @@ Rules of truth: **robot client/nav/Hub ⇐ our repo. Arm/vision/panel ⇐ packtu
 ## 1. Decision list (needs Comet ✅ before Phase 1)
 | # | Question | Recommendation |
 |---|---|---|
-| D1 | Canonical hub | potatoserver2 :8090; Mac hub (100.86.19.104) → dev-only |
+| D1 | Canonical hub | the server :8090; Mac hub (<mac-ip>) → dev-only |
 | D2 | Robot id | keep `s2000-1` |
 | D3 | Panel position | panel at `/panel/`, hub console stays `/` |
 | D4 | Fuse timing | after teammate's course deadline; vendor their `server/` at pinned tag |
@@ -79,7 +79,7 @@ Full analysis: `2026-11-20-jetson-cpu-budget.md` (keep). Key: nav stack is ALREA
 - [ ] Profile `mapper_rplidar_a1_lowcpu.yaml` (in attachments) → after recon, if slam >90%: wire via ONE line `MAPPER=` in navctl.sh, re-recon, compare map quality.
 - Never touch raw `mapper_rplidar_a1.yaml` in-place (keep as A/B baseline).
 
-## 5. Phase 3 — Arm bridge co-location on potatoserver2 (pre-fusion stage)
+## 5. Phase 3 — Arm bridge co-location on the server (pre-fusion stage)
 - [x] SUPERSEDED by direct fusion: standalone :8020 bridge skipped; bridge mounts in-process on the single port (v3.7 phase4, commit 370fb52).
 - [x] 23 pytest + 6 node green in-tree (CS-A5).
 - [x] Both served through the ONE fused port (CS-B3 [13]); live verify at cutover.
@@ -133,7 +133,7 @@ Their `create_app(controller)` is a pure ASGI factory; URL spaces disjoint (`/ap
 2. **Failure coupling after fusion** — their code crashes ⇒ hub crash; mitigations: import-guard, threadpool headroom (40 threads, ArmController serialized), gate V1 under MJPEG load; fallback = Option C (two processes) with vendored package preserved.
 3. **P0 route fix untested on robot until powered** — V5 mandatory before any demo uses routes.
 4. **Arm+Nav2 on one Jetson/battery** (v3.6.2 lesson: heavy launches drop ws) — later enforce hub-side 409 "arm ops forbidden while route active".
-5. **Real-arm geography** (Ned1 only reachable from Jetson UGREEN link) — forces hybrid; decide before promising arm demos from potatoserver2.
+5. **Real-arm geography** (Ned1 only reachable from Jetson UGREEN link) — forces hybrid; decide before promising arm demos from the server.
 
 ## 12. Open questions (blocking as marked)
 - [ ] D1–D6 (Table §1) — **D1, D2, D6 blocking Phase 0/2**

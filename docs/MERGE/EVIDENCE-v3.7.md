@@ -1,6 +1,6 @@
 # v3.7 Merge — Gate Evidence (robotless tiers CS-A / CS-B / CS-I)
 
-Executed 2026-11-21 (UTC) on potatoserver2, `~/packtug-control-panel`,
+Executed 2026-11-21 (UTC) on the server, `~/packtug-control-panel`,
 robot OFFLINE (the designated migration safety window, CS-I5).
 Commands were run exactly as the completion standard specifies; the
 lines below are the verbatim result lines from the runs.

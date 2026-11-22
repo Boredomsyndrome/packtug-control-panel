@@ -4,7 +4,7 @@
 
 **Goal:** Run one co-located system: our battle-tested Django hub owns the robot/nav plane, the PackTug FastAPI bridge owns the arm/vision plane, and the PackTug React panel becomes the operator UI — with the robot-client fork re-converged into our repo as the single source of truth.
 
-**Architecture:** Two uvicorn processes on potatoserver2 (Django hub :8090, arm bridge :8020, localhost-linked). Robot-side `~/robotctl` deployed only from our repo. No merge of the two backends into one process (YAGNI — the bridge is hardware-local glue; the hub is the safety-critical fleet plane).
+**Architecture:** Two uvicorn processes on the server (Django hub :8090, arm bridge :8020, localhost-linked). Robot-side `~/robotctl` deployed only from our repo. No merge of the two backends into one process (YAGNI — the bridge is hardware-local glue; the hub is the safety-critical fleet plane).
 
 **Tech Stack:** Python 3.14 + Django 6.1.2/DRF 3.18.3 (hub) · Python 3.14 + FastAPI 0.165/pydantic 2.14/opencv-headless (bridge) · both served by uvicorn[standard] 0.54.0 · Vite 5 + React 18 + TS 5 + react-router 6 + recharts (panel SPA) vs Vite 5 + React 18 JSX no-TS (webctl console) · robot: stdlib client + rclpy (ROS 2 Humble).
 
@@ -37,7 +37,7 @@ REJECT (keep our v3.6.6 behavior) — each with recorded evidence:
 
 ## Phase 0 — Decisions & freeze (needs Comet)
 
-1. **One hub:** potatoserver2 `:8090` is canonical; teammate's Mac hub (100.86.19.104) becomes dev-only. Robot env `WEBCTL_SERVER` stays our LAN+VPN list; robot id stays `s2000-1` (theirs was `wheeltec`).
+1. **One hub:** the server `:8090` is canonical; teammate's Mac hub (<mac-ip>) becomes dev-only. Robot env `WEBCTL_SERVER` stays our LAN+VPN list; robot id stays `s2000-1` (theirs was `wheeltec`).
 2. Confirm same physical robot (their AGENTS: S200+Jetson+UGREEN arm link = our S2000 unit).
 3. Freeze both robot-client trees with tags.
 
@@ -61,7 +61,7 @@ All edits in `~/wheeltec-webctl`. Robot deploys ONLY via `tools/deploy_robot.py`
 - [ ] **1.7** Robot live verification (COMET MUST ORDER MAPPING IN-SESSION): `navctl.sh version` reports merged build; map-on → TF tree 50/50/18 Hz, zero `queue is full` drops steady-state, hub pose map-frame. If parked-AMCL drops appear → fallback clause (standalone relay, sole broadcaster), else delete `webctl_odom_relay.py` from consideration.
 - [ ] **1.8** Tag `v3.7.0-cage` + regenerate tarball (absolute path).
 
-## Phase 2 — Bridge co-location on potatoserver2
+## Phase 2 — Bridge co-location on the server
 
 - [ ] **2.1** Run script (guard-friendly): create `~/packtug-control-panel/run_bridge.sh` wrapping `.venv/bin/python server/arm_server.py --mock --host 127.0.0.1 --port 8020`; bridge stays loopback-only (panel is for Comet's browser via LAN → later task or use SSH tunnel).
 - [ ] **2.2** tmux session `packtug` (matches webctl convention; survives my session, dies on host reboot — document).
@@ -95,7 +95,7 @@ Recommendation: panel SPA becomes THE operator surface; webctl console stays for
 ## Risks / open questions
 - **Same robot, two histories:** teammate may have deployed their navctl build to the S2000 recently (their sync commit Nov 19). Before Phase 1.7, recon live robot: `cat ~/robotctl/navctl.sh | head -25` + `pgrep -af webctl_navctl_ekf` to learn who last deployed.
 - **Their EKF verdict may bite back:** their docstring claims "EKF cannot discover /odom across DDS sessions on this Jetson" — our EKF remaps `/odometry/filtered:=odom_combined` and consumes `/wheeltec/odom`-style input; if their claim reproduces on OUR stack (unlikely: 50 Hz TF verified post-boot at b7c8bcf), the fallback relay clause applies. Decide with logs, not docs.
-- **Tailscale/camera:** D455 stream lives on the Jetson (100.73.98.69:8080) — bridge on potatoserver2 can't reach it until the Jetson joins our VPN (hwdsl2 client) or we Tailscale the server. Phase 2.5 (deferred): pick transport.
+- **Tailscale/camera:** D455 stream lives on the Jetson (<jetson-ip>:8080) — bridge on the server can't reach it until the Jetson joins our VPN (hwdsl2 client) or we Tailscale the server. Phase 2.5 (deferred): pick transport.
 - **Arm on robot power budget:** Ned1 + D455 + Nav2 on one Jetson/battery — v3.6.2 lesson: heavy launches drop ws. Arm ops during `route` = forbidden; document + later enforce hub-side 409.
 - **Loopback bridge:** panel needs LAN reach for teammates — decide LAN bind (LAN-trust policy same as hub) vs per-user SSH tunnel.
 - **Do NOT merge** the two backends into one process: 45-endpoint single-file FastAPI monolith → Django port buys nothing but risk; revisit only if arm_server.py grows stateful fleet logic.

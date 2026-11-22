@@ -33,3 +33,6 @@ __MACOSX/
 .itest-nav*/
 .scratch-simfleet/
 .scratch-simfleet-token
+
+# agent workspace scratch (tool backups, temp files)
+.hermes/

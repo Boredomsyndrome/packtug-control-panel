@@ -57,19 +57,19 @@ DIST = ROOT / "dist"
 DEFAULT_HOST = os.getenv("ARM_HOST", "10.10.10.10")
 CAMERA_STREAM_URL = os.getenv(
     "CAMERA_STREAM_URL",
-    "http://100.73.98.69:8080/stream",
+    "http://127.0.0.1:8080/stream",
 )
 CAMERA_DEPTH_URL = os.getenv(
     "CAMERA_DEPTH_URL",
-    "http://100.73.98.69:8080/depth",
+    "http://127.0.0.1:8080/depth",
 )
 CAMERA_DEPTH_STATS_URL = os.getenv(
     "CAMERA_DEPTH_STATS_URL",
-    "http://100.73.98.69:8080/depth_stats",
+    "http://127.0.0.1:8080/depth_stats",
 )
 CAMERA_MODE_URL = os.getenv(
     "CAMERA_MODE_URL",
-    "http://100.73.98.69:8080/mode",
+    "http://127.0.0.1:8080/mode",
 )
 CAMERA_SNAPSHOT_URL = os.getenv(
     "CAMERA_SNAPSHOT_URL",

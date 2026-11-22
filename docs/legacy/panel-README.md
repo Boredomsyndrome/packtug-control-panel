@@ -188,9 +188,9 @@ topic. The FastAPI bridge proxies the streams through `/api/camera/*`. Point it 
 Jetson (Tailscale IP or LAN IP):
 
 ```bash
-export CAMERA_STREAM_URL=http://100.73.98.69:8080/stream
-export CAMERA_DEPTH_URL=http://100.73.98.69:8080/depth
-export CAMERA_MODE_URL=http://100.73.98.69:8080/mode
+export CAMERA_STREAM_URL=http://127.0.0.1:8080/stream
+export CAMERA_DEPTH_URL=http://127.0.0.1:8080/depth
+export CAMERA_MODE_URL=http://127.0.0.1:8080/mode
 conda run --no-capture-output -n ned python server/arm_server.py --port 8020
 ```
 

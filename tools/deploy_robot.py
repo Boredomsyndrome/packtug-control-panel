@@ -3,7 +3,7 @@
 
     .venv/bin/python tools/deploy_robot.py --host 192.168.42.10 \
         --user wheeltec --pass-file ~/.config/wheeltec-ssh-pass \
-        --servers "http://192.168.1.142:8090 http://192.168.42.1:8090" \
+        --servers "http://<server-ip>:8090 http://192.168.42.1:8090" \
         --id s2000-1
 
 Does: recon running client (owner + env path) -> backup old files ->

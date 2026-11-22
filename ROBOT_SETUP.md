@@ -277,12 +277,12 @@ still works to confirm the chassis is stock.
 
 ## Optional: drive over the internet later (home)
 
-LIVE since 2026-11-03: the server runs on potatoserver; connect the robot
-with Tailscale (recommended — `docs/ACCESS.md` option A) and set in
-`~/.config/wheeltec-robotctl.env`:
+The hub runs on the server under docker compose (see `docker.md`); connect
+the robot with Tailscale (recommended — `docs/ACCESS.md` option A) and set
+in `~/.config/wheeltec-robotctl.env`:
 
 ```
-WEBCTL_SERVER=http://<potato-tailscale-100.x.y.z>:8090
+WEBCTL_SERVER=http://<server-tailscale-ip>:8090
 ```
 
 or the HTTPS edge once Caddy :8443 exists (ACCESS.md option B):

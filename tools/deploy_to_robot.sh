@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # deploy_to_robot.sh — the ONE sanctioned way to put code on the robot.
-# Everything flows: repo (git) -> potatoserver checkout -> scp -> robot.
+# Everything flows: repo (git) -> the server checkout -> scp -> robot.
 # Never edit robot files by hand; edit the repo, commit, run this.
 #
 #   tools/deploy_to_robot.sh [user@host]   (default wheeltec@192.168.42.11)
 #
 # Copies ONLY versioned files (client.py, stack_up.sh), never the robot's
 # robotctl.env (holds its token — lives on the robot only), then runs the
-# idempotent bring-up. Key-auth assumed (ssh-copy-id'd from potatoserver).
+# idempotent bring-up. Key-auth assumed (ssh-copy-id'd from the server).
 set -euo pipefail
 ROBOT=${1:-wheeltec@192.168.42.11}
 cd "$(dirname "$0")/.."

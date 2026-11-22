@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# E2E proof for the potatoserver instance: dry-run robot over real ws,
+# E2E proof for the the server instance: dry-run robot over real ws,
 # drive + stop via browser API, verify sink file = what a real base gets.
 #
 # !! ONLY RUN WHILE THE REAL s2000-1 IS OFFLINE. This registers a dry-run

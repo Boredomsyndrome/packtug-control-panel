@@ -82,7 +82,7 @@ SERVERS = [s.rstrip("/") for s in
            .replace(",", " ").replace(";", " ").split() if s.strip()] \
     or ["http://127.0.0.1:8000"]
 # v3.6: WEBCTL_SERVER may hold a LIST of hub URLs (space/comma separated),
-# e.g. "http://192.168.1.142:8090 http://192.168.42.1:8090" — LAN first, VPN
+# e.g. "http://<server-ip>:8090 http://192.168.42.1:8090" — LAN first, VPN
 # second (or vice versa). The client STICKS to whichever is reachable and
 # rotates one step right on every link failure, so unplugging the VPN (or
 # the LAN cable) self-heals without restarts. SERVER stays the legacy alias

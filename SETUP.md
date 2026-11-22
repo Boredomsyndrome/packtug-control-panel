@@ -1,11 +1,11 @@
 # wheeltec-webctl — Setup Guide (zero → fleet driving)
 
-> **PRODUCTION (since 2026-11-03): the server runs on potatoserver, not
-> the laptop.** uvicorn ASGI `0.0.0.0:8090`, tmux session `webctl`,
-> secrets in repo `.env`. Live endpoints + full wire reference:
-> **`docs/API.md`**. Robot/browser reachability over VPN/HTTPS:
-> **`docs/ACCESS.md`**. The laptop-as-server flow below remains valid as
-> the LAN/dev workflow.
+> **Production deployments run the hub on a dedicated server, not the
+> laptop** — containerized via docker compose (see `docker.md`). uvicorn
+> ASGI `0.0.0.0:8090`, secrets in `.env.server`. Live endpoints + full
+> wire reference: **`docs/API.md`**. Robot/browser reachability over
+> VPN/HTTPS: **`docs/ACCESS.md`**. The laptop-as-server flow below
+> remains valid as the LAN/dev workflow.
 
 One ordered procedure: laptop server first, robots second, verify, drive.
 Architecture background → `README.md`; exhaustive robot-side detail

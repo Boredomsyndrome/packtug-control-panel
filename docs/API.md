@@ -1,13 +1,14 @@
 # wheeltec-webctl — API Reference
 
-Live production instance (since 2026-11-03): **potatoserver**, uvicorn ASGI
-on `0.0.0.0:8090`, tmux session `webctl`, state in `.server.lock`-owned
-process. Secrets in repo `.env` (chmod 600, never committed).
+The hub runs containerized via docker compose (see `docker.md`): uvicorn
+ASGI on `0.0.0.0:8090`, single-instance `.server.lock` inside the
+container, state in the `webctl-data` volume. Secrets in `.env.server`
+(chmod 600, never committed).
 
 ```
 URL                                      What
 http://127.0.0.1:8090                    localhost
-http://192.168.1.142:8090                LAN
+http://<server-ip>:8090                LAN
 https://<your-domain>:8443      WAN via Caddy (see SETUP.md §VPN/HTTPS — pending port-forward)
 http://<tailscale-ip>:8090               robot's planned VPN path
 ```
@@ -175,7 +176,7 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1}}" -r 10   # b
 * ROS 2 Humble msg reference: https://docs.ros.org/en/humble/p/geometry_msgs/
   (`Twist` layout) and `ros2 topic` CLI: https://docs.ros.org/en/humble/Get-Started.html
 
-## 5. Ops quick reference (potatoserver)
+## 5. Ops quick reference (the server)
 
 ```bash
 tmux attach -t webctl                                   # watch server log

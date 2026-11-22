@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# navctl.sh v3.7.0 — vendor Nav2/slam_toolbox bring-up for autonomous navigation.
+# navctl.sh v4.1.0 — vendor Nav2/slam_toolbox bring-up for autonomous navigation.
 # Repo-managed (robot/), installed to ~/robotctl/. NEVER edits ~/wheeltec_ros2;
 # only launches vendor packages with vendor parameter files.
 #
@@ -18,6 +18,7 @@ WS="$HOME/wheeltec_ros2"
 NAVHOME="$HOME/robotctl"
 MAPS="$NAVHOME/maps"
 ROS_SRC="/opt/ros/humble/setup.bash"
+NAVCTL_VERSION="v4.1.0"   # == repo VERSION (CS-I3); `navctl.sh version` reports it
 PARAM="$WS/src/wheeltec_robot_nav2/param/wheeltec_param/param_four_wheel_diff_bs.yaml"
 # v3.6.5 FINAL: vendor's proven rplidar slam profile (repo copy, not their
 # file — vendor tree stays untouched). THE fix: their chain runs the whole
@@ -150,7 +151,7 @@ case "$cmd" in
     if [ -f "$MAPS/$name.pgm" ] && [ -f "$MAPS/$name.yaml" ]; then
       echo "saved $MAPS/$name"
     else
-      echo "FAILED: map_saver produced no files — tail /tmp/nav_saver.log"; exit 1
+      echo "FAILED[$NAVCTL_VERSION]: map_saver produced no files — tail /tmp/nav_saver.log"; exit 1
     fi
     ;;
   stack-on)
@@ -203,8 +204,11 @@ case "$cmd" in
     [ -n "$state" ] && { echo "running$state"; exit 0; }
     echo "idle"; exit 0
     ;;
+  version)
+    echo "$NAVCTL_VERSION"; exit 0
+    ;;
   *)
-    echo "usage: navctl.sh map-on|map-save <name>|stack-on <name>|stop|status"
+    echo "usage: navctl.sh version|map-on|map-save <name>|stack-on <name>|stop|status"
     exit 2
     ;;
 esac

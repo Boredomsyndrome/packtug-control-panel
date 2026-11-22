@@ -33,8 +33,7 @@ import time
 import zlib
 from urllib.parse import parse_qs
 
-from django.conf import settings
-
+from webctl import config
 from robot.hub import registry
 
 log = logging.getLogger("robot.ws")
@@ -106,7 +105,8 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
                 sent_key = key
 
     async def reader():
-        from robot.serializers import TelemetrySerializer
+        from robot.validators import (ScanPayload, TelemetryCommand,
+                                     parse)
         while True:
             msg = await receive()
             mtype = msg["type"]
@@ -115,7 +115,7 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
                 return
             data = msg.get("bytes")
             if data is not None:
-                if len(data) <= settings.MAX_FRAME and data.startswith(b"\xff\xd8"):
+                if len(data) <= config.MAX_FRAME and data.startswith(b"\xff\xd8"):
                     hub.set_frame(bytes(data))
                 hub.contact("ws")
                 continue
@@ -129,18 +129,18 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
             kind = obj.get("type")
             hub.contact("ws")
             if kind == "telemetry":
-                ser = TelemetrySerializer(data=obj)
-                if ser.is_valid():
-                    hub.set_telemetry(ser.validated_data, transport="ws")
+                tel, errs = parse(TelemetryCommand, obj)
+                if tel is not None:
+                    hub.set_telemetry(TelemetryCommand.model_validate(obj).to_hub(),
+                                      transport="ws")
                 else:
-                    log.debug("telemetry rejected: %s", ser.errors)
+                    log.debug("telemetry rejected: %s", errs)
             elif kind == "scan":
-                from robot.serializers import ScanSerializer
-                ser = ScanSerializer(data=obj)
-                if ser.is_valid():
-                    hub.set_scan(ser.validated_data)
+                scan, errs = parse(ScanPayload, obj)
+                if scan is not None:
+                    hub.set_scan(scan)
                 else:
-                    log.debug("scan rejected: %s", ser.errors)
+                    log.debug("scan rejected: %s", errs)
             elif kind == "map":
                 # v3.7 single-websocket policy: map uploads ride the ws
                 # (the HTTP /robotctl/<id>/map endpoint only answers in
@@ -152,7 +152,7 @@ async def robot_ws(scope, receive, send, robot_id, **_kw):
                                             "ok": False,
                                             "detail": "map too large"})
                     continue
-                from robot.robotctl import save_map_payload
+                from robot.api import save_map_payload
                 try:
                     maps = await asyncio.to_thread(save_map_payload,
                                                    hub.robot_id, obj)

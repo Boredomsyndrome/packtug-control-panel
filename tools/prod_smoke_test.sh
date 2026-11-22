@@ -4,14 +4,14 @@
 # environments) on :8901, exercising the fleet API + SPA + robot-auth split
 # + a REAL WebSocket robot handshake via the client's own stdlib ws stack.
 # Self-terminating:  bash tools/prod_smoke_test.sh
-# (HTTP-only fallback mode gunicorn -w1 webctl.wsgi:application still works;
-#  the ws+fallback transports are covered by tools/integration_test.py.)
+# (v3.8: one uvicorn/FastAPI app — no WSGI fallback; ws+HTTP transports
+#  are both covered by tools/integration_test.py.)
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p .logs
 
 export WEBCTL_ROBOTS="smoke:tok-smoke" MAX_LIN=0.5 MAX_ROT=0.7 CMD_TIMEOUT=0.5 \
-       DJANGO_SECRET_KEY=smoke DJANGO_DEBUG=false \
+       WEBCTL_LOCK=".server.smoke.lock" PACKTUG_DEBUG=false \
        ALLOWED_HOSTS=127.0.0.1,localhost
 
 LOG=.logs/prod_smoke.log

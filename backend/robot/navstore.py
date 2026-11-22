@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from django.conf import settings
+from webctl import config
 
 BASE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _lock = threading.Lock()
@@ -25,7 +25,7 @@ MAX_YAML = 4096
 
 def _root() -> Path:
     override = os.environ.get("WEBCTL_DATA_DIR")
-    return Path(override) if override else Path(settings.PROJECT_ROOT) / ".data"
+    return Path(override) if override else Path(config.PROJECT_ROOT) / ".data"
 
 
 def _store_file() -> Path:

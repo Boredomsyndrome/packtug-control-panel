@@ -452,13 +452,13 @@ class RobotRegistry:
         return [hub.status() for hub in self.hubs.values()]
 
 
-# Module-level singleton (Django imports this once per process)
-from django.conf import settings
+# Module-level singleton (imported once per process)
+from webctl import config
 
 registry = RobotRegistry(
-    robots=settings.WEBCTL_ROBOTS,
-    max_lin=settings.MAX_LIN,
-    max_rot=settings.MAX_ROT,
-    cmd_timeout=settings.CMD_TIMEOUT,
-    lock_path=os.environ.get("WEBCTL_LOCK") or str(settings.PROJECT_ROOT / ".server.lock"),
+    robots=config.WEBCTL_ROBOTS,
+    max_lin=config.MAX_LIN,
+    max_rot=config.MAX_ROT,
+    cmd_timeout=config.CMD_TIMEOUT,
+    lock_path=os.environ.get("WEBCTL_LOCK") or str(config.PROJECT_ROOT / ".server.lock"),
 )

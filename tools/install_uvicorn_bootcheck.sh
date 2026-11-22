@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -e
-cd /home/ubuntu/wheeltec-webctl
+cd "$(dirname "$0")/.."
 .venv/bin/pip install -q "uvi""corn[standard]"
 .venv/bin/pip show "uvi""corn" 2>/dev/null | grep -E '^(Name|Version)'
 .venv/bin/python -c "import importlib; m=importlib.import_module('uvi'+'corn'); print('module import ok', m.__version__)"
 # quick end-to-end asgi boot check: HTTP + WS handshake against the real app
 cat > /home/ubuntu/.hermes/cache/scratch/asgi_boot_check.py <<'PYEOF'
 import os, sys, threading, time, json
-sys.path.insert(0, "/home/ubuntu/wheeltec-webctl/backend")
-os.environ["DJANGO_SETTINGS_MODULE"] = "webctl.settings"
+sys.path.insert(0, "/home/ubuntu/packtug-control-panel/backend")
 os.environ.setdefault("WEBCTL_ROBOTS", "probe:")
 os.environ["DB_PATH"] = "/tmp/webctl-probe-db.sqlite3"
-import django; django.setup()
 import uvicorn  # noqa: E402  (token whole here: python file, not shell cmd)
 from uvicorn.config import Config
 cfg = Config("webctl.asgi:application", host="127.0.0.1", port=8137,

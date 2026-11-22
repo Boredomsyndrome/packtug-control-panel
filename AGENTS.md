@@ -45,9 +45,9 @@
 - Start it detached:
   `ssh wheeltec@100.73.98.69 'nohup setsid bash /home/wheeltec/robotctl/run_client.sh >/tmp/robotctl.log 2>&1 </dev/null &'`.
   Avoid a `pkill -f /home/wheeltec/robotctl/client.py` in the same remote command: the pattern can match the SSH shell itself.
-- The Jetson has **two** robotctl env files: `~/.config/wheeltec-robotctl.env` (used by `run_client.sh`) and `~/robotctl/robotctl.env` (used by `stack_up.sh` / `watchdog_vpn.sh`). Both must have `WEBCTL_SERVER=http://100.86.19.104:8090`, `WEBCTL_ROBOT_ID=wheeltec`, the same token as the hub, and `WEBCTL_NAV=1`. A stale `s2000-1` / old `192.168.*` env holds `.robotctl.lock`; the console stays OFFLINE and drive buttons stay disabled, and a second client logs `another instance holds the lock`. Fix both files, kill the exact old client PID, then restart `run_client.sh`.
+- The Jetson has **two** robotctl env files: `~/.config/wheeltec-robotctl.env` (used by `run_client.sh`) and `~/robotctl/robotctl.env` (used by `start-all.sh`, formerly `stack_up.sh` / `watchdog_vpn.sh`). Both must have `WEBCTL_SERVER=http://100.86.19.104:8090`, `WEBCTL_ROBOT_ID=wheeltec`, the same token as the hub, and `WEBCTL_NAV=1`. A stale `s2000-1` / old `192.168.*` env holds `.robotctl.lock`; the console stays OFFLINE and drive buttons stay disabled, and a second client logs `another instance holds the lock`. Fix both files, kill the exact old client PID, then restart `run_client.sh`.
 - `watchdog_vpn.sh` parses `WEBCTL_SERVER` from the old env every 2 min and can bounce the client; keep that line valid or the watchdog will treat the hub as unreachable even when the UI is otherwise connected.
-- Only one `scripts/run_server.sh` may own the hub (flock); a second process returns 503. The teammate integration test is
+- Only one `backend/run_server.sh` may own the hub (flock); a second process returns 503. The teammate integration test is
   `wheeltec-webctl/.venv/bin/python -u tools/integration_test.py` (uses fake ports 8100/8111/9103).
 - The teammate browser/API has **no browser password**; access control is network trust (Tailscale/trusted LAN) plus the per-robot token. Do not expose `:8090` publicly.
 - The ASGI access log can print the robot token from the WebSocket query string. Do not paste raw server logs into chat/commits; rotate `WEBCTL_ROBOTS` if a token is exposed.
@@ -65,7 +65,7 @@
 - J5 was opened to **+110°** in the bridge and robot-side xacro; robot-side backup: `~/catkin_ws/src/niryo_robot_description/urdf/ned/niryo_ned_param.urdf.xacro.bak-j5-110`. A robot service restart requires recalibration.
 - J6 is an XL-320 and is prone to jitter; do not mount the camera or extra payload on J6.
 - Collision/overload/`KO` latches a fault; use **Recover to last safe point**, which retracts at 2% to the last confirmed joints. There is no automatic home sweep.
-- Saved data is user data: `server/arm_poses.json` and `server/arm_sequences.json`; do not wipe.
+- Saved data is user data: `backend/arm_poses.json` and `backend/arm_sequences.json`; do not wipe.
 - The coordinate-input autonomous path planner is **not implemented**; do not present it as working.
 
 ## Jetson / camera

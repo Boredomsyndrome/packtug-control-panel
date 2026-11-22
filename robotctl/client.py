@@ -74,7 +74,7 @@ from hashlib import sha1
 from urllib.request import build_opener, ProxyHandler
 
 log = logging.getLogger("robotctl")
-VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.7.0")
+VERSION = os.getenv("WEBCTL_CLIENT_VERSION", "3.7.1")
 
 SERVERS = [s.rstrip("/") for s in
            os.getenv("WEBCTL_SERVER", "http://127.0.0.1:8000")
@@ -703,7 +703,21 @@ class Client:
         self._topics_cache = (time.monotonic(), out)
         return out
 
+    def _await_ws(self):
+        """v3.7.1 single-websocket policy, tightened: threads used to fire
+        their first send at t=0 while net_loop's handshake was still in
+        flight, so a perfectly healthy ws robot logged stray HTTP calls on
+        every boot. Wait out ONE handshake attempt (StdWs timeout is 5 s)
+        before deciding the transport — a ws-capable server goes live in ms
+        and this returns at once; only a genuinely ws-less (degraded)
+        server pays the full grace before the first HTTP call."""
+        if TRANSPORT != "http":
+            grace_end = time.monotonic() + 6.0
+            while running and self.ws is None and time.monotonic() < grace_end:
+                time.sleep(0.05)
+
     def telemetry_loop(self):
+        self._await_ws()
         while running:
             vx, wz = self.effective()
             now = time.monotonic()
@@ -748,6 +762,7 @@ class Client:
         Scans ride the same thread (small JSON, paced to SCAN_HZ) so only
         this thread ever writes bulk-ish payloads to the socket."""
         scan_gap = 1.0 / max(0.5, SCAN_HZ)
+        self._await_ws()
         while running:
             with self._frame_lock:
                 jpeg, self._frame = self._frame, None

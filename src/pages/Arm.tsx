@@ -286,13 +286,13 @@ export function Arm() {
   const [pathCage, setPathCage] = useState<CageGeometry>(
     () => savedCage?.cage ?? DEFAULT_CAGE,
   )
+  const [pathPayloadRadius, setPathPayloadRadius] = useState(0)
   const [pathApproach, setPathApproach] = useState(0.06)
   const [pathGateClearance, setPathGateClearance] = useState(0.08)
   const [pathResult, setPathResult] = useState<PickPathResult | null>(null)
   const [pathPending, setPathPending] = useState(false)
   const [pathError, setPathError] = useState<string | null>(null)
   const [twinTargetNote, setTwinTargetNote] = useState<string | null>(null)
-  const [execSpeed, setExecSpeed] = useState(5)
   const [execRetract, setExecRetract] = useState(0.08)
   const [execHomeLift, setExecHomeLift] = useState(0.08)
   const [returnHomeAfter, setReturnHomeAfter] = useState(false)
@@ -359,6 +359,7 @@ export function Arm() {
         z: target.z,
         ...placementOrientation(pathCage),
       }))
+      setPathPayloadRadius(target.payload_radius_m ?? 0)
       setTwinTargetNote(
         `Packing box #${target.placementSeq} (${target.reference}) → front-face centre ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; level placement aligned with cage`,
       )
@@ -723,7 +724,7 @@ export function Arm() {
     orientationInputRef.current = { pitch: 0, yaw: 0 }
     setOrientationPad({ x: 0, y: 0 })
     jogStreamActiveRef.current = false
-    void api.stopArmJog()
+    void api.stopArmMotion()
   }
 
   function updateOrientationPad(event: PointerEvent<HTMLDivElement>) {
@@ -1138,6 +1139,7 @@ export function Arm() {
         target: pathTarget,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
+        payload_radius_m: pathPayloadRadius,
         cage: pathCage,
         ...(corners ? { corners, ignored_corners: ignored } : {}),
       })
@@ -1211,9 +1213,10 @@ export function Arm() {
         retract_m: execRetract,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
+        payload_radius_m: pathPayloadRadius,
         cage: pathCage,
         ...(corners ? { corners, ignored_corners: ignored } : {}),
-        speed_percent: execSpeed,
+        speed_percent: status?.max_velocity ?? 5,
         return_home_after: returnHomeAfter,
       })
       setExecResult(result)
@@ -1575,6 +1578,9 @@ export function Arm() {
         desc="Niryo Ned1 joint terminal over PyNiryo. Speed 1–20% (default 20%), ≤60° per command."
         actions={
           <>
+            <button className="btn danger" onClick={stopMotion} disabled={!status?.connected}>
+              STOP ARM
+            </button>
             {status?.mock && <Badge tone="violet">MOCK ARM</Badge>}
             {status?.fault && <Badge tone="red" dot>FAULT</Badge>}
             {status?.hardware_motion_fault && <Badge tone="red" dot>HARDWARE</Badge>}
@@ -1943,7 +1949,7 @@ export function Arm() {
             </label>
           </div>
           {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
-          <p>Placement target: {pathTarget.x.toFixed(4)}, {pathTarget.y.toFixed(4)}, {pathTarget.z.toFixed(4)} m · box front-face centre</p>
+          <p>Placement target: {pathTarget.x.toFixed(4)}, {pathTarget.y.toFixed(4)}, {pathTarget.z.toFixed(4)} m · box front-face centre · payload radius {(pathPayloadRadius * 1000).toFixed(0)} mm</p>
           <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
             Gripper attitude: Roll {placementOrientation(pathCage).roll.toFixed(1)}° · Pitch {placementOrientation(pathCage).pitch.toFixed(1)}° · Yaw {placementOrientation(pathCage).yaw.toFixed(1)}°
             {' '}(horizontal, aligned with cage depth). Attitude is verified before release (2° tolerance).
@@ -2234,12 +2240,9 @@ export function Arm() {
                 step={0.01}
                 onChange={setExecHomeLift}
               />
-              <NumberField
-                label="Speed (%)"
-                value={execSpeed}
-                step={1}
-                onChange={setExecSpeed}
-              />
+              <span className="faint" style={{ fontSize: 11.5, alignSelf: 'center' }}>
+                Speed {status?.max_velocity ?? 5}% (arm setting)
+              </span>
               <label className="row" style={{ gap: 5, fontSize: 12 }}>
                 <input
                   type="checkbox"
@@ -3300,7 +3303,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
 
             <div className="row">
               <button className="btn danger" onClick={stopMotion}>
-                Stop motion / clear inputs
+                STOP motion / clear inputs
               </button>
             </div>
             <span className="faint" style={{ fontSize: 11.5 }}>

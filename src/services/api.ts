@@ -210,6 +210,8 @@ export interface PickPathRequest {
   target: ArmPose
   approach_m?: number
   gate_clearance_m?: number
+  /** swept radius of carried payload, metres */
+  payload_radius_m?: number
   cage?: CageGeometry
   /** eight taught corners override cage pose/size */
   corners?: PickPathVec3[]
@@ -289,6 +291,8 @@ export interface ExecutePickRequest {
   fold_j2_to_min?: boolean
   approach_m?: number
   gate_clearance_m?: number
+  /** swept radius of carried payload, metres */
+  payload_radius_m?: number
   cage?: CageGeometry
   corners?: PickPathVec3[]
   ignored_corners?: number[]
@@ -410,7 +414,16 @@ async function jsonRequest<T>(
     let detail = `HTTP ${res.status}`
     try {
       const data = await res.json()
-      if (typeof data.detail === 'string') detail = data.detail
+      if (typeof data.detail === 'string') {
+        detail = data.detail
+      } else if (Array.isArray(data.detail)) {
+        detail = data.detail
+          .map((item: { loc?: unknown[]; msg?: string }) => {
+            const field = (item.loc ?? []).filter((part) => part !== 'body').join('.')
+            return `${field || 'request'}: ${item.msg ?? 'invalid value'}`
+          })
+          .join('; ')
+      }
     } catch {
       // response was not JSON — keep the status code
     }
@@ -770,6 +783,12 @@ export const api = {
   async stopArmJog(): Promise<ArmStatus> {
     if (MOCK_MODE) return mockArmStatus()
     return jsonRequest<ArmStatus>('/arm/jog_stop', {})
+  },
+
+  /** Operator stop: cancel jog and abort the next automatic path step. */
+  async stopArmMotion(): Promise<ArmStatus> {
+    if (MOCK_MODE) return mockArmStatus()
+    return jsonRequest<ArmStatus>('/arm/stop', {})
   },
 
   async enableArmMotors(): Promise<ArmStatus> {

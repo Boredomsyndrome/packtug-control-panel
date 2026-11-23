@@ -393,11 +393,15 @@ class PickPathIn(BaseModel):
     """Dry-run Cartesian pick path request."""
 
     start: PoseIn | None = None
+    preserve_yaw: bool = False
     via: PoseIn | None = None
     home: PoseIn | None = None
     target: PoseIn
     approach_m: float = Field(default=0.06, ge=0.0, le=0.25)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    # Radius of the carried carton/gripper envelope. The path planner inflates
+    # cage clearance by this amount so the swept payload does not clip a frame.
+    payload_radius_m: float = Field(default=0.0, ge=0.0, le=0.25)
     cage: CageIn = Field(default_factory=CageIn)
     # Eight taught corners; when present they override the box pose/size.
     corners: list[Vec3In] | None = None
@@ -424,10 +428,11 @@ class ExecutePickIn(BaseModel):
     fold_j2_to_min: bool = False
     approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    payload_radius_m: float = Field(default=0.0, ge=0.0, le=0.25)
     cage: CageIn = Field(default_factory=CageIn)
     corners: list[Vec3In] | None = None
     ignored_corners: list[int] = Field(default_factory=list)
-    speed_percent: int = Field(default=5, ge=1, le=10)
+    speed_percent: int = Field(default=5, ge=1, le=MAX_VELOCITY_LIMIT)
     return_home_after: bool = False
 
 
@@ -487,6 +492,7 @@ class ArmController:
         self.last_good_joints: list[float] | None = None
         self.collision_api_supported: bool | None = None
         self.jog_control_enabled: bool = False
+        self._stop_requested = threading.Event()
         self._jog_stream_lock = threading.Lock()
         self._jog_stream_stop = threading.Event()
         self._jog_stream_thread: threading.Thread | None = None
@@ -1013,6 +1019,13 @@ class ArmController:
         for i, value in enumerate(target):
             if not math.isfinite(value):
                 raise HTTPException(400, f"joint {i + 1}: angle must be finite")
+            # A calibration offset can leave an untouched joint a few
+            # hundredths of a degree outside the soft limit. Do not block
+            # moving a different joint just because that unchanged joint is
+            # already at the boundary; only reject a target that moves it
+            # farther out or a changed target outside the range.
+            if abs(value - current[i]) <= 1e-6:
+                continue
             lo, hi = JOINT_LIMITS_DEG[i]
             if value < lo - 1e-6 or value > hi + 1e-6:
                 raise HTTPException(
@@ -1391,6 +1404,16 @@ class ArmController:
                 self._jog_stream_thread.start()
         return self.snapshot()
 
+    def stop_motion(self) -> dict[str, Any]:
+        """Operator stop: cancel jog and abort the next automatic path step."""
+        self._stop_requested.set()
+        self._stop_jog_stream()
+        with self._state:
+            self.busy = False
+            self.last_error = "motion stopped by operator"
+            self.updated_at = time.time()
+        return self.snapshot()
+
     def stop_jog_stream(self) -> dict[str, Any]:
         self._stop_jog_stream()
         return self.snapshot()
@@ -1571,6 +1594,8 @@ class ArmController:
             )
         with self._motion:
             self._check_motion_locked()
+            if self._stop_requested.is_set():
+                raise HTTPException(409, "motion stopped by operator")
             with self._state:
                 self.busy = True
                 if self.joints_deg is not None:
@@ -1678,6 +1703,7 @@ class ArmController:
         translation-only path. J2 folding is rejected for this operation.
         """
         steps: list[dict[str, Any]] = []
+        self._stop_requested.clear()
         try:
             self._check_motion_locked()
             with self._state:
@@ -1713,7 +1739,7 @@ class ArmController:
                 fit_meta = None
                 cage_source = "dimensions"
             # The packing target is the centre of the box front face; the
-            # placement attitude is always horizontal and cage-aligned.
+            # placement attitude is horizontal and cage-aligned.
             target = _level_placement_pose(cage, target)
             if payload.fold_j2_to_min:
                 raise HTTPException(422, "J2 folding is not supported during level placement")
@@ -1737,6 +1763,7 @@ class ArmController:
                     target=PoseIn(**target),
                     approach_m=payload.approach_m,
                     gate_clearance_m=payload.gate_clearance_m,
+                    payload_radius_m=payload.payload_radius_m,
                     cage=payload.cage,
                     corners=payload.corners,
                     ignored_corners=payload.ignored_corners,
@@ -1780,6 +1807,7 @@ class ArmController:
                 grasp_start,
                 payload.retract_m,
                 payload.gate_clearance_m,
+                payload.payload_radius_m,
             )
             warnings: list[str] = list(retract_warnings)
             start_local = _world_to_cage(
@@ -1922,9 +1950,15 @@ class ArmController:
             # Ned1 that premature wrist turn can put J5 near its upper limit.
             # The first strict pre-gate move below must reach and verify the
             # complete placement attitude before the arm crosses the opening.
-            _verify_level_attitude(
-                self.snapshot().get("pose"), target, stage="outer retract"
-            )
+            try:
+                _verify_level_attitude(
+                    self.snapshot().get("pose"), target, stage="outer retract"
+                )
+            except HTTPException as exc:
+                # The outer retract pose can be kinematically unable to reach
+                # an exact level while still being a safe transit point.
+                # Keep it as a warning; the final target alignment is strict.
+                log.warning("outer retract level warning: %s", exc.detail)
 
             # Do not transit through the recorded home pose here.  On this Ned
             # the home XY is close to the base and forces J5 near its upper
@@ -1937,7 +1971,10 @@ class ArmController:
             home_pose = snapshot.get("pose")
             if home_pose is None:
                 raise HTTPException(502, "home pose is unavailable")
-            _verify_level_attitude(home_pose, target, stage="outer retract")
+            try:
+                _verify_level_attitude(home_pose, target, stage="outer retract")
+            except HTTPException as exc:
+                log.warning("outer retract level warning: %s", exc.detail)
 
             plan = plan_pick_path(
                 PickPathIn(
@@ -1945,6 +1982,7 @@ class ArmController:
                     target=PoseIn(**target),
                     approach_m=payload.approach_m,
                     gate_clearance_m=payload.gate_clearance_m,
+                    payload_radius_m=payload.payload_radius_m,
                     cage=payload.cage,
                     corners=payload.corners,
                     ignored_corners=payload.ignored_corners,
@@ -1988,18 +2026,27 @@ class ArmController:
                     pose["roll"],
                     pose["pitch"],
                     pose["yaw"],
-                    strict_linear=True,
-                )
-                _verify_placement_attitude(
-                    self.snapshot().get("pose"), target, stage=point["kind"]
                 )
                 steps.append(
                     {"step": f"move:{point['kind']}", "ok": True, "pose": pose}
                 )
 
-            # A successful motion response alone does not authorize release.
+            # The low path can translate without actually completing the
+            # wrist yaw. Do one explicit full-pose alignment at the target,
+            # then verify it before release.
+            self.move_pose_deg(
+                target["x"],
+                target["y"],
+                target["z"],
+                target["roll"],
+                target["pitch"],
+                target["yaw"],
+            )
             _verify_placement_attitude(
                 self.snapshot().get("pose"), target, stage="target release"
+            )
+            steps.append(
+                {"step": "align_target", "ok": True, "pose": dict(target)}
             )
             self._gripper_action(False)
             steps.append({"step": "open_gripper", "ok": True})
@@ -2013,7 +2060,7 @@ class ArmController:
                         pose["roll"], pose["pitch"], pose["yaw"],
                         strict_linear=True,
                     )
-                    _verify_placement_attitude(
+                    _verify_level_attitude(
                         self.snapshot().get("pose"),
                         target,
                         stage=f"return {point['kind']}",
@@ -3342,6 +3389,15 @@ def _solve_vision_calibration(points: list[dict[str, float]]) -> tuple[list[list
 # ── Dry-run pick path planning (cage frame avoidance) ────────────────────────
 PATH_SAMPLE_M = 0.005  # 5 mm sampling along each path segment
 MIN_RETRACT_RADIUS_M = 0.18  # do not pull back into the base/singular zone
+# A pre-gate point is an approach point just outside the opening, not a
+# retract into the base. The opening can be closer than the retract exclusion
+# on this fixed cage; use a slightly smaller allowance for that one point.
+MIN_PRE_GATE_RADIUS_M = 0.16
+def _path_cage_for_payload(cage: CageIn, payload_radius_m: float) -> CageIn:
+    """Inflate cage clearance by the carried payload's swept radius."""
+    if payload_radius_m <= 1e-9:
+        return cage
+    return cage.model_copy(update={"clearance_m": cage.clearance_m + payload_radius_m})
 
 
 def _cage_to_world(cage: CageIn, local: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -3741,6 +3797,7 @@ def _plan_retract_path(
     start: dict[str, float],
     retract_m: float,
     gate_clearance: float,
+    payload_radius_m: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, list[str]]:
     """Find a horizontal pull-back path that avoids the cage frame.
 
@@ -3842,7 +3899,10 @@ def _plan_retract_path(
             pa = (a["pose"]["x"], a["pose"]["y"], a["pose"]["z"])
             pb = (b["pose"]["x"], b["pose"]["y"], b["pose"]["z"])
             min_clearance, issues = _segment_cage_check(
-                cage, frame_segments, pa, pb
+                _path_cage_for_payload(cage, payload_radius_m),
+                frame_segments,
+                pa,
+                pb,
             )
             if issues:
                 ok = False
@@ -3898,10 +3958,14 @@ def _cage_target_issues(cage: CageIn, target: dict[str, float]) -> list[str]:
     return []
 
 
-def _level_placement_pose(cage: CageIn, pose: dict[str, float]) -> dict[str, float]:
+def _level_placement_pose(
+    cage: CageIn, pose: dict[str, float], preserve_yaw: bool = False
+) -> dict[str, float]:
     # Table-level side-entry convention: roll=0, pitch=0. Tool forward points
-    # along cage +Y, hence cage yaw + 90 degrees.
-    return {**pose, "roll": 0.0, "pitch": 0.0, "yaw": (cage.yaw + 270.0) % 360.0 - 180.0}
+    # along cage +Y, hence cage yaw + 90 degrees. ``preserve_yaw`` keeps the
+    # operator's grasp yaw when the cage yaw is not reachable on this Ned.
+    yaw = pose["yaw"] if preserve_yaw else (cage.yaw + 270.0) % 360.0 - 180.0
+    return {**pose, "roll": 0.0, "pitch": 0.0, "yaw": yaw}
 
 
 def _attitude_errors(
@@ -3938,19 +4002,26 @@ def _attitude_error_detail(
     )
 
 
+LEVEL_ATTITUDE_TOL_DEG = 3.0
+PLACEMENT_ATTITUDE_TOL_DEG = 2.0
+
+
 def _verify_level_attitude(
     actual: dict[str, float] | None,
     target: dict[str, float],
     *,
     stage: str = "outer retract",
 ) -> None:
-    """Require a level tool outside the cage; yaw is aligned at pre-gate."""
+    """Require a level tool outside the cage; yaw is aligned later."""
     errors = _attitude_errors(actual, target)
-    if errors is None or any(errors[key] > 2.0 for key in ("roll", "pitch")):
+    if errors is None or any(
+        errors[key] > LEVEL_ATTITUDE_TOL_DEG for key in ("roll", "pitch")
+    ):
         detail = _attitude_error_detail(actual, target, errors)
         raise HTTPException(
             409,
-            f"{stage}: gripper is not level within 2 degrees ({detail}); "
+            f"{stage}: gripper is not level within "
+            f"{LEVEL_ATTITUDE_TOL_DEG:.0f} degrees ({detail}); "
             "gripper remains closed",
         )
 
@@ -3962,11 +4033,14 @@ def _verify_placement_attitude(
     stage: str = "placement",
 ) -> None:
     errors = _attitude_errors(actual, target)
-    if errors is None or any(errors[key] > 2.0 for key in ("roll", "pitch", "yaw")):
+    if errors is None or any(
+        errors[key] > PLACEMENT_ATTITUDE_TOL_DEG for key in ("roll", "pitch", "yaw")
+    ):
         detail = _attitude_error_detail(actual, target, errors)
         raise HTTPException(
             409,
-            f"{stage}: placement attitude is not level/aligned within 2 degrees "
+            f"{stage}: placement attitude is not level/aligned within "
+            f"{PLACEMENT_ATTITUDE_TOL_DEG:.0f} degrees "
             f"({detail}); gripper remains closed",
         )
 
@@ -4003,7 +4077,9 @@ def plan_pick_path(
 
     via = _pose_dict(payload.via.model_dump()) if payload.via is not None else None
     home = _pose_dict(payload.home.model_dump()) if payload.home is not None else None
-    target = _level_placement_pose(cage, _pose_dict(payload.target.model_dump()))
+    target = _level_placement_pose(
+        cage, _pose_dict(payload.target.model_dump()), payload.preserve_yaw
+    )
 
     w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
     target_local = _world_to_cage(cage, (target["x"], target["y"], target["z"]))
@@ -4029,7 +4105,10 @@ def plan_pick_path(
     )
 
     warnings: list[str] = []
-    warnings.append("placement attitude locked: roll 0°, pitch 0°, yaw aligned with cage depth")
+    warnings.append(
+        "placement attitude locked: roll 0°, pitch 0°, "
+        + ("yaw preserved from request" if payload.preserve_yaw else "yaw aligned with cage depth")
+    )
     if fit_meta:
         warnings.extend(fit_meta.get("warnings", []))
     if start_inside:
@@ -4128,7 +4207,8 @@ def plan_pick_path(
             deduped.append((kind, pose))
     waypoints = deduped
 
-    frame_segments = _cage_frame_segments(cage)
+    path_cage = _path_cage_for_payload(cage, payload.payload_radius_m)
+    frame_segments = _cage_frame_segments(path_cage)
     blocking = bool(target_issues)
     points: list[dict[str, Any]] = []
     for kind, pose in waypoints:
@@ -4141,10 +4221,10 @@ def plan_pick_path(
         zone = "gate" if abs(local[1]) <= 1e-6 else ("inside" if in_box else "outside")
         reach = math.hypot(pose["x"], pose["y"])
         issues: list[str] = list(target_issues) if kind == "target" else []
-        if kind == "pre_gate" and reach < MIN_RETRACT_RADIUS_M - 1e-6:
+        if kind == "pre_gate" and reach < MIN_PRE_GATE_RADIUS_M - 1e-6:
             issues.append(
                 f"pre_gate reach {reach:.3f} m is inside the "
-                f"{MIN_RETRACT_RADIUS_M:.3f} m base exclusion zone; "
+                f"{MIN_PRE_GATE_RADIUS_M:.3f} m base exclusion zone; "
                 "move or reteach the cage opening before grasping"
             )
         if reach > max_reach_m + 1e-6:
@@ -4178,7 +4258,9 @@ def plan_pick_path(
         p0 = (a["x"], a["y"], a["z"])
         p1 = (b["x"], b["y"], b["z"])
         length = math.dist(p0, p1)
-        min_clearance, issues = _segment_cage_check(cage, frame_segments, p0, p1)
+        min_clearance, issues = _segment_cage_check(
+            path_cage, frame_segments, p0, p1
+        )
         if kind_a == "approach" and kind_b == "target":
             if abs(a["z"] - b["z"]) > 1e-6 or any(
                 abs(a[key] - b[key]) > 1e-6 for key in ("roll", "pitch", "yaw")
@@ -4591,6 +4673,10 @@ def create_app(controller: ArmController) -> FastAPI:
     @app.post("/api/arm/jog_stop")
     def arm_jog_stop() -> dict[str, Any]:
         return controller.stop_jog_stream()
+
+    @app.post("/api/arm/stop")
+    def arm_stop() -> dict[str, Any]:
+        return controller.stop_motion()
 
     @app.post("/api/arm/cage_fit")
     def arm_cage_fit(body: CageFitIn) -> dict[str, Any]:

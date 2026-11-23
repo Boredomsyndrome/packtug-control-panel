@@ -17,6 +17,8 @@ export interface ArmTargetFromPacking {
   placementSeq: number
   skuId: string
   reference: TargetReference
+  /** swept radius of the carried carton, metres */
+  payload_radius_m?: number
 }
 
 export function placementToLocalTarget(

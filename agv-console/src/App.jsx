@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState, useCallback } from 'react'
 // Approx gauge for the S200's "24V" LiFePO4 pack (voltage-only estimate).
 const BATT_EMPTY = 21.0
 const BATT_FULL = 29.0
+const BATT_CHARGE_V = 22.4
+const BATT_WARN_V = 22.7
 
 const KEYMAP = {
   KeyW: 'fwd', ArrowUp: 'fwd',
@@ -240,6 +242,8 @@ export default function App() {
   const battV = status?.battery_v
   const battPct = battV == null ? null :
     Math.max(0, Math.min(100, Math.round(((battV - BATT_EMPTY) / (BATT_FULL - BATT_EMPTY)) * 100)))
+  const battWarning = battV == null ? null :
+    battV <= BATT_CHARGE_V ? 'charge' : battV <= BATT_WARN_V ? 'warn' : null
 
   const connected = !!status?.online
 
@@ -263,7 +267,9 @@ export default function App() {
                     title={`${r.id}: ${r.online ? 'online' : 'offline'}`}>
               <span className={`dot ${r.online ? 'ok' : 'bad'}`} />
               {r.id}
-              <small>{r.battery_v != null ? `${r.battery_v.toFixed(1)}V` : '--'}</small>
+              <small className={r.battery_v != null && r.battery_v <= BATT_WARN_V ? 'low' : ''}>
+                {r.battery_v != null ? `${r.battery_v.toFixed(1)}V` : '--'}
+              </small>
               {r.estop && <span className="mini-estop">STOP</span>}
             </button>
           ))}
@@ -273,10 +279,19 @@ export default function App() {
           <span className={`dot ${connected ? 'ok' : 'bad'}`} />
           <span>{sel ? (connected ? `${sel} online` : `${sel} OFFLINE`) : '—'}</span>
           {status?.estop && <span className="estopbadge">E-STOP latched</span>}
+          {battWarning && (
+            <span className={`battwarn ${battWarning}`} role="alert">
+              <span className="battled" />
+              {battWarning === 'charge' ? 'CHARGE NOW' : 'LOW VOLTAGE'}
+              {battV != null ? ` · ${battV.toFixed(1)} V` : ''}
+            </span>
+          )}
           <span className="batt">
             {battV != null ? `${battV.toFixed(1)} V` : '-- V'}
             {battPct != null && (
-              <span className="bar"><i style={{ width: `${battPct}%` }} /></span>
+              <span className={`bar ${battWarning ? 'warn' : ''}`}>
+                <i style={{ width: `${battPct}%` }} />
+              </span>
             )}
           </span>
         </div>

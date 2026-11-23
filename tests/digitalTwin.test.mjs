@@ -72,15 +72,19 @@ const moduleUrl = (source) => 'data:text/javascript;base64,' + Buffer.from(ts.tr
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText).toString('base64')
 const mockUrl = moduleUrl(readFileSync(new URL('../src/data/mock.ts', import.meta.url), 'utf8'))
-const { CAGE_BIN, SKUS } = await import(mockUrl)
+const { CAGE_BIN, SKUS, ORDERS } = await import(mockUrl)
 const demoSource = readFileSync(new URL('../src/data/demoStack.ts', import.meta.url), 'utf8')
 const { DEMO_STACK_PLAN } = await import(moduleUrl(demoSource.replace("'./mock'", JSON.stringify(mockUrl))))
+const manualSource = readFileSync(new URL('../src/data/manualTest.ts', import.meta.url), 'utf8')
+const { MANUAL_TEST_PLAN, MANUAL_TEST_ORDER_ID } = await import(
+  moduleUrl(manualSource.replace("'./mock'", JSON.stringify(mockUrl)))
+)
 const { packBoxes } = await import(moduleUrl(readFileSync(new URL('../src/lib/packing.ts', import.meta.url), 'utf8')))
 
 test('actual demo and general packing fit the recorded hardware dimensions', () => {
   assert.deepEqual(CAGE_BIN, { w: 550, d: 250, h: 400, maxWeight: 20 })
   assert.deepEqual(DEMO_STACK_PLAN.bin, CAGE_BIN)
-  const packed = packBoxes(SKUS.map(sku => ({ skuId: sku.id, name: sku.name, ...sku.size, weight: sku.weight })), CAGE_BIN)
+  const packed = packBoxes(SKUS.map(sku => ({ skuId: sku.id, name: sku.name, ...sku.size, weight: sku.weight, fixedOrientation: sku.fixedOrientation })), CAGE_BIN)
   for (const plan of [DEMO_STACK_PLAN, packed]) {
     for (const bin of plan.cages) {
       for (const p of bin.placements) {
@@ -91,4 +95,35 @@ test('actual demo and general packing fit the recorded hardware dimensions', () 
     }
   }
   for (const p of DEMO_STACK_PLAN.cages[0].placements) assert.deepEqual(placementTargetIssues(p, cage), [])
+})
+
+test('manual physical layout keeps every grip opening on the front face', () => {
+  const skuMap = Object.fromEntries(SKUS.map(sku => [sku.id, sku]))
+  const order = ORDERS.find(o => o.id === MANUAL_TEST_ORDER_ID)
+  assert.ok(order, `missing ${MANUAL_TEST_ORDER_ID}`)
+  assert.equal(order.items.reduce((n, item) => n + item.qty, 0), 6)
+  for (const item of order.items) {
+    assert.equal(skuMap[item.skuId].fixedOrientation, true, `${item.skuId} must not rotate`)
+  }
+
+  assert.equal(MANUAL_TEST_PLAN.cages.length, 1)
+  assert.equal(MANUAL_TEST_PLAN.itemCount, 6)
+  const placements = MANUAL_TEST_PLAN.cages[0].placements
+  const expected = new Map([
+    ['TEST-BOX-B', [[20, 174, 0], [20, 116, 0]]],
+    ['TEST-BOX-C', [[280, 174, 0]]],
+    ['TEST-BOX-A', [[20, 58, 0], [20, 1, 0]]],
+    ['DEMO-BOX', [[329, 1, 0]]],
+  ])
+  for (const p of placements) {
+    const sku = skuMap[p.skuId]
+    assert.deepEqual([p.w, p.d, p.h], [sku.size.w, sku.size.d, sku.size.h], `${p.skuId} rotated`)
+    assert.ok(expected.get(p.skuId)?.some(([x, y, z]) => x === p.x && y === p.y && z === p.z), `${p.skuId} at unexpected position`)
+    assert.ok(p.y + p.d <= CAGE_BIN.d)
+    assert.ok(p.x + p.w <= CAGE_BIN.w)
+    assert.ok(p.z + p.h <= CAGE_BIN.h)
+    assert.deepEqual(placementTargetIssues(p, cage), [])
+  }
+  assert.equal(MANUAL_TEST_PLAN.payloadRadiusM, 0)
+  assert.equal(MANUAL_TEST_PLAN.targetZOffsetM, 0)
 })

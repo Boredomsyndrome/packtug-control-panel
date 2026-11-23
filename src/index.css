@@ -607,3 +607,41 @@ input[type='checkbox'] {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+
+/* WHEELTEC low-voltage alert (22.4–22.7 V; charge at <=22.4 V) */
+.voltage-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 11px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--red);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.voltage-alert.critical {
+  border-color: var(--red);
+  background: rgba(248, 113, 113, 0.2);
+  color: #fff;
+}
+.voltage-alert-note {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.voltage-led {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 9px var(--red);
+  animation: voltage-pulse 1s ease-in-out infinite;
+}
+@keyframes voltage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

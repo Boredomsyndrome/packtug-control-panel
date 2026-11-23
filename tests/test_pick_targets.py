@@ -1,10 +1,12 @@
-import unittest
 import contextlib
+import pathlib
+import sys
+import tempfile
+import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
-import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "backend"))
 
 from arm_server import (
@@ -79,14 +81,16 @@ class PickTargetTests(unittest.TestCase):
             retract = ([{'kind': 'start', 'pose': start.model_dump()}], [], True, [])
             with patch('arm_server._plan_retract_path', return_value=retract):
                 result = arm.execute_pick_place(ExecutePickIn(
-                    target=target, home=start, cage=cage, return_home_after=True,
+                    target=target, home=start, cage=cage,
                 ))
             self.assertEqual(result['ok'], not drift, result)
             releases = [c for c in arm._gripper_action.call_args_list if c.args == (False,)]
             self.assertEqual(len(releases), 0 if drift else 1)
             if not drift:
-                self.assertEqual((arm.pose['roll'], arm.pose['pitch'], arm.pose['yaw']), (0, 0, 90))
-                self.assertAlmostEqual(arm.pose['y'], start.y)
+                steps = {step['step'] for step in result['steps']}
+                self.assertIn('release_drop', steps)
+                self.assertIn('retract:pre_gate', steps)
+                self.assertNotIn('return_home', steps)
 
     def test_requested_front_face_target_is_kept(self):
         cage = CageIn(x=.2, y=-.1, z=0)
@@ -116,6 +120,14 @@ class PickTargetTests(unittest.TestCase):
                 arm.move_pose_deg(.25, 0, .2, 180, 0, 0, strict_linear=True)
         arm._robot.inverse_kinematics.assert_not_called()
         arm._robot.move_joints.assert_not_called()
+
+    def test_placement_accepts_small_yaw_error_but_not_large(self):
+        target = dict(x=.2, y=0, z=.2, roll=0, pitch=0, yaw=0)
+        _verify_placement_attitude(
+            dict(target, roll=-1.3, pitch=.7, yaw=-2.0), target
+        )
+        with self.assertRaises(HTTPException):
+            _verify_placement_attitude(dict(target, yaw=-3.1), target)
 
     def test_outer_retract_allows_yaw_error_but_gate_does_not(self):
         target = dict(x=.2, y=0, z=.2, roll=0, pitch=0, yaw=0)
@@ -153,6 +165,28 @@ class PickTargetTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SavedPoseTests(unittest.TestCase):
+    def test_save_pose_stores_and_recalls_tcp_pose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            poses_file = pathlib.Path(tmp) / "arm_poses.json"
+            with patch("arm_server.POSES_FILE", poses_file):
+                arm = ArmController(mock=True)
+                arm.connected = True
+                arm.joints_deg = [1, 2, 3, 4, 5, 6]
+                arm.pose = {
+                    "x": .11, "y": .22, "z": .33,
+                    "roll": 4.0, "pitch": 5.0, "yaw": 6.0,
+                }
+                saved = arm.save_pose("home-like")["pose"]
+                self.assertEqual(saved["pose"]["x"], .11)
+                self.assertEqual(saved["pose"]["yaw"], 6.0)
+                loaded = arm.list_poses()["poses"][0]
+                self.assertEqual(loaded["pose"]["z"], .33)
+                recalled = arm.apply_pose("home-like", linear=True)
+                self.assertEqual(recalled["pose"]["roll"], 4.0)
+                self.assertEqual(recalled["pose"]["yaw"], 6.0)
 
 
 class LinearModeTests(unittest.TestCase):

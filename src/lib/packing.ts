@@ -7,6 +7,7 @@ export interface PackBox {
   d: number
   h: number
   weight: number
+  fixedOrientation?: boolean
 }
 
 export interface BinSpec extends Size3 {
@@ -30,7 +31,9 @@ const CELL = 25 // height-map resolution (mm)
 /** a carton must rest on at least this share of its base to be placeable */
 export const SUPPORT_MIN = 0.6
 
-function orientations(w: number, d: number, h: number): Array<[number, number, number]> {
+function orientations(box: PackBox): Array<[number, number, number]> {
+  const { w, d, h } = box
+  if (box.fixedOrientation) return [[w, d, h]]
   // all axis-aligned orientations — more flexibility packs denser
   const perms: Array<[number, number, number]> = [
     [w, d, h],
@@ -111,7 +114,7 @@ export function packBoxes(boxes: PackBox[], bin: BinSpec): PackResult {
     if (cage.weight + box.weight > bin.maxWeight + EPS) return false
     let best: PlacedBox | null = null
 
-    for (const [w, d, h] of orientations(box.w, box.d, box.h)) {
+    for (const [w, d, h] of orientations(box)) {
       const cw = Math.ceil(w / CELL - 1e-9)
       const cd = Math.ceil(d / CELL - 1e-9)
       if (cw > GW || cd > GD) continue
@@ -184,7 +187,7 @@ export function packBoxes(boxes: PackBox[], bin: BinSpec): PackResult {
       const cage = openCage()
       if (!tryPlace(cage, box)) {
         // force a floor placement so no carton is ever dropped
-        const orient = orientations(box.w, box.d, box.h).find(
+        const orient = orientations(box).find(
           ([w, d, h]) => w <= bin.w + EPS && d <= bin.d + EPS && h <= bin.h + EPS,
         )
         if (orient) {

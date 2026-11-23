@@ -18,6 +18,8 @@ export interface Sku {
   size: Size3
   /** kg */
   weight: number
+  /** keep w/h facing the cage opening and d along cage depth */
+  fixedOrientation?: boolean
 }
 
 /** user-entered goods parameters (id is assigned by the store) */
@@ -166,6 +168,10 @@ export interface PackingPlan {
   itemCount: number
   generatedAt: string
   algorithm: string
+  /** metres; 0 means tool-only path checking */
+  payloadRadiusM?: number
+  /** metres; overrides the Arm page target Z default */
+  targetZOffsetM?: number
 }
 
 export interface ThroughputPoint {

@@ -4,7 +4,7 @@
 // stripping is on by default — repo node v26 runs it directly.)
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { armChip, vehicleChip } from '../src/lib/vehicleStatus.ts'
+import { armChip, vehicleChip, wheeltecBatteryWarning } from '../src/lib/vehicleStatus.ts'
 
 test('fleet endpoint answering with robots[] => LIVE (the old chip wrongly said mock)', () => {
   assert.deepEqual(vehicleChip(true), { label: 'AGV DATA · live', tone: 'green' })
@@ -23,4 +23,19 @@ test('bridge down/null => offline red; never crashes on garbage', () => {
   assert.deepEqual(armChip(null), { label: 'bridge · offline', tone: 'red' })
   assert.deepEqual(armChip({}), { label: 'bridge · offline', tone: 'red' })
   assert.deepEqual(armChip({ status: 'error' }), { label: 'bridge · offline', tone: 'red' })
+})
+
+
+test('WHEELTEC 22.4 V or below is charge-now; 22.4–22.7 is warning', () => {
+  assert.deepEqual(wheeltecBatteryWarning(22.4), {
+    level: 'critical',
+    label: 'CHARGE NOW · ≤22.4 V',
+  })
+  assert.equal(wheeltecBatteryWarning(22.39)?.level, 'critical')
+  assert.deepEqual(wheeltecBatteryWarning(22.7), {
+    level: 'danger',
+    label: 'LOW VOLTAGE · 22.4–22.7 V',
+  })
+  assert.equal(wheeltecBatteryWarning(22.71), null)
+  assert.equal(wheeltecBatteryWarning(null), null)
 })

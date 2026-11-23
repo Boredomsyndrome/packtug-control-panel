@@ -38,6 +38,33 @@ body {
 .batt { display: flex; align-items: center; gap: 6px; }
 .bar { width: 90px; height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; display: inline-block; }
 .bar i { display: block; height: 100%; background: var(--ok); }
+.bar.warn i { background: var(--bad); }
+.battwarn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--bad);
+  font-weight: 700;
+  font-size: 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: rgba(255, 93, 93, 0.1);
+}
+.battwarn.charge { background: var(--bad); color: #fff; }
+.battled {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  animation: battpulse 1s ease-in-out infinite;
+}
+@keyframes battpulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.rchip small.low { color: var(--bad); font-weight: 700; }
 
 .grid {
   flex: 1 0 auto; display: grid; grid-template-columns: 1fr 340px;

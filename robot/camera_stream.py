@@ -359,7 +359,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--color-topic", default="/d455/color/image_raw")
     parser.add_argument("--color-info-topic", default="/d455/color/camera_info")
-    parser.add_argument("--depth-topic", default="/d455/depth/image_raw")
+    parser.add_argument("--depth-topic", default="/d455/depth/image_rect_raw")
     parser.add_argument("--depth-scale", type=float, default=0.001)
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--manage-camera", action="store_true",

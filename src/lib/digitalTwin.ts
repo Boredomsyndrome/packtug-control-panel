@@ -19,6 +19,10 @@ export interface ArmTargetFromPacking {
   reference: TargetReference
   /** swept radius of the carried carton, metres */
   payload_radius_m?: number
+  /** longest carton dimension, metres; drives pickup lift/retract distance */
+  payload_length_m?: number
+  /** operator Z correction to apply in Arm, metres */
+  target_z_offset_m?: number
 }
 
 export function placementToLocalTarget(

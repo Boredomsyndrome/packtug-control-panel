@@ -399,6 +399,9 @@ class PickPathIn(BaseModel):
     target: PoseIn
     approach_m: float = Field(default=0.06, ge=0.0, le=0.25)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    # Negative lowers the final placement point (and its approach) to the
+    # tilted cage floor. Small, operator-adjustable compensation.
+    target_z_offset_m: float = Field(default=0.0, ge=-0.05, le=0.05)
     # Radius of the carried carton/gripper envelope. The path planner inflates
     # cage clearance by this amount so the swept payload does not clip a frame.
     payload_radius_m: float = Field(default=0.0, ge=0.0, le=0.25)
@@ -424,15 +427,18 @@ class ExecutePickIn(BaseModel):
     target: PoseIn
     home: PoseIn | None = None
     home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
-    retract_m: float = Field(default=0.08, ge=0.0, le=0.20)
+    retract_m: float = Field(default=0.08, ge=0.0, le=0.40)
+    pickup_lift_m: float = Field(default=0.01, ge=0.0, le=0.05)
     fold_j2_to_min: bool = False
     approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
+    target_z_offset_m: float = Field(default=0.0, ge=-0.05, le=0.05)
     payload_radius_m: float = Field(default=0.0, ge=0.0, le=0.25)
     cage: CageIn = Field(default_factory=CageIn)
     corners: list[Vec3In] | None = None
     ignored_corners: list[int] = Field(default_factory=list)
     speed_percent: int = Field(default=5, ge=1, le=MAX_VELOCITY_LIMIT)
+    release_drop_m: float = Field(default=0.01, ge=0.0, le=0.03)
     return_home_after: bool = False
 
 
@@ -1741,6 +1747,7 @@ class ArmController:
             # The packing target is the centre of the box front face; the
             # placement attitude is horizontal and cage-aligned.
             target = _level_placement_pose(cage, target)
+            target["z"] += float(payload.target_z_offset_m)
             if payload.fold_j2_to_min:
                 raise HTTPException(422, "J2 folding is not supported during level placement")
             if payload.home is None:
@@ -1794,6 +1801,14 @@ class ArmController:
                 "roll": 0.0,
                 "pitch": 0.0,
             }
+            # Lift straight up before pulling back.  This clears the table edge
+            # instead of dragging the carton across it.
+            pickup_lift = float(payload.pickup_lift_m)
+            grasp_lift = {
+                **grasp_start,
+                "z": min(MAX_POSE_Z_M, grasp_start["z"] + pickup_lift),
+            }
+            actual_lift = grasp_lift["z"] - grasp_start["z"]
 
             # Find a horizontal pull-back path that avoids the cage frame.
             (
@@ -1804,7 +1819,7 @@ class ArmController:
             ) = _plan_retract_path(
                 cage,
                 frame_segments,
-                grasp_start,
+                grasp_lift,
                 payload.retract_m,
                 payload.gate_clearance_m,
                 payload.payload_radius_m,
@@ -1897,6 +1912,17 @@ class ArmController:
 
             self._gripper_action(True)
             steps.append({"step": "close_gripper", "ok": True})
+
+            if actual_lift > 1e-6:
+                self.move_pose_deg(
+                    grasp_lift["x"],
+                    grasp_lift["y"],
+                    grasp_lift["z"],
+                    grasp_lift["roll"],
+                    grasp_lift["pitch"],
+                    grasp_lift["yaw"],
+                )
+                steps.append({"step": "pickup_lift", "ok": True, "pose": grasp_lift})
 
             for point in retract_points[1:]:
                 pose = point["pose"]
@@ -2051,22 +2077,54 @@ class ArmController:
             self._gripper_action(False)
             steps.append({"step": "open_gripper", "ok": True})
 
-            if payload.return_home_after:
-                # Retrace the checked entry route, maintaining level attitude.
-                for point in reversed(plan["points"][:-1]):
-                    pose = {**point["pose"], **{key: target[key] for key in ("roll", "pitch", "yaw")}}
-                    self.move_pose_deg(
-                        pose["x"], pose["y"], pose["z"],
-                        pose["roll"], pose["pitch"], pose["yaw"],
-                        strict_linear=True,
-                    )
-                    _verify_level_attitude(
-                        self.snapshot().get("pose"),
-                        target,
-                        stage=f"return {point['kind']}",
-                    )
+            drop = float(payload.release_drop_m)
+            lowered_z = max(MIN_POSE_Z_M, target["z"] - drop)
+            if target["z"] - lowered_z > 1e-6:
+                self.move_pose_deg(
+                    target["x"],
+                    target["y"],
+                    lowered_z,
+                    target["roll"],
+                    target["pitch"],
+                    target["yaw"],
+                    strict_linear=True,
+                )
                 steps.append(
-                    {"step": "return_safe_home", "ok": True, "pose": safe_home}
+                    {
+                        "step": "release_drop",
+                        "ok": True,
+                        "pose": {**target, "z": lowered_z},
+                    }
+                )
+
+            # Back straight out of the cage on the checked entry route.  This
+            # is independent of the return-home option so the released carton
+            # is never left hanging on the gripper.
+            retract_out = [
+                point for point in plan["points"]
+                if point["kind"] in ("approach", "gate", "pre_gate")
+            ]
+            for point in reversed(retract_out):
+                pose = {
+                    **point["pose"],
+                    **{key: target[key] for key in ("roll", "pitch", "yaw")},
+                }
+                self.move_pose_deg(
+                    pose["x"],
+                    pose["y"],
+                    pose["z"],
+                    pose["roll"],
+                    pose["pitch"],
+                    pose["yaw"],
+                    strict_linear=True,
+                )
+                _verify_level_attitude(
+                    self.snapshot().get("pose"),
+                    target,
+                    stage=f"retract {point['kind']}",
+                )
+                steps.append(
+                    {"step": f"retract:{point['kind']}", "ok": True, "pose": pose}
                 )
 
             return {
@@ -2550,6 +2608,16 @@ class ArmController:
                 and len(joints) == 6
                 and all(isinstance(v, (int, float)) and math.isfinite(float(v)) for v in joints)
             ):
+                saved_pose = entry.get("pose")
+                if not (
+                    isinstance(saved_pose, dict)
+                    and all(
+                        isinstance(saved_pose.get(key), (int, float))
+                        and math.isfinite(float(saved_pose[key]))
+                        for key in ("x", "y", "z", "roll", "pitch", "yaw")
+                    )
+                ):
+                    saved_pose = None
                 cleaned.append(
                     {
                         "name": name,
@@ -2557,6 +2625,10 @@ class ArmController:
                             round(max(JOINT_LIMITS_DEG[i][0], min(JOINT_LIMITS_DEG[i][1], float(v))), 3)
                             for i, v in enumerate(joints)
                         ],
+                        "pose": (
+                            {key: round(float(saved_pose[key]), 6) for key in ("x", "y", "z", "roll", "pitch", "yaw")}
+                            if saved_pose is not None else None
+                        ),
                         "radius_m": round(
                             tip_radius(
                                 [
@@ -2598,14 +2670,34 @@ class ArmController:
         name = name.strip()
         if not name or len(name) > 40 or "/" in name:
             raise HTTPException(400, "pose name must be 1-40 characters without '/'")
+        saved_pose: dict[str, float] | None = None
         if joints_deg is None:
             with self._motion:
                 with self._state:
                     if not self.connected:
                         raise HTTPException(409, "arm is not connected")
                 joints = self._current_joints_locked()
+                with self._state:
+                    if self.pose is not None:
+                        saved_pose = _pose_dict(self.pose)
         else:
             joints = list(joints_deg)
+            if self.connected and not self.mock and self._robot is not None:
+                try:
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        p = self._robot.forward_kinematics(
+                            [math.radians(float(v)) for v in joints]
+                        )
+                    saved_pose = {
+                        "x": float(p.x),
+                        "y": float(p.y),
+                        "z": float(p.z),
+                        "roll": math.degrees(float(p.roll)),
+                        "pitch": math.degrees(float(p.pitch)),
+                        "yaw": math.degrees(float(p.yaw)),
+                    }
+                except Exception as exc:
+                    log.warning("could not compute Cartesian pose for '%s': %s", name, exc)
         joints = self._normalise_pose(joints)
         now = datetime.now(timezone.utc).isoformat()
         with self._poses_lock:
@@ -2613,10 +2705,17 @@ class ArmController:
             existing = next((p for p in poses if p["name"] == name), None)
             if existing is not None:
                 existing["joints_deg"] = joints
+                existing["pose"] = saved_pose
                 existing["updated_at"] = now
                 pose = existing
             else:
-                pose = {"name": name, "joints_deg": joints, "created_at": now, "updated_at": now}
+                pose = {
+                    "name": name,
+                    "joints_deg": joints,
+                    "pose": saved_pose,
+                    "created_at": now,
+                    "updated_at": now,
+                }
                 poses.append(pose)
             self._write_poses_locked(poses)
         return {"pose": pose, "poses": poses}
@@ -2637,6 +2736,16 @@ class ArmController:
         if pose is None:
             raise HTTPException(404, f"pose not found: {name}")
         target = pose["joints_deg"]
+        saved_pose = pose.get("pose")
+        if not (
+            isinstance(saved_pose, dict)
+            and all(
+                isinstance(saved_pose.get(key), (int, float))
+                and math.isfinite(float(saved_pose[key]))
+                for key in ("x", "y", "z", "roll", "pitch", "yaw")
+            )
+        ):
+            saved_pose = None
         with self._motion:
             self._check_motion_locked()
             current = self._current_joints_locked()
@@ -2645,7 +2754,10 @@ class ArmController:
                     self.busy = True
                     self.last_good_joints = list(current)
                 try:
-                    radius = tip_radius(target)
+                    radius = (
+                        math.hypot(float(saved_pose["x"]), float(saved_pose["y"]))
+                        if saved_pose is not None else tip_radius(target)
+                    )
                     if radius > self.max_reach_m + 1e-6:
                         raise HTTPException(
                             400,
@@ -2656,12 +2768,26 @@ class ArmController:
                         with self._state:
                             self.joints_deg = [float(v) for v in target]
                             self.last_good_joints = [float(v) for v in target]
+                            if saved_pose is not None:
+                                self.pose = dict(saved_pose)
                             self.updated_at = time.time()
                     else:
-                        with self._socket_timeout(TOOL_TIMEOUT_S):
-                            target_pose = self._robot.forward_kinematics(
-                                [math.radians(v) for v in target]
+                        if saved_pose is not None:
+                            from pyniryo.api.objects import PoseObject
+
+                            target_pose = PoseObject(
+                                float(saved_pose["x"]),
+                                float(saved_pose["y"]),
+                                float(saved_pose["z"]),
+                                math.radians(float(saved_pose["roll"])),
+                                math.radians(float(saved_pose["pitch"])),
+                                math.radians(float(saved_pose["yaw"])),
                             )
+                        else:
+                            with self._socket_timeout(TOOL_TIMEOUT_S):
+                                target_pose = self._robot.forward_kinematics(
+                                    [math.radians(v) for v in target]
+                                )
                         with self._socket_timeout(MOTION_TIMEOUT_S):
                             self._send_linear_pose(target_pose)
                         if self._query_collision_flag_locked():
@@ -2713,6 +2839,26 @@ class ArmController:
                     with self._state:
                         self.busy = False
                 return self.snapshot()
+            if saved_pose is not None and not self.mock:
+                try:
+                    from pyniryo.api.objects import PoseObject
+
+                    with self._socket_timeout(TOOL_TIMEOUT_S):
+                        ik = self._robot.inverse_kinematics(
+                            PoseObject(
+                                float(saved_pose["x"]),
+                                float(saved_pose["y"]),
+                                float(saved_pose["z"]),
+                                math.radians(float(saved_pose["roll"])),
+                                math.radians(float(saved_pose["pitch"])),
+                                math.radians(float(saved_pose["yaw"])),
+                            )
+                        )
+                    target = self._normalise_pose(
+                        [math.degrees(float(v)) for v in ik]
+                    )
+                except Exception as exc:
+                    log.warning("IK for pose '%s' failed; using saved joints: %s", name, exc)
             try:
                 return self._move_locked(target, current, MAX_POSE_DEG)
             except HTTPException as exc:
@@ -4003,7 +4149,8 @@ def _attitude_error_detail(
 
 
 LEVEL_ATTITUDE_TOL_DEG = 3.0
-PLACEMENT_ATTITUDE_TOL_DEG = 2.0
+PLACEMENT_LEVEL_TOL_DEG = 2.0
+PLACEMENT_YAW_TOL_DEG = 3.0
 
 
 def _verify_level_attitude(
@@ -4033,14 +4180,17 @@ def _verify_placement_attitude(
     stage: str = "placement",
 ) -> None:
     errors = _attitude_errors(actual, target)
-    if errors is None or any(
-        errors[key] > PLACEMENT_ATTITUDE_TOL_DEG for key in ("roll", "pitch", "yaw")
+    if errors is None or (
+        errors["roll"] > PLACEMENT_LEVEL_TOL_DEG
+        or errors["pitch"] > PLACEMENT_LEVEL_TOL_DEG
+        or errors["yaw"] > PLACEMENT_YAW_TOL_DEG
     ):
         detail = _attitude_error_detail(actual, target, errors)
         raise HTTPException(
             409,
             f"{stage}: placement attitude is not level/aligned within "
-            f"{PLACEMENT_ATTITUDE_TOL_DEG:.0f} degrees "
+            f"{PLACEMENT_LEVEL_TOL_DEG:.0f}° roll/pitch and "
+            f"{PLACEMENT_YAW_TOL_DEG:.0f}° yaw "
             f"({detail}); gripper remains closed",
         )
 
@@ -4080,6 +4230,7 @@ def plan_pick_path(
     target = _level_placement_pose(
         cage, _pose_dict(payload.target.model_dump()), payload.preserve_yaw
     )
+    target["z"] += float(payload.target_z_offset_m)
 
     w, d, h, margin = cage.width, cage.depth, cage.height, cage.opening_margin
     target_local = _world_to_cage(cage, (target["x"], target["y"], target["z"]))

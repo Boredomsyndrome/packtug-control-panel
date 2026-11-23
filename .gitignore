@@ -5,13 +5,36 @@ dist-ssr
 .DS_Store
 .vite
 *.tsbuildinfo
-server/*.tmp
+backend/*.tmp
 __pycache__/
 *.pyc
+backend/vision_calibration.json
+backend/hand_eye_calibration.json
+backend/camera_intrinsics.json
+.venv/
+node_modules/
+.env
+.logs/
+bridge.lock
+frontend/dist/
+db.sqlite3
+.server.lock
+.bridge.lock
+robot/robotctl.env
+robot/*.lock
+__MACOSX/
+.data/
+.itest-nav/
+.robotctl.*.lock
 
-server/vision_calibration.json
-server/hand_eye_calibration.json
-server/camera_intrinsics.json
+# robot deploy tarballs + scratch
+*.tar.gz
+.env.server
 
-# teammate pull-mode source is its own nested git repo
-wheeltec-webctl/
+.server.*.lock
+.itest-nav*/
+.scratch-simfleet/
+.scratch-simfleet-token
+
+# agent workspace scratch (tool backups, temp files)
+.hermes/

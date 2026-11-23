@@ -1,0 +1,96 @@
+[1] fleet, transports, telemetry uplink (ws + http)
+  PASS  browser site open without credentials (v3.2 no-auth)
+  PASS  alpha (ws) and beta (http) online, gamma idle offline
+  PASS  transport reporting: alpha=ws, beta=http   [ws/http]
+  PASS  battery via ws telemetry   [24.3]
+  PASS  battery via http telemetry
+  PASS  status fields incl. camera_path + camera hot (ws-pushed frames)
+  PASS  beta has no camera (state isolation)
+[2] ws protocol probe (gamma): welcome, push latency, telemetry
+  PASS  welcome carries zero-safe cmd snapshot
+  PASS  cmd pushed over ws within 150 ms of browser POST   [2ms]
+  PASS  ws telemetry visible in fleet
+  PASS  garbage ws telemetry rejected (battery unchanged)
+[3] ws staleness push: held cmd expires -> robot gets zero unsolicited
+  PASS  stale cmd auto-zero pushed over ws   [{'type': 'cmd', 'vx': 0.0, 'wz': 0.0, 'estop': False, 'seq': 3, 'cmd_timeout': 0.5, 'nav': None}]
+[4] camera over ws + legacy HTTP relay
+  PASS  viewer ws receives frame with 8-byte server ts prefix
+  PASS  viewer latency plausible (<2 s)
+  PASS  legacy /cam/alpha HTTP relay still works   [status=200 body=b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 330\r\n\r\n\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08']
+  PASS  /cam 503 for camera-less robot   [status=503]
+[5] takeover + ws auth
+  PASS  new connection takes over robot slot (old notified)
+  PASS  ws handshake refused for bad token
+  PASS  http robot auth: wrong token -> 401   [status=401]
+  PASS  unknown robot -> 404
+[6] http-transport client applies cmds (fallback path)
+  PASS  beta cmd applied via http long-poll
+  PASS  alpha untouched (isolation across transports)
+  PASS  API clamps to limits   [b'{"ok":true,"vx":0.5,"wz":-0.7,"clamped":true}']
+  PASS  clamped cmd reaches http robot
+  PASS  ws client publishes ~10 Hz   [delta=9]
+[7] serializer validation
+  PASS  garbage velocity -> 400
+  PASS  out-of-range -> 400
+  PASS  empty body -> zero (200)
+[8] staleness + e-stop on the http transport
+  PASS  beta moving
+  PASS  beta zeroed by server staleness   [{'vx': 0.0, 'wz': 0.0, 'publishes': 90, 'watchdog_trips': 0, 'state': 'driven', 'transport': 'http'}]
+  PASS  e-stop zeroes despite fresh cmd
+  PASS  e-stop latched
+  PASS  latched through staleness
+  PASS  fresh cmd unlatches
+  PASS  /stop unlatches
+[9] CLIENT watchdog: freeze server -> BOTH robots stop themselves
+  PASS  steady state: no spurious watchdog trips on idle ws link   [trips 0->0]
+  PASS  ws client watchdog trips and zeroes   [{'vx': 0.0, 'wz': 0.0, 'publishes': 150, 'watchdog_trips': 1, 'state': 'watchdog', 'transport': 'ws'}]
+  PASS  http client watchdog trips and zeroes
+  PASS  ws client reconnects after unfreeze
+  PASS  http client reconnects after unfreeze
+  PASS  ws transport restored
+[9b] lidar: synthetic scans uplink (ws + http) and serve via API
+  PASS  alpha(ws) + beta(http) lidar live, gamma idle has none   [0.0025568008422851562]
+  PASS  GET /api/robot/alpha/scan: fresh packed ring   [120 rays]
+  PASS  offline robot: scan endpoint answers ok+not-fresh (no exception)
+  PASS  POST /robotctl/gamma/scan (http ingest) then API shows it fresh
+  PASS  scan validation: amax<=amin -> 400
+  PASS  scan ingest requires the RIGHT robot token -> 401
+  PASS  status carries diagnostics fields (ros_topics, robot_cam_ok)
+[10] SPA & single-owner guard
+  PASS  SPA index served
+  PASS  JS bundle served
+  PASS  dup server: browser cmd 503 (flock)   [status=503]
+  PASS  dup server: robot poll 503   [status=503]
+  PASS  dup server: robot ws refused (no hub)
+[11] v3.3 nav plane (dry robot: no real ROS, no motion)
+  PASS  nav record action accepted   [200 b'{"ok":true,"action":"record","rid":1795288239.6998956}']
+  PASS  recorded waypoint lands in navstore via telemetry
+  PASS  waypoint pose = robot dry scripted pose   [{'created': 1795288240.15, 'frame': 'map', 'x': 0.5, 'y': -0.5, 'yaw': 1.57}]
+  PASS  robot map upload accepted   [200]
+  PASS  map artifact served to browser byte-identical   [200]
+  PASS  garbage map upload rejected 400
+  PASS  map upload with wrong robot creds refused
+  PASS  bad nav action rejected 400
+  PASS  route via unknown waypoint rejected 400
+  PASS  map_on accepted
+  PASS  hub mirrors robot nav mode (mapping)
+  PASS  mode goes localizing
+  PASS  nav_on with waypoint align hint accepted (v3.5)   [200]
+  PASS  route accepted
+  PASS  hub sees mode=route
+  PASS  teleop cmd locked out with 409 during route
+  PASS  dry route completes (route_done>=1, localizing)
+  PASS  teleop accepted again after route   [200]
+  PASS  nav_cancel always accepted
+  PASS  waypoint delete
+  PASS  clr-a recorded
+  PASS  clr-b recorded
+  PASS  clear_waypoints wipes the whole drawn path (v3.6.2)   [st=200 ok=True]
+  PASS  second clear 404s — no phantom success   [st2=404]
+  PASS  map delete + artifact gone
+  PASS  robot-local map w/o hub copy still listed for nav (v3.5)
+[12] offline detection
+  PASS  beta OFFLINE after client dies
+  PASS  alpha still online
+
+RESULT: ALL CHECKS PASSED

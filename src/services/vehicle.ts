@@ -19,10 +19,27 @@ export interface LiveRobot {
   scan?: boolean
   transport: string | null
   ws_connected?: boolean
+  odom?: number[] | null     // v3.7: /odom [x, y, yaw] passthrough (m, rad)
+  nav_mode?: string          // off | mapping | localizing | route
   max_lin: number
   max_rot: number
   uptime: number
   seq: number
+}
+
+export interface ScanFrame {
+  ranges: number[]
+  amin: number
+  ainc: number
+  rmin: number
+  rmax: number
+}
+
+export interface ScanBody {
+  ok: boolean
+  age: number | null
+  fresh: boolean
+  scan: ScanFrame | null
 }
 
 export interface LiveFleet {
@@ -58,5 +75,16 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 4000): P
 export const vehicleApi = {
   getFleet(): Promise<LiveFleet> {
     return request<LiveFleet>('/vehicle')
+  },
+  /** v3.7 fused origin: the LiDAR ring comes straight off the hub robot
+   * API (same site — no bridge hop). */
+  getScan(rid: string): Promise<ScanBody> {
+    return request<ScanBody>(`/robot/${encodeURIComponent(rid)}/scan`)
+  },
+  /** v3.7 CS-B4: bridge liveness/mock probe for the topbar chip. */
+  getHealth(timeoutMs = 3000): Promise<{ status?: string; mock?: boolean } | null> {
+    return request<{ status?: string; mock?: boolean }>('/health', undefined, timeoutMs)
+      .then((h) => h)
+      .catch(() => null)
   },
 }

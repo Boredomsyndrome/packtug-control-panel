@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useApp } from '../store/AppStore'
 import { vehicleApi, type LiveRobot } from '../services/vehicle'
 import { Badge, Card, PageHeader, Progress } from '../components/ui'
+import { LidarSweep } from '../components/LidarSweep'
 import { AGV_STATUS, CAGE_STATE } from '../components/status'
 import { kg, pct, volumeLitres } from '../lib/format'
 
@@ -44,29 +46,37 @@ export function Fleet() {
         }
       />
 
-      <Card title="AGV control" hint="teammate pull-mode console · robotctl">
+      <Card title="AGV control" hint="fused hub · single websocket · robotctl">
         <div className="row between" style={{ gap: 18, flexWrap: 'wrap' }}>
           <div>
-            <p style={{ margin: '0 0 4px' }}>Drive the S200 with the teammate’s fleet console.</p>
+            <p style={{ margin: '0 0 4px' }}>Drive the S200 with the hub's AGV console — same site, no second server.</p>
             <p className="faint" style={{ margin: 0, fontSize: 12 }}>
               {live
-                ? `${live.id} · ${live.online ? 'online' : 'offline'} · ${live.battery_v != null ? `${live.battery_v.toFixed(1)} V` : 'battery —'} · transport ${live.transport ?? 'none'}`
+                ? `${live.id} · ${live.online ? 'online' : 'offline'} · ${live.battery_v != null ? `${live.battery_v.toFixed(1)} V` : 'battery —'} · transport ${live.transport ?? 'none'}${live.nav_mode && live.nav_mode !== 'off' ? ` · nav ${live.nav_mode}` : ''}${live.odom ? ` · odom (${live.odom[0].toFixed(2)}, ${live.odom[1].toFixed(2)}) m` : ''}`
                 : 'Waiting for the pull-mode AGV server…'}
             </p>
           </div>
-          <a
-            className="btn primary"
-            href={`http://${window.location.hostname}:8090/`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open AGV control ↗
-          </a>
+          <div className="row" style={{ gap: 8 }}>
+            <Link className="btn primary" to="/drive">🎮 AGV Drive Console</Link>
+            <a
+              className="btn"
+              href="/agv/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Console ↗
+            </a>
+          </div>
         </div>
       </Card>
 
+      <Card title={`Live LiDAR${live ? ` · ${live.id}` : ''}`} hint="GET /api/robot/:id/scan · polar sweep">
+        <LidarSweep robotId={live?.id ?? 's2000-1'} />
+      </Card>
+
       <div className="stale-warning">
-        Records below are mock/last-known. Live AGV driving is handled by the teammate’s pull-mode console above.
+        The AGV badge in the topbar is LIVE whenever this page's fleet/lidar feeds answer (single fused hub).
+        Records below are mock/last-known planning data; live AGV driving is the console above.
       </div>
 
       <div className="grid split">

@@ -133,6 +133,7 @@ export function Packing() {
       placementSeq: twinPlacement.seq,
       skuId: twinPlacement.skuId,
       reference: twinReference,
+      payload_radius_m: Math.max(twinPlacement.w, twinPlacement.d, twinPlacement.h) / 2000,
     }
     localStorage.setItem(ARM_TARGET_STORAGE_KEY, JSON.stringify(payload))
     navigate('/arm')

@@ -1,0 +1,14 @@
+✔ demo targets use the front-face centre for every cage rotation (15.052669ms)
+✔ box centre reference and taught width are honoured (0.358361ms)
+✔ packing width, not taught width, centres the packing bin (28.588801ms)
+✔ out-of-bounds boxes and outside targets are rejected; opening-plane targets are allowed (0.278745ms)
+✔ level attitude follows the cage depth, including wrapped yaw (0.374829ms)
+✔ actual demo and general packing fit the recorded hardware dimensions (7.903138ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 82.194229

@@ -70,7 +70,7 @@ export function Zones() {
         })}
       </div>
       <p className="faint" style={{ fontSize: 12, margin: 0 }}>
-        Mock — the real command is POST /api/zones/:id/reoptimise, executed by the Django backend using the
+        Mock — the real command is POST /api/zones/:id/reoptimise, executed by the FastAPI backend using the
         server-side packing engine.
       </p>
     </>

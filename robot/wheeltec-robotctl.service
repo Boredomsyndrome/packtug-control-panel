@@ -1,0 +1,30 @@
+# OPTIONAL — the zero-install default is `bash robotctl/run_client.sh`
+# (tmux or desktop autostart, see ROBOT_SETUP.md §5); nothing needs to be
+# installed on the robot. This unit is for when you want boot-time start
+# without touching the desktop, and accept writing 2 files to /etc.
+# /etc/systemd/system/wheeltec-robotctl.service
+# The robot client: pure outbound ws/http (pull-mode). Enable ONLY after the
+# base driver (turn_on_wheeltec_robot) works and the env file is set.
+#
+#   sudo cp robotctl/wheeltec-robotctl.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wheeltec-robotctl
+#   journalctl -u wheeltec-robotctl -f
+
+[Unit]
+Description=wheeltec-webctl robot client (pull-mode, outbound only)
+After=network-online.target wheeltec-ros.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wheeltec                       # match your SBC user
+EnvironmentFile=/etc/wheeltec-robotctl.env
+ExecStartPre=/bin/sleep 20          # let the ROS2 base driver come up first
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && [ -f ~/wheeltec_robot/install/setup.bash ] && source ~/wheeltec_robot/install/setup.bash; exec python3 /home/wheeltec/wheeltec-webctl/robotctl/client.py'
+Restart=always
+RestartSec=3
+# safety net: systemd restarts this; the client itself zeroes velocity on exit
+
+[Install]
+WantedBy=multi-user.target

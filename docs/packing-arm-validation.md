@@ -72,7 +72,7 @@ node --test tests/digitalTwin.test.mjs
 python -m unittest discover -s tests -p 'test_*.py'
 npm run typecheck
 npm run build
-python -m py_compile server/arm_server.py server/camera_stream.py
+python -m py_compile backend/arm_server.py robot/camera_stream.py
 ```
 
 These verify software conventions and recorded sizes, not physical measurements

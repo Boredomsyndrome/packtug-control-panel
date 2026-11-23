@@ -2,10 +2,10 @@
  * Reserved integration surface.
  *
  * The prototype runs entirely on mock data, but every value that must later
- * come from the Django backend or the WHEELTEC S200 / ROS 2 stack is listed
+ * come from the FastAPI backend or the WHEELTEC S200 / ROS 2 stack is listed
  * here so the wiring point is explicit and stable.
  *
- * ── REST (Django REST Framework, PostgreSQL) ───────────────────────────────
+ * ── REST (FastAPI hub) ───────────────────────────────
  *   GET    /api/health                     -> { status, build, time }
  *   GET    /api/agvs                       -> Agv[]
  *   GET    /api/agvs/:id                   -> Agv
@@ -22,7 +22,7 @@
  *   GET    /api/metrics/throughput         -> ThroughputPoint[]
  *   POST   /api/auth/login                 -> { token, user }
  *
- * ── Arm bridge (Niryo Ned1, `server/arm_server.py`) ─────────────────────────
+ * ── Arm bridge (Niryo Ned1, `backend/arm_server.py`) ─────────────────────────
  *   GET    /api/arm/status                 -> ArmStatus (cached + live refresh)
  *   POST   /api/arm/connect                -> ArmStatus  { ip }
  *   POST   /api/arm/disconnect             -> ArmStatus

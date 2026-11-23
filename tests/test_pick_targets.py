@@ -4,7 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
-from server.arm_server import (
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "backend"))
+
+from arm_server import (
     ArmController, CageIn, ExecutePickIn, PickPathIn, PoseIn,
     _cage_to_world, _verify_level_attitude, _verify_placement_attitude,
     decode_hardware_faults, plan_pick_path,
@@ -74,7 +77,7 @@ class PickTargetTests(unittest.TestCase):
                 return arm.snapshot()
             arm.move_pose_deg = Mock(side_effect=move)
             retract = ([{'kind': 'start', 'pose': start.model_dump()}], [], True, [])
-            with patch('server.arm_server._plan_retract_path', return_value=retract):
+            with patch('arm_server._plan_retract_path', return_value=retract):
                 result = arm.execute_pick_place(ExecutePickIn(
                     target=target, home=start, cage=cage, return_home_after=True,
                 ))

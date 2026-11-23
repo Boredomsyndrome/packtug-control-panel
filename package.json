@@ -6,7 +6,7 @@
   "description": "PackTug AIoT Smart Roll-Cage System - operator control panel (prototype)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && cd agv-console && npm run build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit"
   },

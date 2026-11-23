@@ -8,8 +8,9 @@ export default defineConfig({
     port: 5173,
     host: true,
     proxy: {
-      // arm_server.py (FastAPI) on the same Mac
-      '/api': 'http://127.0.0.1:8020',
+      // v3.7 fused hub: ONE origin serves panel + AGV bridge + robot API.
+      // (Standalone dev against the old two-process layout: point at :8020.)
+      '/api': 'http://127.0.0.1:8090',
     },
   },
 })

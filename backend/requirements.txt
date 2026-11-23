@@ -1,0 +1,14 @@
+# Fused server (v3.8, 2026-11-21): ONE FastAPI app serves robot plane +
+# arm/vision bridge; WebSockets are raw-ASGI handlers. Django/DRF/
+# WhiteNoise/gunicorn removed — do not re-add.
+# Verified suite passed against (derive from `pip freeze`, cross-check imports first).
+# Robot side: NOTHING to install (see robotctl/requirements.txt).
+python-dotenv==1.2.4
+uvicorn[standard]==0.54.0
+
+# --- robot plane + arm/vision bridge (backend/arm_server.py) ---
+fastapi>=0.115
+pydantic>=2.9
+numpy>=2.0
+opencv-contrib-python-headless>=4.9
+# pyniryo==1.1.2 --no-deps  # ONLY where the real Ned1 is reachable

@@ -1,0 +1,31 @@
+# packtug webctl hub — containerized deployment (runbook: docker.md)
+#
+# Server-only stack. The robot side (robotctl client) is NEVER containerized —
+# it needs the native ROS environment on the robot.
+#
+#   docker compose up -d --build     # build + start
+#   docker compose logs -f webctl    # logs (robot.api/hub/ws INFO visible)
+#   docker compose down              # stop (volume + data survive)
+
+services:
+  webctl:
+    build: .
+    image: packtug-webctl:v4.1.0
+    container_name: webctl
+    restart: unless-stopped
+    ports:
+      - "8090:8090"          # LAN-facing for robot clients; do NOT port-forward this
+    volumes:
+      - webctl-data:/data    # waypoints.json + maps/ (named volume survives rebuilds)
+    env_file: .env.server    # WEBCTL_ROBOTS tokens etc. — gitignored, chmod 600
+    # healthcheck + LABELs live in the Dockerfile; compose inherits them.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  webctl-data:
+    name: webctl-data   # pin the name: no compose project-prefix; holds the
+                        # migrated waypoints.json + maps/ from the host-native era

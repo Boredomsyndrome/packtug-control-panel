@@ -89,7 +89,7 @@ export function Missions() {
         {closed.length === 0 ? (
           <Empty>No completed missions yet.</Empty>
         ) : (
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>Mission</th>
@@ -119,6 +119,7 @@ export function Missions() {
               ))}
             </tbody>
           </table>
+        </div>
         )}
       </Card>
     </>

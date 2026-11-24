@@ -81,7 +81,7 @@ export function Fleet() {
             <Link className="btn primary" to="/drive">🎮 AGV Drive Console</Link>
             <a
               className="btn"
-              href="/agv/"
+              href="/drive"
               target="_blank"
               rel="noreferrer"
             >
@@ -165,7 +165,7 @@ export function Fleet() {
       </div>
 
       <Card title="Roll cages" hint={`${cages.filter((c) => c.state !== 'empty').length} of ${cages.length} loaded`}>
-        <table className="data">
+        <div className="table-scroll"><table className="data">
           <thead>
             <tr>
               <th>Cage</th>
@@ -208,6 +208,7 @@ export function Fleet() {
             })}
           </tbody>
         </table>
+        </div>
       </Card>
     </>
   )

@@ -2354,7 +2354,7 @@ export function Arm() {
               <span style={{ color: 'var(--red)', fontSize: 12 }}>{execError}</span>
             )}
             {execResult && (
-              <table className="data">
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Step</th>
@@ -2387,6 +2387,7 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
+        </div>
             )}
             {execResult && execResult.plan && (
               <div className="stack" style={{ gap: 4 }}>
@@ -2433,7 +2434,7 @@ export function Arm() {
                   {pathResult.warnings.join(' · ')}
                 </span>
               )}
-              <table className="data">
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Point</th>
@@ -2471,7 +2472,8 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
-              <table className="data">
+        </div>
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Segment</th>
@@ -2505,6 +2507,7 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
+        </div>
             </div>
           )}
         </div>
@@ -2891,7 +2894,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {poses.length === 0 ? (
             <div className="empty">No saved poses yet.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -2939,6 +2942,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
@@ -3067,7 +3071,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {draftSteps.length === 0 ? (
             <div className="empty">Draft is empty.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th style={{ width: 60 }}>#</th>
@@ -3109,6 +3113,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <div className="nav-section" style={{ padding: '10px 0 4px' }}>
@@ -3117,7 +3122,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {sequences.length === 0 ? (
             <div className="empty">No saved sequences yet.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -3169,6 +3174,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
@@ -3203,7 +3209,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           </div>
         }
       >
-        <table className="data" style={{ display: controlMode === 'joint' ? undefined : 'none' }}>
+        <div className="table-scroll"><table className="data" style={{ display: controlMode === 'joint' ? undefined : 'none' }}>
           <thead>
             <tr>
               <th>Joint</th>
@@ -3277,6 +3283,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
             })}
           </tbody>
         </table>
+        </div>
         {controlMode === 'linear' && (
           <div className="stack" style={{ gap: 14 }}>
             <div className="grid cols-2" style={{ gap: 20 }}>

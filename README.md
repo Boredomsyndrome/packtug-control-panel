@@ -29,21 +29,22 @@ robot/       THE ROBOT (ships as a unit to ~/robotctl/ on the Jetson)
 ```
 
 Everything else: `src/` + `index.html` = panel SPA (React+TS, builds to
-`dist/`), `agv-console/` = AGV console SPA (builds to `dist/agv/`),
-`deploy/Caddyfile.example` = optional HTTPS front, `docs/` guides + API +
+`dist/` + the AGV drive console inlined as a page (`src/pages/agv/`, route
+`/drive` — the standalone `agv-console/` SPA merged into the panel), `docs/` guides + API +
 legacy/MERGE archives, `tools/` deploy + test harnesses (server-host side).
+HTTPS front: see `docs/ACCESS.md` (Caddy lives outside this repo).
 
 ## Architecture (one server, one port, one websocket to the robot)
 
 ```
  browser ─────────────── http://<hub>:8090 ────────────────────────┐
-   │ /            panel SPA (React+TS)  ·  /agv/  AGV console     │
+   │ /            panel SPA (React+TS) incl. AGV console (/drive) │
    │ /api/robot*  /ws/cam (browser viewer)                         │
    │ /api/arm* /api/camera* /api/vision* /api/vehicle* /api/health │
    ▼                                                               │
  ONE uvicorn process :8090  (flock = single owner, all FastAPI)    │
    ├─ robot plane (backend/robot) — hub mailbox, estop, clamps,    │
-   │   maps, scan ingest, /agv/ + panel SPA static serving         │
+   │   maps, scan ingest, panel SPA static serving                 │
    └─ arm bridge (backend/arm_server.py create_app, mounted        │
       in-process for its /api/* prefixes — mock or real Ned1)      │
         ▲                                                          │
@@ -63,8 +64,7 @@ trust (LAN/VPN only, never internet-exposed) + per-robot token.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt
-npm ci && npm run build                     # panel SPA  -> dist/
-cd agv-console && npm ci && npm run build   # AGV console -> dist/agv/
+npm ci && npm run build                     # panel SPA -> dist/ (incl. AGV console)
 cp .env.example .env                        # WEBCTL_ROBOTS=id:token
 set -a; . ./.env; bash backend/run_server.sh 0.0.0.0 8090
 ```
@@ -106,4 +106,4 @@ the same folder (`setup_camera_service.sh`, `setup_arm_link.sh`, …).
 | bridge tests | `.venv/bin/python -m pytest tests -q` |
 | frontend logic tests | `node --test tests/*.test.mjs` |
 | navctl param render sim | `bash tools/sim_navctl_render.sh` |
-| panel + console build | `npm run build` at repo root and in `agv-console/` |
+| panel + drive console build | `npm run build` at repo root |

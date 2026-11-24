@@ -300,7 +300,7 @@ export function Packing() {
                 }
               >
                 <div style={{ maxHeight: 360, overflow: 'auto' }}>
-                  <table className="data">
+                  <div className="table-scroll"><table className="data">
                     <thead>
                       <tr>
                         <th style={{ width: 42 }}>#</th>
@@ -370,6 +370,7 @@ export function Packing() {
                       })}
                     </tbody>
                   </table>
+        </div>
                 </div>
               </Card>
 

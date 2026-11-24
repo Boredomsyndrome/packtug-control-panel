@@ -180,7 +180,7 @@ export function Goods() {
       )}
 
       <Card title="Goods catalogue" hint={`${skus.length} items`}>
-        <table className="data">
+        <div className="table-scroll"><table className="data">
           <thead>
             <tr>
               <th>SKU</th>
@@ -230,6 +230,7 @@ export function Goods() {
             )}
           </tbody>
         </table>
+        </div>
       </Card>
     </>
   )

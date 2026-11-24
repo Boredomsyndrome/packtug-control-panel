@@ -21,7 +21,7 @@ include the client at all).
 - Docker Engine + Docker Compose v2 (`docker compose version`)
 - This repo checked out on the server at the tag/branch you want to deploy
 - `dist/` is committed, so **no Node build is needed** for a stock deploy.
-  Only when the frontend changes: `cd agv-console && npm ci && npm run build`
+  Only when the frontend changes: `npm run build` (repo root)
 
 ## 2. Configure `.env.server`
 
@@ -68,7 +68,7 @@ docker inspect --format '{{.State.Health.Status}}' webctl
 # healthy        (the image HEALTHCHECK probes /api/health)
 ```
 
-Then open `http://<server-lan-ip>:8090/` (hub index), `/agv/` (robot console),
+Then open `http://<server-lan-ip>:8090/` (hub index), `/drive` (AGV console),
 `/panel/` (arm/vision panel) from a LAN machine.
 
 ## 5. Environment variables

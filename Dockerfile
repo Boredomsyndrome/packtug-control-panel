@@ -17,7 +17,7 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install -r /app/backend/requirements.txt
 
 # the app: ONE FastAPI backend (robot plane + arm/vision bridge) + BUILT
-# frontend (dist/ is gitignored — run both npm builds before docker build;
+# frontend (dist/ is gitignored — run `npm run build` before docker build;
 # see docker.md). robot/ is NOT in the image: the robot is never containerized.
 COPY VERSION /app/VERSION
 COPY backend/ /app/backend/

@@ -61,7 +61,7 @@ export function Integration() {
       </div>
 
       <Card title="REST endpoints" hint="arm/camera/vehicle status live; panel business APIs still mock">
-        <table className="data">
+        <div className="table-scroll"><table className="data">
           <thead>
             <tr>
               <th style={{ width: 80 }}>Method</th>
@@ -91,11 +91,12 @@ export function Integration() {
             ))}
           </tbody>
         </table>
+        </div>
       </Card>
 
       <div className="grid split">
         <Card title="ROS 2 topics" hint="wheeltec_ros2 / turn_on_wheeltec_robot stack">
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>Topic</th>
@@ -115,6 +116,7 @@ export function Integration() {
               ))}
             </tbody>
           </table>
+        </div>
         </Card>
 
         <Card title="Robot bringup" hint="on the S200 (ROS 2 Humble)">

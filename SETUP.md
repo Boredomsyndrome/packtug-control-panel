@@ -66,10 +66,6 @@ bash tools/prod_smoke_test.sh        # optional: production launcher 8/8
 
 ### 1.4 Decide the shared network, note the server IP
 
-* **Own router at school (the demo plan):** [`SCHOOL_SETUP.md`](SCHOOL_SETUP.md)
-  — WAN port stays empty forever, one DHCP reservation for the laptop
-  (`192.168.50.50` = `WEBCTL_SERVER`), robots join `WT-FLEET`; pre-configure
-  everything at home on that same router and school day is plug-and-play.
 * **Laptop hotspot (backup):** turn it on; robots join it like any WiFi;
   server address is `http://10.42.0.1:8000` (KDE/other hotspots: check `ip a`).
 * **Router LAN (home wifi):** give the laptop a **DHCP reservation** in the router

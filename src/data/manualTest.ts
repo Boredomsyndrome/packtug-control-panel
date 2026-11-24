@@ -24,12 +24,12 @@ function placement(
 }
 
 const placements: Placement[] = [
-  placement(1, 'TEST-BOX-B', 20, 174, 0),
-  placement(2, 'TEST-BOX-B', 20, 116, 0),
-  placement(3, 'TEST-BOX-A', 20, 58, 0),
-  placement(4, 'TEST-BOX-A', 20, 1, 0),
-  placement(5, 'TEST-BOX-C', 280, 174, 0),
-  placement(6, 'DEMO-BOX', 329, 1, 0),
+  placement(1, 'TEST-BOX-B', 20, 169, 0),
+  placement(2, 'TEST-BOX-B', 20, 112, 0),
+  placement(3, 'TEST-BOX-A', 20, 56, 0),
+  placement(4, 'TEST-BOX-A', 20, 0, 0),
+  placement(5, 'TEST-BOX-C', 260, 169, 0),
+  placement(6, 'DEMO-BOX', 329, 81, 0),
 ]
 
 const usedVolume = placements.reduce((sum, p) => sum + p.w * p.d * p.h, 0)

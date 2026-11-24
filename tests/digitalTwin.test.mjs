@@ -110,10 +110,10 @@ test('manual physical layout keeps every grip opening on the front face', () => 
   assert.equal(MANUAL_TEST_PLAN.itemCount, 6)
   const placements = MANUAL_TEST_PLAN.cages[0].placements
   const expected = new Map([
-    ['TEST-BOX-B', [[20, 174, 0], [20, 116, 0]]],
-    ['TEST-BOX-C', [[280, 174, 0]]],
-    ['TEST-BOX-A', [[20, 58, 0], [20, 1, 0]]],
-    ['DEMO-BOX', [[329, 1, 0]]],
+    ['TEST-BOX-B', [[20, 169, 0], [20, 112, 0]]],
+    ['TEST-BOX-C', [[260, 169, 0]]],
+    ['TEST-BOX-A', [[20, 56, 0], [20, 0, 0]]],
+    ['DEMO-BOX', [[329, 81, 0]]],
   ])
   for (const p of placements) {
     const sku = skuMap[p.skuId]

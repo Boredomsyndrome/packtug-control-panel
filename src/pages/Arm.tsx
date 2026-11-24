@@ -297,7 +297,9 @@ export function Arm() {
   const [pathPending, setPathPending] = useState(false)
   const [pathError, setPathError] = useState<string | null>(null)
   const [twinTargetNote, setTwinTargetNote] = useState<string | null>(null)
-  const [execRetract, setExecRetract] = useState(0.08)
+  const [execRetract, setExecRetract] = useState(0.05)
+  const [pickupLift, setPickupLift] = useState(0.02)
+  const [placementLift, setPlacementLift] = useState(0.10)
   const [releaseDrop, setReleaseDrop] = useState(0.01)
   const [returnHomeAfter, setReturnHomeAfter] = useState(false)
   const [execPending, setExecPending] = useState(false)
@@ -368,7 +370,7 @@ export function Arm() {
         z: target.z,
         ...placementOrientation(pathCage),
       }))
-      setPathPayloadRadius(target.payload_radius_m ?? 0)
+      setPathPayloadRadius(0)
       if (target.payload_length_m !== undefined) {
         setExecRetract(Math.min(0.40, target.payload_length_m + 0.01))
       }
@@ -490,8 +492,8 @@ export function Arm() {
       const zUp = held.has('q')
       const zDown = held.has('e')
       keyInputRef.current = {
-        x: axis('d', 'a'),
-        y: axis('w', 's'),
+        x: axis('w', 's'),
+        y: axis('a', 'd'),
         z: (zUp ? 1 : 0) - (zDown ? 1 : 0),
         roll: axis('l', 'j'),
         pitch: axis('i', 'k'),
@@ -1211,7 +1213,7 @@ export function Arm() {
         '4. reorient at the outer retract point (not near the base),\n' +
         '5. use the retract point as a safe transit and follow the checked path to the target,\n' +
         '6. verify the level/cage attitude before opening,\n' +
-        '7. lower 1 cm after release and back out of the cage,\n' +
+        '7. lower by Release drop after release and back out of the cage,\n' +
         '8. optionally finish with Home / Fold.\n\n' +
         'Keep the workspace clear and a hand on the power switch. Continue?',
     )
@@ -1237,6 +1239,8 @@ export function Arm() {
         cage: pathCage,
         ...(corners ? { corners, ignored_corners: ignored } : {}),
         speed_percent: status?.max_velocity ?? 5,
+        placement_lift_m: placementLift,
+        pickup_lift_m: pickupLift,
         release_drop_m: releaseDrop,
         return_home_after: false,
       })
@@ -2056,6 +2060,12 @@ export function Arm() {
               step={0.005}
               onChange={setTargetZOffset}
             />
+            <NumberField
+              label="Payload radius (m)"
+              value={pathPayloadRadius}
+              step={0.005}
+              onChange={setPathPayloadRadius}
+            />
             {useVia && (
               <button
                 className="btn sm"
@@ -2309,6 +2319,18 @@ export function Arm() {
                 value={execRetract}
                 step={0.01}
                 onChange={setExecRetract}
+              />
+              <NumberField
+                label="Pickup lift (m)"
+                value={pickupLift}
+                step={0.005}
+                onChange={setPickupLift}
+              />
+              <NumberField
+                label="Placement lift (m)"
+                value={placementLift}
+                step={0.005}
+                onChange={setPlacementLift}
               />
               <NumberField
                 label="Release drop (m)"

@@ -31,19 +31,19 @@ floor; `z = 0`.
 
 | Seq | Carton | X | Y | Z | Target front-face centre |
 |---:|---|---:|---:|---:|---|
-| 1 | B rear (left) | 20 | 174 | 0 | (120, 174, 80) |
-| 2 | B front of B rear | 20 | 116 | 0 | (120, 116, 80) |
-| 3 | A rear (left front group) | 20 | 58 | 0 | (120, 58, 60) |
-| 4 | A front | 20 | 1 | 0 | (120, 1, 60) |
-| 5 | C rear (right) | 280 | 174 | 0 | (405, 174, 80) |
-| 6 | DEMO-BOX front (right) | 329 | 1 | 0 | (405, 1, 55) |
+| 1 | B rear (left) | 20 | 169 | 0 | (120, 169, 80) |
+| 2 | B front of B rear | 20 | 112 | 0 | (120, 112, 80) |
+| 3 | A rear (left front group) | 20 | 56 | 0 | (120, 56, 60) |
+| 4 | A front | 20 | 0 | 0 | (120, 0, 60) |
+| 5 | C rear (right) | 260 | 169 | 0 | (385, 169, 80) |
+| 6 | DEMO-BOX front (right) | 329 | 81 | 0 | (405, 81, 55) |
 
-The left column is at X=20..220 and the right column at X=280..530, leaving
-20 mm inside each side of the 550 mm cage opening. The depth rows are separated
-by 2-3 mm; the rear row ends at Y=229, leaving 21 mm to the back wall. The front
-faces start at Y=1 mm so they are just inside the opening plane. This pulls the
-rear cartons about 16 mm outward compared with the first layout so the box back
-does not press the cage rear wall.
+The left column is at X=20..220 and the right column at X=260..510, leaving
+20 mm on the left side, 40 mm on the right side and 40 mm between columns
+inside the 550 mm cage opening. The rear row ends at Y=224, leaving 26 mm to
+the back wall. The left depth rows are compressed to 1-2 mm gaps: A front
+starts at the opening plane (Y=0), followed by A rear, B front and B rear.
+DEMO-BOX is moved in from the opening to Y=81, leaving 3 mm to C at Y=169.
 
 Execution order is rear-to-front, one carton at a time:
 

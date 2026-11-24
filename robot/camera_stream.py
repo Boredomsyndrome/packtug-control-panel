@@ -134,7 +134,7 @@ class CameraProcess:
         if mode == "rgb":
             args += ["enable_color:=true", "enable_depth:=false"]
         else:
-            args += ["enable_color:=false", "enable_depth:=true"]
+            args += ["enable_color:=false", "enable_depth:=true", "initial_reset:=true"]
         return "source /opt/ros/humble/setup.bash; exec " + " ".join(shlex.quote(a) for a in args)
 
     def start(self, mode: str) -> None:

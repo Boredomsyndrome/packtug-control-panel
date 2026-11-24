@@ -11,7 +11,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "backend"))
 
 from arm_server import (
     ArmController, CageIn, ExecutePickIn, PickPathIn, PoseIn,
-    _cage_to_world, _verify_level_attitude, _verify_placement_attitude,
+    _cage_target_issues, _cage_to_world, _path_cage_for_payload,
+    _verify_level_attitude, _verify_placement_attitude,
     decode_hardware_faults, plan_pick_path,
 )
 
@@ -91,6 +92,13 @@ class PickTargetTests(unittest.TestCase):
                 self.assertIn('release_drop', steps)
                 self.assertIn('retract:pre_gate', steps)
                 self.assertNotIn('return_home', steps)
+
+    def test_payload_radius_applies_to_target_wall_clearance(self):
+        cage = CageIn(x=.3, y=0, z=.02, width=.55, depth=.25, height=.4, clearance_m=.03)
+        world = _cage_to_world(cage, (.22, .12, .2))
+        target = {"x": world[0], "y": world[1], "z": world[2]}
+        self.assertEqual(_cage_target_issues(cage, target), [])
+        self.assertTrue(_cage_target_issues(_path_cage_for_payload(cage, .1), target))
 
     def test_requested_front_face_target_is_kept(self):
         cage = CageIn(x=.2, y=-.1, z=0)

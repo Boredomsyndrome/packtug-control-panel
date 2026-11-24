@@ -295,12 +295,16 @@ export interface ExecutePickRequest {
   gate_clearance_m?: number
   /** lower/raise the final placement point, metres */
   target_z_offset_m?: number
+  /** approach the target XY this much above the final height, metres */
+  placement_lift_m?: number
   /** swept radius of carried payload, metres */
   payload_radius_m?: number
   cage?: CageGeometry
   corners?: PickPathVec3[]
   ignored_corners?: number[]
   speed_percent?: number
+  /** vertical lift after closing the gripper, metres */
+  pickup_lift_m?: number
   /** lower the tool after release to clear the carton, metres */
   release_drop_m?: number
   return_home_after?: boolean

@@ -101,8 +101,17 @@ HOME_TRANSIT = "__home__"   # built-in safe transit: pyniryo move_to_home_pose()
 SEQUENCE_GRIPPER_OPEN = "__gripper_open__"
 SEQUENCE_GRIPPER_CLOSE = "__gripper_close__"
 SEQUENCE_ACTION_STEPS = {SEQUENCE_GRIPPER_OPEN, SEQUENCE_GRIPPER_CLOSE}
-CONNECTION_ERRORS = {"HostNotReachableException", "ClientNotConnectedException"}
+CONNECTION_ERRORS = {
+    "HostNotReachableException",
+    "ClientNotConnectedException",
+    "UnicodeDecodeError",
+    "ConnectionResetError",
+    "BrokenPipeError",
+    "TcpCommandException",
+    "ConnectionError",
+}
 READ_TIMEOUT_S = 5.0        # status/telemetry calls must not block forever
+HARDWARE_READ_TIMEOUT_S = 15.0
 MOTION_TIMEOUT_S = 120.0    # long moves at low speed
 TOOL_TIMEOUT_S = 15.0
 TOOL_EXTENSION_M = 0.10     # approximate gripper tip beyond the tool frame
@@ -427,12 +436,13 @@ class ExecutePickIn(BaseModel):
     target: PoseIn
     home: PoseIn | None = None
     home_lift_m: float = Field(default=0.08, ge=0.0, le=0.20)
-    retract_m: float = Field(default=0.08, ge=0.0, le=0.40)
+    retract_m: float = Field(default=0.05, ge=0.0, le=0.40)
     pickup_lift_m: float = Field(default=0.01, ge=0.0, le=0.05)
     fold_j2_to_min: bool = False
     approach_m: float = Field(default=0.05, ge=0.0, le=0.15)
     gate_clearance_m: float = Field(default=0.08, ge=0.02, le=0.30)
     target_z_offset_m: float = Field(default=0.0, ge=-0.05, le=0.05)
+    placement_lift_m: float = Field(default=0.10, ge=0.0, le=0.20)
     payload_radius_m: float = Field(default=0.0, ge=0.0, le=0.25)
     cage: CageIn = Field(default_factory=CageIn)
     corners: list[Vec3In] | None = None
@@ -539,6 +549,7 @@ class ArmController:
                 "limits_deg": JOINT_LIMITS_DEG,
                 "tool": self.tool,
                 "gripper": self.gripper,
+                "jog_control_enabled": self.jog_control_enabled,
                 "busy": self.busy,
                 "error": self.last_error,
                 "fault": self.fault,
@@ -623,12 +634,25 @@ class ArmController:
             if not force and time.monotonic() - self._hardware_checked_at < HARDWARE_REFRESH_S:
                 return
         try:
-            with self._socket_timeout(READ_TIMEOUT_S):
+            with self._socket_timeout(HARDWARE_READ_TIMEOUT_S):
                 hw = self._robot.get_hardware_status()
         except Exception as exc:
-            log.debug("hardware status read failed: %s", exc)
             with self._state:
                 self._hardware_checked_at = time.monotonic()
+            if type(exc).__name__ in {
+                "TimeoutError",
+                "TcpCommandException",
+                "UnicodeDecodeError",
+                "HostNotReachableException",
+                "ClientNotConnectedException",
+                "ConnectionResetError",
+                "BrokenPipeError",
+            }:
+                message = f"hardware status stream lost: {type(exc).__name__}: {exc}"
+                log.warning(message)
+                self._close_locked()
+                raise ConnectionError(message) from exc
+            log.debug("hardware status read failed: %s", exc)
             return
         self._store_hardware_locked(hw)
 
@@ -673,10 +697,14 @@ class ArmController:
                     with self._state:
                         self.last_error = None
                 except Exception as exc:  # keep serving the cached snapshot
+                    message = f"{type(exc).__name__}: {exc}"
                     with self._state:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        if type(exc).__name__ in CONNECTION_ERRORS:
-                            self.connected = False
+                        self.last_error = message
+                    if type(exc).__name__ in CONNECTION_ERRORS:
+                        log.warning("arm connection lost: %s", message)
+                        self._close_locked()
+                        with self._state:
+                            self.last_error = message
                 finally:
                     self._motion.release()
         return self.snapshot()
@@ -723,6 +751,9 @@ class ArmController:
                 tool_name = None
                 try:
                     robot.update_tool()
+                except Exception as exc:
+                    log.warning("tool refresh failed: %s", exc)
+                try:
                     tool_name = getattr(robot.get_current_tool_id(), "name", None)
                 except Exception as exc:
                     log.warning("tool detection failed: %s", exc)
@@ -971,8 +1002,20 @@ class ArmController:
                     self._robot.set_jog_control(False)
         except Exception as exc:
             log.warning("could not disable jog control: %s", exc)
-        finally:
+            with self._state:
+                self.last_error = f"could not leave jog control: {exc}"
+                if type(exc).__name__ in CONNECTION_ERRORS:
+                    self.connected = False
+            raise HTTPException(502, self.last_error) from exc
+        with self._state:
             self.jog_control_enabled = False
+
+    def _release_motion_controls(self) -> None:
+        self._stop_jog_stream()
+        try:
+            self._disable_jog_locked()
+        except Exception as exc:
+            log.warning("could not release motion controls: %s", exc)
 
     def _check_motion_locked(self, allow_jog: bool = False) -> None:
         with self._state:
@@ -1666,22 +1709,25 @@ class ArmController:
                         orientations.append(start_orientation)
                     fallback_error: Exception | None = None
                     for fallback_roll, fallback_pitch, fallback_yaw in orientations:
-                        try:
-                            with self._socket_timeout(READ_TIMEOUT_S):
-                                joints = self._robot.inverse_kinematics(
-                                    x,
-                                    y,
-                                    z,
-                                    math.radians(fallback_roll),
-                                    math.radians(fallback_pitch),
-                                    math.radians(fallback_yaw),
+                        for attempt in range(3):
+                            try:
+                                with self._socket_timeout(READ_TIMEOUT_S):
+                                    joints = self._robot.inverse_kinematics(
+                                        x,
+                                        y,
+                                        z,
+                                        math.radians(fallback_roll),
+                                        math.radians(fallback_pitch),
+                                        math.radians(fallback_yaw),
+                                    )
+                                target_deg = [math.degrees(float(v)) for v in joints]
+                                return self._move_locked(
+                                    target_deg, max_delta=MAX_POSE_DEG
                                 )
-                            target_deg = [math.degrees(float(v)) for v in joints]
-                            return self._move_locked(
-                                target_deg, max_delta=MAX_POSE_DEG
-                            )
-                        except Exception as fallback_exc:
-                            fallback_error = fallback_exc
+                            except Exception as fallback_exc:
+                                fallback_error = fallback_exc
+                                if attempt < 2:
+                                    time.sleep(0.25)
                     log.warning(
                         "joint-space pose fallback failed: %s", fallback_error
                     )
@@ -1753,7 +1799,9 @@ class ArmController:
             if payload.home is None:
                 raise HTTPException(409, "record the home pose before execution")
             # Reject an invalid placement before closing the gripper or moving.
-            target_issues = _cage_target_issues(cage, target)
+            target_issues = _cage_target_issues(
+                _path_cage_for_payload(cage, payload.payload_radius_m), target
+            )
             if target_issues:
                 return {
                     "ok": False,
@@ -2043,8 +2091,18 @@ class ArmController:
                     "error": "home-to-target path is blocked; arm stays at home",
                 }
 
+            placement_lift = float(payload.placement_lift_m)
             for point in plan["points"][1:]:
+                if point["kind"] == "target":
+                    # Handle the target separately: approach it high, then
+                    # descend vertically at the target XY.
+                    continue
                 pose = point["pose"]
+                if point["kind"] in ("pre_gate", "gate", "inside", "approach"):
+                    pose = {
+                        **pose,
+                        "z": min(MAX_POSE_Z_M, pose["z"] + placement_lift),
+                    }
                 self.move_pose_deg(
                     pose["x"],
                     pose["y"],
@@ -2057,9 +2115,25 @@ class ArmController:
                     {"step": f"move:{point['kind']}", "ok": True, "pose": pose}
                 )
 
-            # The low path can translate without actually completing the
-            # wrist yaw. Do one explicit full-pose alignment at the target,
-            # then verify it before release.
+            # Approach at the target XY 2 cm high, then descend vertically to
+            # the planned placement height.  The low path is kept clear of the
+            # table, while the release still happens at the exact target pose.
+            raised_target = {
+                **target,
+                "z": min(MAX_POSE_Z_M, target["z"] + placement_lift),
+            }
+            if raised_target["z"] - target["z"] > 1e-6:
+                self.move_pose_deg(
+                    raised_target["x"],
+                    raised_target["y"],
+                    raised_target["z"],
+                    raised_target["roll"],
+                    raised_target["pitch"],
+                    raised_target["yaw"],
+                )
+                steps.append(
+                    {"step": "move:target_high", "ok": True, "pose": raised_target}
+                )
             self.move_pose_deg(
                 target["x"],
                 target["y"],
@@ -2068,6 +2142,17 @@ class ArmController:
                 target["pitch"],
                 target["yaw"],
             )
+            if raised_target["z"] - target["z"] > 1e-6:
+                steps.append(
+                    {"step": "place_down", "ok": True, "pose": dict(target)}
+                )
+            # The native controller can report the final pitch a fraction high
+            # immediately after the vertical descent.  Let the readings settle
+            # and refresh once before applying the release tolerance.
+            if not self.mock:
+                time.sleep(PLACEMENT_SETTLE_S)
+                with self._socket_timeout(READ_TIMEOUT_S):
+                    self._read_locked()
             _verify_placement_attitude(
                 self.snapshot().get("pose"), target, stage="target release"
             )
@@ -2122,6 +2207,7 @@ class ArmController:
                     self.snapshot().get("pose"),
                     target,
                     stage=f"retract {point['kind']}",
+                    tolerance=RETRACT_LEVEL_TOL_DEG,
                 )
                 steps.append(
                     {"step": f"retract:{point['kind']}", "ok": True, "pose": pose}
@@ -2135,9 +2221,11 @@ class ArmController:
                 "plan": plan,
             }
         except HTTPException as exc:
+            self._release_motion_controls()
             return {"ok": False, "stage": "error", "steps": steps, "error": exc.detail}
         except Exception as exc:
             log.exception("pick/place execution failed")
+            self._release_motion_controls()
             with self._state:
                 error = self.fault or f"{type(exc).__name__}: {exc}"
             return {"ok": False, "stage": "error", "steps": steps, "error": error}
@@ -2572,7 +2660,10 @@ class ArmController:
                 return self.snapshot()
             try:
                 with self._socket_timeout(TOOL_TIMEOUT_S):
-                    self._robot.update_tool()
+                    try:
+                        self._robot.update_tool()
+                    except Exception as exc:
+                        log.warning("tool refresh failed: %s", exc)
                     tool_name = getattr(self._robot.get_current_tool_id(), "name", None)
             except Exception as exc:
                 with self._state:
@@ -2728,6 +2819,30 @@ class ArmController:
                 raise HTTPException(404, f"pose not found: {name}")
             self._write_poses_locked(remaining)
         return {"poses": remaining}
+
+    def solve_ik(self, pose: dict[str, float]) -> dict[str, Any]:
+        with self._motion:
+            with self._state:
+                if not self.connected or self._robot is None:
+                    raise HTTPException(409, "arm is not connected")
+                if self.learning_mode:
+                    raise HTTPException(409, "motors are released")
+            try:
+                with self._socket_timeout(READ_TIMEOUT_S):
+                    joints = self._robot.inverse_kinematics(
+                        float(pose["x"]),
+                        float(pose["y"]),
+                        float(pose["z"]),
+                        math.radians(float(pose["roll"])),
+                        math.radians(float(pose["pitch"])),
+                        math.radians(float(pose["yaw"])),
+                    )
+            except Exception as exc:
+                raise HTTPException(422, f"no reachable IK: {exc}") from exc
+            return {
+                "ok": True,
+                "joints_deg": [round(math.degrees(float(value)), 3) for value in joints],
+            }
 
     def apply_pose(self, name: str, linear: bool = True) -> dict[str, Any]:
         with self._poses_lock:
@@ -3377,6 +3492,76 @@ def _save_hand_eye_calibration(data: dict[str, Any]) -> None:
     tmp.replace(HAND_EYE_CALIBRATION_FILE)
 
 
+def _solve_hand_eye_numpy(
+    gripper_rotations: list[np.ndarray],
+    gripper_translations: list[np.ndarray],
+    target_rotations: list[np.ndarray],
+    target_translations: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    import cv2
+
+    count = len(gripper_rotations)
+    if count < 3:
+        raise HTTPException(422, "at least three hand-eye motion pairs are required")
+    gripper = [
+        np.block(
+            [
+                [np.asarray(rotation, dtype=np.float64), np.asarray(translation, dtype=np.float64).reshape(3, 1)],
+                [np.zeros((1, 3)), np.ones((1, 1))],
+            ]
+        )
+        for rotation, translation in zip(gripper_rotations, gripper_translations)
+    ]
+    target = [
+        np.block(
+            [
+                [np.asarray(rotation, dtype=np.float64), np.asarray(translation, dtype=np.float64).reshape(3, 1)],
+                [np.zeros((1, 3)), np.ones((1, 1))],
+            ]
+        )
+        for rotation, translation in zip(target_rotations, target_translations)
+    ]
+    cross_covariance = np.zeros((3, 3), dtype=np.float64)
+    translation_pairs: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for first in range(count):
+        for second in range(first + 1, count):
+            gripper_motion = np.linalg.inv(gripper[second]) @ gripper[first]
+            target_motion = target[second] @ np.linalg.inv(target[first])
+            gripper_axis = cv2.Rodrigues(gripper_motion[:3, :3])[0].reshape(3)
+            target_axis = cv2.Rodrigues(target_motion[:3, :3])[0].reshape(3)
+            if np.linalg.norm(gripper_axis) < np.radians(2.0) or np.linalg.norm(
+                target_axis
+            ) < np.radians(2.0):
+                continue
+            cross_covariance += np.outer(target_axis, gripper_axis)
+            translation_pairs.append(
+                (gripper_motion[:3, :3], target_motion[:3, 3], gripper_motion[:3, 3])
+            )
+    if len(translation_pairs) < 3:
+        raise HTTPException(
+            422, "hand-eye samples need at least three non-zero rotation differences"
+        )
+    left, _, right = np.linalg.svd(cross_covariance)
+    correction = np.diag(
+        [1.0, 1.0, np.sign(np.linalg.det(right.T @ left.T))]
+    )
+    rotation = right.T @ correction @ left.T
+    if not np.all(np.isfinite(rotation)) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-6
+    ):
+        raise HTTPException(422, "hand-eye rotation solve did not produce a finite transform")
+    rows = np.vstack([pair[0] - np.eye(3) for pair in translation_pairs])
+    if np.linalg.matrix_rank(rows) < 3:
+        raise HTTPException(422, "hand-eye samples do not constrain translation")
+    values = np.hstack(
+        [rotation @ target_t - gripper_t for _, target_t, gripper_t in translation_pairs]
+    )
+    translation = np.linalg.lstsq(rows, values, rcond=None)[0]
+    if not np.all(np.isfinite(translation)):
+        raise HTTPException(422, "hand-eye translation solve did not produce a finite transform")
+    return rotation, translation
+
+
 def _solve_hand_eye(samples: list[dict[str, Any]]) -> dict[str, Any]:
     import cv2
 
@@ -3397,20 +3582,28 @@ def _solve_hand_eye(samples: list[dict[str, Any]]) -> dict[str, Any]:
         target_translations.append(
             np.asarray(sample["camera_tvec"], dtype=np.float64).reshape(3, 1)
         )
-    camera_to_tool_rotation, camera_to_tool_translation = cv2.calibrateHandEye(
-        gripper_rotations,
-        gripper_translations,
-        target_rotations,
-        target_translations,
-        method=cv2.CALIB_HAND_EYE_PARK,
-    )
+    if hasattr(cv2, "calibrateHandEye"):
+        camera_to_tool_rotation, camera_to_tool_translation = cv2.calibrateHandEye(
+            gripper_rotations,
+            gripper_translations,
+            target_rotations,
+            target_translations,
+            method=cv2.CALIB_HAND_EYE_PARK,
+        )
+    else:
+        camera_to_tool_rotation, camera_to_tool_translation = _solve_hand_eye_numpy(
+            gripper_rotations,
+            gripper_translations,
+            target_rotations,
+            target_translations,
+        )
     if not np.all(np.isfinite(camera_to_tool_rotation)) or not np.all(
         np.isfinite(camera_to_tool_translation)
     ):
         raise HTTPException(422, "hand-eye calibration did not produce a finite transform")
     return {
-        "rotation": camera_to_tool_rotation.tolist(),
-        "translation": camera_to_tool_translation.reshape(3).tolist(),
+        "rotation": np.asarray(camera_to_tool_rotation).tolist(),
+        "translation": np.asarray(camera_to_tool_translation).reshape(3).tolist(),
     }
 
 
@@ -4149,8 +4342,10 @@ def _attitude_error_detail(
 
 
 LEVEL_ATTITUDE_TOL_DEG = 3.0
+RETRACT_LEVEL_TOL_DEG = 5.0
 PLACEMENT_LEVEL_TOL_DEG = 2.0
 PLACEMENT_YAW_TOL_DEG = 3.0
+PLACEMENT_SETTLE_S = 0.6
 
 
 def _verify_level_attitude(
@@ -4158,18 +4353,18 @@ def _verify_level_attitude(
     target: dict[str, float],
     *,
     stage: str = "outer retract",
+    tolerance: float = LEVEL_ATTITUDE_TOL_DEG,
 ) -> None:
     """Require a level tool outside the cage; yaw is aligned later."""
     errors = _attitude_errors(actual, target)
     if errors is None or any(
-        errors[key] > LEVEL_ATTITUDE_TOL_DEG for key in ("roll", "pitch")
+        errors[key] > tolerance for key in ("roll", "pitch")
     ):
         detail = _attitude_error_detail(actual, target, errors)
         raise HTTPException(
             409,
             f"{stage}: gripper is not level within "
-            f"{LEVEL_ATTITUDE_TOL_DEG:.0f} degrees ({detail}); "
-            "gripper remains closed",
+            f"{tolerance:.0f} degrees ({detail}); motion stopped",
         )
 
 
@@ -4240,7 +4435,8 @@ def plan_pick_path(
         and 0.0 <= target_local[1] <= d
         and 0.0 <= target_local[2] <= h
     )
-    target_issues = _cage_target_issues(cage, target)
+    path_cage = _path_cage_for_payload(cage, payload.payload_radius_m)
+    target_issues = _cage_target_issues(path_cage, target)
     if via is not None:
         via_local = _world_to_cage(cage, (via["x"], via["y"], via["z"]))
         via_inside = 0.0 < via_local[1] < d
@@ -4289,10 +4485,7 @@ def plan_pick_path(
     yaw = math.radians(cage.yaw)
     normal_out = (math.sin(yaw), -math.cos(yaw), 0.0)
     gate_local = (
-        min(
-            max(target_local[0], -w / 2.0 + margin + cage.clearance_m),
-            w / 2.0 - margin - cage.clearance_m,
-        ),
+        0.0,
         0.0,
         min(max(target_local[2], z_low), z_high),
     )
@@ -4339,7 +4532,14 @@ def plan_pick_path(
         waypoints.append(("gate", oriented(gate_xyz, target)))
     if via is not None and via_inside:
         waypoints.append(("via", via))
-    if approach_m > 1e-6:
+    entered_center = False
+    if target_inside and abs(target_local[0]) > 1e-6:
+        inside_center = _cage_to_world(
+            cage, (0.0, target_local[1], target_local[2])
+        )
+        waypoints.append(("inside", oriented(inside_center, target)))
+        entered_center = True
+    if approach_m > 1e-6 and not entered_center:
         waypoints.append(("approach", oriented(approach_xyz, target)))
     waypoints.append(("target", target))
 
@@ -4358,7 +4558,6 @@ def plan_pick_path(
             deduped.append((kind, pose))
     waypoints = deduped
 
-    path_cage = _path_cage_for_payload(cage, payload.payload_radius_m)
     frame_segments = _cage_frame_segments(path_cage)
     blocking = bool(target_issues)
     points: list[dict[str, Any]] = []
@@ -4841,6 +5040,10 @@ def create_app(controller: ArmController) -> FastAPI:
         )
         fit.update(meta)
         return {"ok": True, "cage": cage.model_dump(), "fit": fit}
+
+    @app.post("/api/arm/ik")
+    def arm_ik(body: PoseIn) -> dict[str, Any]:
+        return controller.solve_ik(body.model_dump())
 
     @app.post("/api/arm/pick_path")
     def arm_pick_path(body: PickPathIn) -> dict[str, Any]:

@@ -90,7 +90,7 @@ the same folder (`setup_camera_service.sh`, `setup_arm_link.sh`, …).
 
 ## Guides
 
-* `SETUP.md`, `ROBOT_SETUP.md`, `SCHOOL_SETUP.md` — deployment walkthroughs.
+* `SETUP.md`, `ROBOT_SETUP.md` — deployment walkthroughs.
 * `docs/API.md` — every endpoint + wire frames. `docs/NAV.md` — autonomy.
 * `AGENTS.md` — arm/vision operational notes (arm traffic, UGREEN link).
 * `robot/README.md` — what each robot file does.

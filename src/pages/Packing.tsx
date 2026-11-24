@@ -133,7 +133,9 @@ export function Packing() {
       placementSeq: twinPlacement.seq,
       skuId: twinPlacement.skuId,
       reference: twinReference,
-      payload_radius_m: Math.max(twinPlacement.w, twinPlacement.d, twinPlacement.h) / 2000,
+      payload_radius_m: plan?.payloadRadiusM ?? Math.max(twinPlacement.w, twinPlacement.d, twinPlacement.h) / 2000,
+      payload_length_m: Math.max(twinPlacement.w, twinPlacement.d, twinPlacement.h) / 1000,
+      ...(plan?.targetZOffsetM !== undefined ? { target_z_offset_m: plan.targetZOffsetM } : {}),
     }
     localStorage.setItem(ARM_TARGET_STORAGE_KEY, JSON.stringify(payload))
     navigate('/arm')
@@ -298,7 +300,7 @@ export function Packing() {
                 }
               >
                 <div style={{ maxHeight: 360, overflow: 'auto' }}>
-                  <table className="data">
+                  <div className="table-scroll"><table className="data">
                     <thead>
                       <tr>
                         <th style={{ width: 42 }}>#</th>
@@ -368,6 +370,7 @@ export function Packing() {
                       })}
                     </tbody>
                   </table>
+        </div>
                 </div>
               </Card>
 

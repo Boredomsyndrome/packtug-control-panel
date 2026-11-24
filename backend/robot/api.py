@@ -15,7 +15,7 @@ byte-compatible so neither the robot client nor the SPAs need changes.
       POST /api/robot/<id>/nav            nav action (docs/NAV.md)
       GET  /api/robot/<id>/maps/<f>       saved map artifact (.pgm/.yaml)
       GET  /cam/<id>                      MJPEG relay of the newest frame
-      /                                  panel SPA · /agv → console SPA
+      /                                  panel SPA (incl. AGV drive console, /drive)
 
     ROBOT plane (per-robot Basic-auth; robot is a PURE CLIENT):
       GET  /robotctl/<id>/cmd             long-poll effective command
@@ -519,11 +519,13 @@ async def spa(full_path: str, request: Request):
             return FileResponse(f, media_type=ctype or "application/octet-stream",
                                 filename=None, headers=headers)
 
-    agv = path == "agv" or path.startswith("agv/")
-    index = DIST / "agv" / "index.html" if agv else DIST / "index.html"
+    if path == "agv" or path.startswith("agv/"):
+        # the AGV console SPA merged into the panel (src/pages/agv/,
+        # route /drive) — old /agv/* bookmarks bounce there.
+        return RedirectResponse("/drive", status_code=302)
+    index = DIST / "index.html"
     if not index.exists():
-        hint = ("cd agv-console && npm ci && npm run build" if agv
-                else "npm run build")
+        hint = "npm run build"
         return StreamingResponse(
             iter([f"<h1>PackTug hub</h1><p>Frontend not built yet. Run "
                   f"<code>{hint}</code>.</p>"]),

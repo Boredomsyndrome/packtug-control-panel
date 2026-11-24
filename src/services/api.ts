@@ -210,6 +210,8 @@ export interface PickPathRequest {
   target: ArmPose
   approach_m?: number
   gate_clearance_m?: number
+  /** lower/raise the final placement point, metres */
+  target_z_offset_m?: number
   /** swept radius of carried payload, metres */
   payload_radius_m?: number
   cage?: CageGeometry
@@ -291,18 +293,24 @@ export interface ExecutePickRequest {
   fold_j2_to_min?: boolean
   approach_m?: number
   gate_clearance_m?: number
+  /** lower/raise the final placement point, metres */
+  target_z_offset_m?: number
   /** swept radius of carried payload, metres */
   payload_radius_m?: number
   cage?: CageGeometry
   corners?: PickPathVec3[]
   ignored_corners?: number[]
   speed_percent?: number
+  /** lower the tool after release to clear the carton, metres */
+  release_drop_m?: number
   return_home_after?: boolean
 }
 
 export interface ArmPosePreset {
   name: string
   joints_deg: number[]
+  /** TCP pose recorded with the joints; used to preserve position after calibration changes. */
+  pose?: ArmPose | null
   radius_m: number
   created_at: string | null
   updated_at: string | null
@@ -942,10 +950,18 @@ export const api = {
       const existing = mockPoses.find((p) => p.name === trimmed)
       if (existing) {
         existing.joints_deg = joints
+        existing.pose = { ...mockArm.pose }
         existing.updated_at = now
-        return { ...existing, joints_deg: [...existing.joints_deg] }
+        return { ...existing, joints_deg: [...existing.joints_deg], pose: { ...existing.pose } }
       }
-      const pose: ArmPosePreset = { name: trimmed, joints_deg: joints, radius_m: 0, created_at: now, updated_at: now }
+      const pose: ArmPosePreset = {
+        name: trimmed,
+        joints_deg: joints,
+        pose: { ...mockArm.pose },
+        radius_m: 0,
+        created_at: now,
+        updated_at: now,
+      }
       mockPoses.push(pose)
       return { ...pose, joints_deg: [...pose.joints_deg] }
     }
@@ -976,6 +992,7 @@ export const api = {
       const pose = mockPoses.find((p) => p.name === name)
       if (!pose) throw new Error(`pose not found: ${name}`)
       mockArmMove(pose.joints_deg, 180)
+      if (pose.pose) mockArm.pose = { ...pose.pose }
       return mockArmStatus()
     }
     return jsonRequest<ArmStatus>(`/arm/poses/${encodeURIComponent(name)}/apply`, { linear })

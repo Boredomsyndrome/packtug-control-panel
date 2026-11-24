@@ -1,19 +1,75 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+/* AGV drive console — v4.1 merge: the standalone agv-console SPA ported into
+   the panel at /drive (was iframe-embedded from the hub-served /agv/).
+   Logic is a faithful port of agv-console/src/App.jsx; all styles are scoped
+   under .agv-embed (see agv.css) so nothing leaks into the panel theme.
+   Safety model unchanged: 10 Hz one-in-flight cmd heartbeat, hub-side
+   staleness zeroing, latched e-stop, blur/hide -> stop. */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import './agv.css'
 
-// Approx gauge for the S200's "24V" LiFePO4 pack (voltage-only estimate).
+/* ---------------- types (shape of /api/robot* frames) ---------------- */
+
+type DriveDir = 'fwd' | 'back' | 'left' | 'right'
+
+interface Applied { vx: number; wz: number }
+
+interface RobotStatus {
+  id: string
+  online: boolean
+  estop?: boolean
+  battery_v?: number | null
+  max_lin?: number
+  max_rot?: number
+  cmd_timeout?: number
+  scan?: unknown
+  applied?: Applied
+  watchdog_trips?: number
+  seq?: number
+  ros_topics?: { scan?: string[]; image?: string[] }
+  robot_scan_ok?: boolean
+  robot_cam_ok?: boolean
+}
+
+interface Waypoint { x: number; y: number; yaw: number }
+interface MapInfo { name: string; uploaded?: boolean; bytes?: number }
+
+interface NavBody {
+  ok?: boolean
+  mode?: string
+  nav?: {
+    pose?: number[]
+    route_total?: number
+    route_done?: number
+    error?: string
+  }
+  waypoints?: Record<string, Waypoint>
+  maps?: MapInfo[]
+}
+
+interface PackedScan {
+  ranges: number[]
+  amin: number
+  ainc: number
+  rmax: number
+}
+
+/* Approx gauge for the S200's "24V" LiFePO4 pack (voltage-only estimate). */
 const BATT_EMPTY = 21.0
 const BATT_FULL = 29.0
+const BATT_CHARGE_V = 22.4
+const BATT_WARN_V = 22.7
 
-const KEYMAP = {
+const KEYMAP: Record<string, DriveDir> = {
   KeyW: 'fwd', ArrowUp: 'fwd',
   KeyS: 'back', ArrowDown: 'back',
   KeyA: 'left', ArrowLeft: 'left',
   KeyD: 'right', ArrowRight: 'right',
 }
 
-// Human hint for "why is the sensor dead", assembled from the robot's own
-// telemetry (robot_*_ok) and its live ROS graph snapshot (ros_topics).
-function sensorHint(status, kind) {
+/* Human hint for "why is the sensor dead", assembled from the robot's own
+   telemetry (robot_*_ok) and its live ROS graph snapshot (ros_topics). */
+function sensorHint(status: RobotStatus | null, kind: 'scan' | 'image'): string {
   if (!status) return ''
   const topics = status.ros_topics || {}
   const list = kind === 'scan' ? topics.scan || [] : topics.image || []
@@ -27,7 +83,7 @@ function sensorHint(status, kind) {
   return `${kind}: topics visible on robot graph (${list.join(', ')}) but no data — node running? publisher QoS?`
 }
 
-async function post(url, body, ms = 8000) {
+async function post<T = Record<string, unknown>>(url: string, body?: unknown, ms = 8000): Promise<T> {
   // bounded like every other request: an un-timeouted POST over a flaky VPN
   // used to pin one of the browser's 6 connections per-host forever, which
   // starved the OTHER requests behind it (the "UI freezes" symptom).
@@ -37,23 +93,23 @@ async function post(url, body, ms = 8000) {
     body: JSON.stringify(body || {}),
     signal: AbortSignal.timeout(ms),
   })
-  return res.json().catch(() => ({ ok: res.ok }))
+  return res.json().catch(() => ({ ok: res.ok })) as T
 }
 
-async function fetchJson(url, ms = 4000) {
+async function fetchJson<T>(url: string, ms = 4000): Promise<T> {
   const res = await fetch(url, { signal: AbortSignal.timeout(ms) })
-  return res.json()
+  return res.json() as Promise<T>
 }
 
-// ---- polling WITHOUT connection pile-ups --------------------------------
-// setInterval + async fn = unbounded overlap: when the hub takes longer to
-// answer than the tick period (VPN latency), requests stack until the
-// browser's 6-per-host cap is reached and BUTTON POSTs queue behind them.
-// pollLoop is single-flight (skips a tick while one is in flight) and backs
-// off exponentially while errors persist, so a network stall degrades the
-// refresh rate instead of freezing the whole page.
-function pollLoop(fn, ms) {
-  let stop = false, busy = false, fail = 0, timer = null
+/* ---- polling WITHOUT connection pile-ups --------------------------------
+   setInterval + async fn = unbounded overlap: when the hub takes longer to
+   answer than the tick period (VPN latency), requests stack until the
+   browser's 6-per-host cap is reached and BUTTON POSTs queue behind them.
+   pollLoop is single-flight (skips a tick while one is in flight) and backs
+   off exponentially while errors persist, so a network stall degrades the
+   refresh rate instead of freezing the whole page. */
+function pollLoop(fn: () => Promise<void>, ms: number): () => void {
+  let stop = false, busy = false, fail = 0, timer: ReturnType<typeof setTimeout> | null = null
   const step = async () => {
     if (stop || busy) return
     busy = true
@@ -64,21 +120,28 @@ function pollLoop(fn, ms) {
     }
   }
   step()
-  return () => { stop = true; clearTimeout(timer) }
+  return () => { stop = true; if (timer) clearTimeout(timer) }
 }
 
-// Shared, single-flight /nav snapshot — ScanView (point overlay) and
-// NavPanel (buttons) used to poll the SAME url each second, doubling the
-// pressure; one poller feeds both, plus poke() for instant post-click refresh.
-const navStore = { robotId: null, data: null, subs: new Set(), loop: null }
-async function navFetchOnce(robotId) {
+/* Shared, single-flight /nav snapshot — ScanView (point overlay) and
+   NavPanel (buttons) used to poll the SAME url each second, doubling the
+   pressure; one poller feeds both, plus poke() for instant post-click refresh. */
+const navStore: {
+  robotId: string | null
+  data: NavBody | null
+  subs: Set<(d: NavBody) => void>
+  loop: null | (() => void)
+} = { robotId: null, data: null, subs: new Set(), loop: null }
+
+async function navFetchOnce(robotId: string): Promise<void> {
   try {
-    const d = await fetchJson(`/api/robot/${encodeURIComponent(robotId)}/nav`)
+    const d = await fetchJson<NavBody>(`/api/robot/${encodeURIComponent(robotId)}/nav`)
     if (d && d.ok) { navStore.data = d; navStore.subs.forEach((f) => f(d)) }
   } catch { /* hub blip: consumers keep the last snapshot */ }
 }
-function useNavData(robotId) {
-  const [data, setData] = useState(() =>
+
+function useNavData(robotId: string): NavBody | null {
+  const [data, setData] = useState<NavBody | null>(() =>
     (navStore.robotId === robotId ? navStore.data : null))
   useEffect(() => {
     navStore.subs.add(setData)
@@ -88,27 +151,29 @@ function useNavData(robotId) {
       navStore.data = null
       navStore.loop = pollLoop(() => navFetchOnce(robotId), 1000)
     } else if (navStore.data) setData(navStore.data)
-    return () => navStore.subs.delete(setData)
+    return () => { navStore.subs.delete(setData) }
   }, [robotId])
   return data
 }
 
-export default function App() {
-  const [robots, setRobots] = useState([])
-  const [sel, setSel] = useState(null)          // selected robot id
-  const [lin, setLin] = useState(0.3)           // m/s applied while forward/back held
-  const [rot, setRot] = useState(0.5)           // rad/s applied while turning held
+/* ---------------- main console ---------------- */
+
+export function AgvDriveApp() {
+  const [robots, setRobots] = useState<RobotStatus[]>([])
+  const [sel, setSel] = useState<string | null>(null)   // selected robot id
+  const [lin, setLin] = useState(0.3)                   // m/s applied while forward/back held
+  const [rot, setRot] = useState(0.5)                   // rad/s applied while turning held
   const [estopLatch, setEstopLatch] = useState(false)
 
-  const keysRef = useRef({ fwd: false, back: false, left: false, right: false })
+  const keysRef = useRef<Record<DriveDir, boolean>>({ fwd: false, back: false, left: false, right: false })
   const movingRef = useRef(false)
-  const selRef = useRef(null)
+  const selRef = useRef<string | null>(null)
   selRef.current = sel
 
   const status = robots.find((r) => r.id === sel) || null
   const maxLin = status?.max_lin ?? 0.5
   const maxRot = status?.max_rot ?? 0.7
-  const api = (path) => `/api/robot/${encodeURIComponent(sel)}${path}`
+  const api = (path: string) => `/api/robot/${encodeURIComponent(sel ?? '')}${path}`
 
   const axisValues = useCallback(() => {
     const k = keysRef.current
@@ -124,7 +189,7 @@ export default function App() {
     }
   }, [])
 
-  // Hard stop: clears held buttons/keys AND latched e-stop server-side.
+  /* Hard stop: clears held buttons/keys AND latched e-stop server-side. */
   const hardStop = useCallback(async () => {
     keysRef.current = { fwd: false, back: false, left: false, right: false }
     movingRef.current = false
@@ -134,7 +199,7 @@ export default function App() {
     }
   }, [])
 
-  const press = useCallback((dir, on) => {
+  const press = useCallback((dir: DriveDir, on: boolean) => {
     keysRef.current[dir] = on
   }, [])
 
@@ -146,34 +211,37 @@ export default function App() {
     setEstopLatch(true)
   }, [])
 
-  // ---- fleet status polling (1 Hz) ----
+  /* ---- fleet status polling (1 Hz) ---- */
   useEffect(() => pollLoop(async () => {
     try {
-      const d = await fetchJson('/api/robot')
+      const d = await fetchJson<{ robots?: RobotStatus[] }>('/api/robot')
       const list = d.robots || []
       setRobots(list)
       setSel((cur) => {
         if (cur && list.some((r) => r.id === cur)) return cur
         return list.length ? list[0].id : null
       })
-    } catch (e) {
+    } catch {
       setRobots((prev) => prev.map((r) => ({ ...r, online: false })))
-      throw e
+      throw new Error('hub unreachable')
     }
   }, 1000), [])
 
-  // keyboard driving (attached once; reads refs so it survives robot switches)
+  /* keyboard driving (attached while this page is mounted; reads refs so it
+     survives robot switches). WASD/arrows drive, Space = e-stop, E = hard
+     stop; typing in inputs never drives. Unmount (route change) tears the
+     listeners down — panel pages you navigate away from keep nothing hot. */
   useEffect(() => {
-    const typing = (e) => {
-      const t = e.target
-      return t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')
+    const typing = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      return !!t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')
     }
-    const down = (e) => {
+    const down = (e: KeyboardEvent) => {
       if (e.repeat) return
       if (typing(e)) return          // autonomy-panel text fields drive nothing
-      if (e.code === 'Space') { e.preventDefault(); doEstop(); return }
+      if (e.code === 'Space') { e.preventDefault(); void doEstop(); return }
       if (e.code === 'KeyE' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        e.preventDefault(); hardStop(); return
+        e.preventDefault(); void hardStop(); return
       }
       const dir = KEYMAP[e.code]
       if (dir && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -181,13 +249,13 @@ export default function App() {
         press(dir, true)
       }
     }
-    const up = (e) => {
+    const up = (e: KeyboardEvent) => {
       const dir = KEYMAP[e.code]
       if (dir) press(dir, false)
     }
     const clearAll = () => {
       keysRef.current = { fwd: false, back: false, left: false, right: false }
-      sendStop()
+      void sendStop()
     }
     const vis = () => { if (document.hidden) clearAll() }
     window.addEventListener('keydown', down)
@@ -202,9 +270,9 @@ export default function App() {
     }
   }, [press, sendStop, doEstop, hardStop])
 
-  // ---- 10 Hz command heartbeat while buttons/keys are held ----
-  // Commands only go to the SELECTED robot; offline robots get nothing
-  // (their hub-side staleness would zero the cmd anyway).
+  /* ---- 10 Hz command heartbeat while buttons/keys are held ----
+     Commands only go to the SELECTED robot; offline robots get nothing
+     (their hub-side staleness would zero the cmd anyway). */
   useEffect(() => {
     // one heartbeat POST in flight at a time: an unbounded 10 Hz pile-up on
     // a slow link was the worst connection-hogger on the page. If a cmd POST
@@ -227,12 +295,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [axisValues, sendStop, sel])
 
-  const pickRobot = (id) => {
+  const pickRobot = (id: string) => {
     if (id === sel) return
     keysRef.current = { fwd: false, back: false, left: false, right: false }
-    if (movingRef.current) {
+    if (movingRef.current && sel) {
       movingRef.current = false
-      post(`/api/robot/${encodeURIComponent(sel)}/stop`, {})  // stop the old one
+      void post(`/api/robot/${encodeURIComponent(sel)}/stop`, {})  // stop the old one
     }
     setSel(id)
   }
@@ -240,6 +308,8 @@ export default function App() {
   const battV = status?.battery_v
   const battPct = battV == null ? null :
     Math.max(0, Math.min(100, Math.round(((battV - BATT_EMPTY) / (BATT_FULL - BATT_EMPTY)) * 100)))
+  const battWarning: 'charge' | 'warn' | null = battV == null ? null :
+    battV <= BATT_CHARGE_V ? 'charge' : battV <= BATT_WARN_V ? 'warn' : null
 
   const connected = !!status?.online
 
@@ -248,114 +318,124 @@ export default function App() {
     { name: 'walk', lin: 0.30, rot: 0.50 },
     { name: '🐇 max', lin: maxLin, rot: maxRot },
   ]
-  const applyPreset = (p) => { setLin(p.lin); setRot(p.rot) }
+  const applyPreset = (p: { lin: number; rot: number }) => { setLin(p.lin); setRot(p.rot) }
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <h1>WHEELTEC <span>Fleet WebCtl</span></h1>
-        <div className="fleet">
-          {robots.length === 1 && <span className="dim one">1 robot ·</span>}
+    <div className="agv-embed">
+      <header className="agv-topbar">
+        <div className="agv-fleet">
+          {robots.length === 1 && <span className="agv-dim one">1 robot ·</span>}
           {robots.map((r) => (
             <button key={r.id}
-                    className={`rchip ${r.id === sel ? 'sel' : ''}`}
+                    className={`agv-rchip ${r.id === sel ? 'sel' : ''}`}
                     onClick={() => pickRobot(r.id)}
                     title={`${r.id}: ${r.online ? 'online' : 'offline'}`}>
-              <span className={`dot ${r.online ? 'ok' : 'bad'}`} />
+              <span className={`agv-dot ${r.online ? 'ok' : 'bad'}`} />
               {r.id}
-              <small>{r.battery_v != null ? `${r.battery_v.toFixed(1)}V` : '--'}</small>
-              {r.estop && <span className="mini-estop">STOP</span>}
+              <small className={r.battery_v != null && r.battery_v <= BATT_WARN_V ? 'low' : ''}>
+                {r.battery_v != null ? `${r.battery_v.toFixed(1)}V` : '--'}
+              </small>
+              {r.estop && <span className="agv-mini-estop">STOP</span>}
             </button>
           ))}
-          {robots.length === 0 && <span className="dim">no robots registered</span>}
+          {robots.length === 0 && <span className="agv-dim">no robots registered</span>}
         </div>
-        <div className="badges">
-          <span className={`dot ${connected ? 'ok' : 'bad'}`} />
+        <div className="agv-badges">
+          <span className={`agv-dot ${connected ? 'ok' : 'bad'}`} />
           <span>{sel ? (connected ? `${sel} online` : `${sel} OFFLINE`) : '—'}</span>
-          {status?.estop && <span className="estopbadge">E-STOP latched</span>}
-          <span className="batt">
+          {status?.estop && <span className="agv-estopbadge">E-STOP latched</span>}
+          {battWarning && (
+            <span className={`agv-battwarn ${battWarning}`} role="alert">
+              <span className="agv-battled" />
+              {battWarning === 'charge' ? 'CHARGE NOW' : 'LOW VOLTAGE'}
+              {battV != null ? ` · ${battV.toFixed(1)} V` : ''}
+            </span>
+          )}
+          <span className="agv-batt">
             {battV != null ? `${battV.toFixed(1)} V` : '-- V'}
             {battPct != null && (
-              <span className="bar"><i style={{ width: `${battPct}%` }} /></span>
+              <span className={`agv-bar ${battWarning ? 'warn' : ''}`}>
+                <i style={{ width: `${battPct}%` }} />
+              </span>
             )}
           </span>
         </div>
       </header>
 
-      <main className="grid">
-        <div className="leftcol">
-        <section className="lidar big">
-          {sel && <ScanView key={sel} robotId={sel} status={status} />}
-        </section>
+      <main className="agv-grid">
+        <div className="agv-leftcol">
+          <section className="agv-lidar">
+            {sel && <ScanView key={sel} robotId={sel} status={status} />}
+          </section>
         </div>
 
-        <div className="rightcol">
-        <section className="drive">
-          <div className="dpad" onContextMenu={(e) => e.preventDefault()}>
-            <DriveBtn label="▲" dir="fwd" press={press} disabled={!connected} />
-            <div className="dpad-mid">
-              <DriveBtn label="◀" dir="left" press={press} disabled={!connected} />
-              <div className="dpad-center">hold to move<br />WASD/arrows ok</div>
-              <DriveBtn label="▶" dir="right" press={press} disabled={!connected} />
+        <div className="agv-rightcol">
+          <section className="agv-drive">
+            <div className="agv-dpad" onContextMenu={(e) => e.preventDefault()}>
+              <DriveBtn label="▲" dir="fwd" press={press} disabled={!connected} />
+              <div className="agv-dpad-mid">
+                <DriveBtn label="◀" dir="left" press={press} disabled={!connected} />
+                <div className="agv-dpad-center">hold to move<br />WASD/arrows ok</div>
+                <DriveBtn label="▶" dir="right" press={press} disabled={!connected} />
+              </div>
+              <DriveBtn label="▼" dir="back" press={press} disabled={!connected} />
             </div>
-            <DriveBtn label="▼" dir="back" press={press} disabled={!connected} />
-          </div>
 
-          <div className="row presets">
-            {presets.map((p) => (
-              <button key={p.name}
-                      className={`preset ${Math.abs(lin - p.lin) < 0.001 ? 'on' : ''}`}
-                      onClick={() => applyPreset(p)}>
-                {p.name}
-                <small>{p.lin.toFixed(2)} m/s</small>
-              </button>
-            ))}
-          </div>
+            <div className="agv-row agv-presets">
+              {presets.map((p) => (
+                <button key={p.name}
+                        className={`agv-preset ${Math.abs(lin - p.lin) < 0.001 ? 'on' : ''}`}
+                        onClick={() => applyPreset(p)}>
+                  {p.name}
+                  <small>{p.lin.toFixed(2)} m/s</small>
+                </button>
+              ))}
+            </div>
 
-          <div className="sliders">
-            <label>
-              Drive speed <b>{lin.toFixed(2)} m/s</b>
-              <input type="range" min="0.05" max={maxLin} step="0.05"
-                     value={lin} onChange={(e) => setLin(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Turn speed <b>{rot.toFixed(2)} rad/s</b>
-              <input type="range" min="0.05" max={maxRot} step="0.05"
-                     value={rot} onChange={(e) => setRot(parseFloat(e.target.value))} />
-            </label>
-          </div>
+            <div className="agv-sliders">
+              <label>
+                Drive speed <b>{lin.toFixed(2)} m/s</b>
+                <input type="range" min="0.05" max={maxLin} step="0.05"
+                       value={lin} onChange={(e) => setLin(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Turn speed <b>{rot.toFixed(2)} rad/s</b>
+                <input type="range" min="0.05" max={maxRot} step="0.05"
+                       value={rot} onChange={(e) => setRot(parseFloat(e.target.value))} />
+              </label>
+            </div>
 
-          <div className="row">
-            <button className="stopbtn" onClick={hardStop}>⏹ STOP <small>(E)</small></button>
-            {estopLatch && (
-              <button className="clearbtn" onClick={hardStop}>✓ CLEAR E-STOP</button>
-            )}
-          </div>
+            <div className="agv-row">
+              <button className="agv-stopbtn" onClick={() => void hardStop()}>⏹ STOP <small>(E)</small></button>
+              {estopLatch && (
+                <button className="agv-clearbtn" onClick={() => void hardStop()}>✓ CLEAR E-STOP</button>
+              )}
+            </div>
 
-          <button className="estop" onPointerDown={doEstop}>
-            ■ E-STOP <small>(space)</small>
-          </button>
+            <button className="agv-estop" onPointerDown={() => void doEstop()}>
+              ■ E-STOP <small>(space)</small>
+            </button>
 
-          <p className="hint">
-            Robot stops if commands lapse &gt; {status?.cmd_timeout ?? 0.5}s (server) or its
-            own link dies (onboard watchdog). Page blur/hide always sends stop.
-          </p>
-        </section>
-
-        {sel && (
-          <section className="navpanel" id="autonomy">
-            <NavPanel key={sel} robotId={sel} status={status} connected={connected} />
+            <p className="agv-hint">
+              Robot stops if commands lapse &gt; {status?.cmd_timeout ?? 0.5}s (server) or its
+              own link dies (onboard watchdog). Page blur/hide always sends stop.
+            </p>
           </section>
-        )}
+
+          {sel && (
+            <section className="agv-navpanel" id="autonomy">
+              <NavPanel key={sel} robotId={sel} connected={connected} />
+            </section>
+          )}
         </div>
       </main>
 
-      <footer className="foot">
-        {status ? (
+      <footer className="agv-foot">
+        {status?.applied ? (
           <span>
             {status.id} · applied {status.applied.vx.toFixed(2)} m/s {status.applied.wz.toFixed(2)} rad/s ·
             link state {status.applied.vx !== 0 || status.applied.wz !== 0 ? 'driving' : 'idle'} ·
-            watchdog trips {status.watchdog_trips} · seq {status.seq} ·
+            watchdog trips {status.watchdog_trips ?? 0} · seq {status.seq ?? '—'} ·
             lidar {status.scan ? 'live' : 'off'} ·
             clamps ±{maxLin} m/s ±{maxRot} rad/s
           </span>
@@ -365,36 +445,40 @@ export default function App() {
   )
 }
 
-function ScanView({ robotId, status }) {
+/* ---------------- LiDAR sweep ---------------- */
+
+interface ScanMeta { points: number; age: number | null; fresh: boolean; err: boolean }
+
+function ScanView({ robotId, status }: { robotId: string; status: RobotStatus | null }) {
   // LiDAR panel: polls /api/robot/<id>/scan (~3 Hz) and draws the newest
   // packed LaserScan. ROS convention: +x forward (up on screen), angles
   // counterclockwise, 0.0 range = no return (left as a gap).
-  const canvasRef = useRef(null)
-  const scanRef = useRef(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const scanRef = useRef<PackedScan | null>(null)
   const navData = useNavData(robotId)    // shared single-flight /nav snapshot
-  const navRef = useRef(null)            // GET /nav body — overlay of saved points
+  const navRef = useRef<NavBody | null>(null)   // GET /nav body — overlay of saved points
   navRef.current = navData
   const [navTick, setNavTick] = useState(0)
   useEffect(() => setNavTick((n) => n + 1), [navData])
-  const [meta, setMeta] = useState({ points: 0, age: null, fresh: false, err: false })
+  const [meta, setMeta] = useState<ScanMeta>({ points: 0, age: null, fresh: false, err: false })
 
   useEffect(() => pollLoop(async () => {
     try {
-      const d = await fetchJson(`/api/robot/${encodeURIComponent(robotId)}/scan`)
+      const d = await fetchJson<{ scan?: PackedScan; age?: number | null; fresh?: boolean }>(
+        `/api/robot/${encodeURIComponent(robotId)}/scan`)
       if (d.scan) scanRef.current = d.scan
       setMeta({ points: d.scan ? d.scan.ranges.length : 0,
-                age: d.age, fresh: !!d.fresh, err: false })
-    } catch (e) {
+                age: d.age ?? null, fresh: !!d.fresh, err: false })
+    } catch {
       setMeta((m) => ({ ...m, err: true }))
-      throw e
+      throw new Error('scan fetch failed')
     }
   }, 300), [robotId])
 
-  // Saved waypoints live in the MAP frame. When SLAM/Nav2 reports a pose we
-  // transform them into the robot frame and paint them on the lidar sweep —
-  // so 'where is P2 from here' is readable at a glance, even mid-mapping.
-  // (the /nav request itself is the shared single-flight store in useNavData)
-
+  /* Saved waypoints live in the MAP frame. When SLAM/Nav2 reports a pose we
+     transform them into the robot frame and paint them on the lidar sweep —
+     so 'where is P2 from here' is readable at a glance, even mid-mapping.
+     (the /nav request itself is the shared single-flight store in useNavData) */
   useEffect(() => {
     const cv = canvasRef.current
     if (!cv) return
@@ -406,6 +490,7 @@ function ScanView({ robotId, status }) {
         cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr)
       }
       const g = cv.getContext('2d')
+      if (!g) return
       g.setTransform(dpr, 0, 0, dpr, 0, 0)
       g.clearRect(0, 0, W, H)
       const scan = scanRef.current
@@ -444,8 +529,8 @@ function ScanView({ robotId, status }) {
       }
       const nv = navRef.current
       if (scan && nv && Array.isArray(nv.nav?.pose)) {
-        const [p0, p1, ph] = nv.nav.pose
-        const co = Math.cos(ph || 0), si = Math.sin(ph || 0)
+        const [p0 = 0, p1 = 0, ph = 0] = nv.nav.pose
+        const co = Math.cos(ph), si = Math.sin(ph)
         for (const [n, w] of Object.entries(nv.waypoints || {})) {
           const dx = w.x - p0, dy = w.y - p1
           const fwd = dx * co + dy * si        // ahead of the robot
@@ -469,52 +554,49 @@ function ScanView({ robotId, status }) {
   return (
     <>
       <canvas ref={canvasRef} />
-      <span className={`camtag lidar-tag ${meta.fresh ? '' : 'stale'}`}>
+      <span className={`agv-camtag ${meta.fresh ? '' : 'stale'}`}>
         {meta.err ? 'lidar: server unreachable'
           : meta.fresh ? `◉ lidar ${meta.points} rays · ${ageTxt}`
           : `lidar idle · last ${ageTxt}`}
       </span>
       {!meta.fresh && status?.online && (
-        <div className="lidhint">{sensorHint(status, 'scan')}</div>
+        <div className="agv-lidhint">{sensorHint(status, 'scan')}</div>
       )}
     </>
   )
 }
 
-// ---- v3.3 autonomy panel (docs/NAV.md) --------------------------------------
-// Polls GET /api/robot/<id>/nav {mode, nav, waypoints, maps}; every button is
-// one validated POST action. Nothing here moves the robot except START ROUTE
-// (server-side the /cmd route also gets a 409 so teleop can't fight Nav2).
-const NAV_LABEL = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', route: 'ROUTE ▶' }
-const SLOT = ['p1', 'p2', 'p3']   // the web UI's fixed point slots
+/* ---------------- autonomy panel (docs/NAV.md) ----------------
+   Polls GET /api/robot/<id>/nav {mode, nav, waypoints, maps}; every button is
+   one validated POST action. Nothing here moves the robot except START ROUTE
+   (server-side the /cmd route also gets a 409 so teleop can't fight Nav2). */
+const NAV_LABEL: Record<string, string> = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', route: 'ROUTE ▶' }
+const SLOT = ['p1', 'p2', 'p3'] as const   // the web UI's fixed point slots
 
-function NavPanel({ robotId, status, connected }) {
+function NavPanel({ robotId, connected }: { robotId: string; connected: boolean }) {
   const data = useNavData(robotId)       // shared single-flight /nav body
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [mapName, setMapName] = useState('room1')
   const [showMap, setShowMap] = useState('')
-  const [route, setRoute] = useState([])
+  const [route, setRoute] = useState<string[]>([])
 
   const navUrl = `/api/robot/${encodeURIComponent(robotId)}/nav`
   const mode = data?.mode || 'off'
-  const navs = data?.nav || {}
+  const navs: NonNullable<NavBody['nav']> = data?.nav || {}
   const wps = data?.waypoints || {}
   const maps = data?.maps || []
 
-  // the /nav fetch itself: shared single-flight store (see useNavData) —
-  // this panel used to poll it again on top of ScanView's poll.
-
-  // keep the preview selection pointing at a real map
+  /* keep the preview selection pointing at a real map */
   useEffect(() => {
     if (!maps.length) { if (showMap) setShowMap(''); return }
     if (!maps.some((m) => m.name === showMap)) setShowMap(maps[0].name)
   }, [maps, showMap])
 
-  const act = async (body) => {
+  const act = async (body: Record<string, unknown>) => {
     setBusy(true); setErr('')
     try {
-      const d = await post(navUrl, body)
+      const d = await post<{ ok?: boolean; error?: string; errors?: Record<string, unknown> }>(navUrl, body)
       if (!d.ok) setErr(d.error || (d.errors && JSON.stringify(d.errors)) || 'rejected')
     } catch {
       // POST timed out — the action may STILL have landed hub-side (the
@@ -524,7 +606,7 @@ function NavPanel({ robotId, status, connected }) {
       setErr('no answer in 8 s — the action may still have landed; check the mode chip (wait 5 s) before clicking again')
     } finally {
       setBusy(false)
-      navFetchOnce(robotId)   // refresh NOW instead of waiting a poll tick
+      void navFetchOnce(robotId)   // refresh NOW instead of waiting a poll tick
     }
   }
 
@@ -534,33 +616,33 @@ function NavPanel({ robotId, status, connected }) {
 
   return (
     <>
-      <div className="navhead">
+      <div className="agv-navhead">
         <b>🧭 Autonomy</b>
-        <span className={`navmode ${mode}`}>{NAV_LABEL[mode] || mode}</span>
-        {navs.pose && <span className="dim navpose">
+        <span className={`agv-navmode ${mode}`}>{NAV_LABEL[mode] || mode}</span>
+        {navs.pose && <span className="agv-dim agv-navpose">
           x {navs.pose[0].toFixed(2)} · y {navs.pose[1].toFixed(2)}
         </span>}
-        {navs.route_total > 0 && <span className="dim">{navs.route_done}/{navs.route_total} pts</span>}
+        {navs.route_total ? <span className="agv-dim">{navs.route_done ?? 0}/{navs.route_total} pts</span> : null}
       </div>
-      {navs.error && <div className="naverr">robot: {navs.error}</div>}
-      {err && <div className="naverr">⚠ {err}</div>}
+      {navs.error && <div className="agv-naverr">robot: {navs.error}</div>}
+      {err && <div className="agv-naverr">⚠ {err}</div>}
 
-      <div className="navmap">
+      <div className="agv-navmap">
         {maps.length ? (
-          <div className="row">
+          <div className="agv-row">
             <select value={showMap} onChange={(e) => setShowMap(e.target.value)}>
               {maps.map((m) => (
                 <option key={m.name} value={m.name}>
                   {m.name}{m.uploaded === false
                     ? ' (robot only — no preview)'
-                    : ` · ${Math.round(m.bytes / 1024)} KB`}
+                    : ` · ${Math.round((m.bytes ?? 0) / 1024)} KB`}
                 </option>
               ))}
             </select>
-            <button className="minibtn" disabled={!live} title="delete this map"
-                    onClick={() => act({ action: 'delete_map', map: showMap })}>✕</button>
+            <button className="agv-minibtn" disabled={!live} title="delete this map"
+                    onClick={() => void act({ action: 'delete_map', map: showMap })}>✕</button>
           </div>
-        ) : <span className="dim">no saved maps yet — press 🗺, teleop around the room, then 💾</span>}
+        ) : <span className="agv-dim">no saved maps yet — press 🗺, teleop around the room, then 💾</span>}
         {showMap && (
           <MapCanvas robotId={robotId} map={showMap} wps={wps} pose={navs.pose}
                      route={route}
@@ -568,35 +650,35 @@ function NavPanel({ robotId, status, connected }) {
         )}
       </div>
 
-      <div className="row">
-        <button className={`navbtn ${mode === 'mapping' ? 'on' : ''}`}
+      <div className="agv-row">
+        <button className={`agv-navbtn ${mode === 'mapping' ? 'on' : ''}`}
                 disabled={!live || mode === 'route'}
-                onClick={() => act({ action: 'map_on' })}>🗺 Map</button>
-        <button className="navbtn" disabled={!live || mode !== 'mapping'}
-                onClick={() => act({ action: 'map_off' })}>map ⏹</button>
-        <button className="navbtn" disabled={!live || mode === 'off' || mode === 'route'}
+                onClick={() => void act({ action: 'map_on' })}>🗺 Map</button>
+        <button className="agv-navbtn" disabled={!live || mode !== 'mapping'}
+                onClick={() => void act({ action: 'map_off' })}>map ⏹</button>
+        <button className="agv-navbtn" disabled={!live || mode === 'off' || mode === 'route'}
                 title="stop the navigation stack"
-                onClick={() => act({ action: 'nav_off' })}>⏹ nav stop</button>
+                onClick={() => void act({ action: 'nav_off' })}>⏹ nav stop</button>
       </div>
-      <div className="row">
+      <div className="agv-row">
         <input value={mapName} maxLength={32} placeholder="map name"
                disabled={!live || mode === 'route'}
                onChange={(e) => setMapName(e.target.value.replace(/[^A-Za-z0-9_-]/g, ''))} />
-        <button className="navbtn" disabled={!live || !navActive}
+        <button className="agv-navbtn" disabled={!live || !navActive}
                 title="stop SLAM, save it as the named map (needs SLAM/nav running)"
-                onClick={() => act({ action: 'map_save', name: mapName || 'room1' })}>💾 save</button>
-        <button className="navbtn" disabled={!live || !maps.length || mode === 'route'}
+                onClick={() => void act({ action: 'map_save', name: mapName || 'room1' })}>💾 save</button>
+        <button className="agv-navbtn" disabled={!live || !maps.length || mode === 'route'}
                 title="start Nav2 localization on the selected map"
-                onClick={() => act({ action: 'nav_on', map: showMap || maps[0].name })}>🎯 nav</button>
+                onClick={() => void act({ action: 'nav_on', map: showMap || maps[0]?.name })}>🎯 nav</button>
       </div>
-      <div className="row wpslotrow">
+      <div className="agv-row agv-wpslotrow">
         {SLOT.map((n) => (
-          <button key={n} className="navbtn save" disabled={!live || !navActive}
+          <button key={n} className="agv-navbtn save" disabled={!live || !navActive}
                   title={`store the robot's current pose as ${n}`}
-                  onClick={() => act({ action: 'record', name: n })}>📍 {n.toUpperCase()}</button>
+                  onClick={() => void act({ action: 'record', name: n })}>📍 {n.toUpperCase()}</button>
         ))}
       </div>
-      <div className="wpreadout">
+      <div className="agv-wpreadout">
         {SLOT.map((n) => {
           const w = wps[n]
           return <span key={n}><b>{n.toUpperCase()}</b>: {w
@@ -605,36 +687,36 @@ function NavPanel({ robotId, status, connected }) {
         })}
       </div>
 
-      <div className="navwps">
+      <div className="agv-navwps">
         {wpList.length === 0 &&
-          <span className="dim">no points yet — park the robot somewhere and hit 📍</span>}
+          <span className="agv-dim">no points yet — park the robot somewhere and hit 📍</span>}
         {wpList.map(([n, w]) => (
-          <div key={n} className="wprow">
-            <button className="wpadd" disabled={!live}
+          <div key={n} className="agv-wprow">
+            <button className="agv-wpadd" disabled={!live}
                     title={route.includes(n) ? 'in route' : 'add to route'}
                     onClick={() => setRoute((r) => (r.includes(n) ? r : [...r, n]))}>
               {route.includes(n) ? `#${route.indexOf(n) + 1}` : '+'}
             </button>
-            <span className="wpname">{n}</span>
-            <span className="dim wpxy">{w.x.toFixed(2)}, {w.y.toFixed(2)} · {w.yaw.toFixed(1)} rad</span>
-            <button className="minibtn" disabled={!live || mode !== 'localizing'}
+            <span className="agv-wpname">{n}</span>
+            <span className="agv-dim agv-wpxy">{w.x.toFixed(2)}, {w.y.toFixed(2)} · {w.yaw.toFixed(1)} rad</span>
+            <button className="agv-minibtn" disabled={!live || mode !== 'localizing'}
                     title="re-localize here (no motion)"
-                    onClick={() => act({ action: 'align', waypoints: [n] })}>⌖</button>
-            <button className="minibtn" disabled={!live} title="delete point"
+                    onClick={() => void act({ action: 'align', waypoints: [n] })}>⌖</button>
+            <button className="agv-minibtn" disabled={!live} title="delete point"
                     onClick={() => {
-                      act({ action: 'delete_waypoint', waypoints: [n] })
+                      void act({ action: 'delete_waypoint', waypoints: [n] })
                       setRoute((r) => r.filter((x) => x !== n))
                     }}>✕</button>
           </div>
         ))}
         {Object.keys(wps).length > 0 && (
-          <div className="wprow">
-            <span className="dim" />
-            <button className="minibtn" disabled={!live}
+          <div className="agv-wprow">
+            <span className="agv-dim" />
+            <button className="agv-minibtn" disabled={!live}
                     title="delete ALL saved waypoints (the whole drawn path)"
                     onClick={() => {
                       if (window.confirm('Delete ALL saved waypoints (the whole path)?')) {
-                        act({ action: 'clear_waypoints' })
+                        void act({ action: 'clear_waypoints' })
                         setRoute([])
                       }
                     }}>⌫ clear path</button>
@@ -643,9 +725,9 @@ function NavPanel({ robotId, status, connected }) {
       </div>
 
       {route.length > 0 && (
-        <div className="navroute">
+        <div className="agv-navroute">
           {route.map((n, i) => (
-            <button key={n} className="wpchip" title="remove from route"
+            <button key={n} className="agv-wpchip" title="remove from route"
                     onClick={() => setRoute((r) => r.filter((x) => x !== n))}>
               {i + 1}·{n}
             </button>
@@ -653,32 +735,43 @@ function NavPanel({ robotId, status, connected }) {
         </div>
       )}
 
-      <div className="row">
-        <button className="routebtn"
+      <div className="agv-row">
+        <button className="agv-routebtn"
                 disabled={!live || route.length === 0}
                 title="drives the route; starts Nav2 on the selected map automatically if the stack is idle"
-                onClick={() => act({ action: 'route', waypoints: route })}>
+                onClick={() => void act({ action: 'route', waypoints: route })}>
           ▶ START ROUTE
         </button>
         {mode === 'route' ? (
-          <button className="cancelbtn" onClick={() => act({ action: 'nav_cancel' })}>⏹ cancel</button>
+          <button className="agv-cancelbtn" onClick={() => void act({ action: 'nav_cancel' })}>⏹ cancel</button>
         ) : route.length > 0 && (
-          <button className="minibtn" onClick={() => setRoute([])}>clear</button>
+          <button className="agv-minibtn" onClick={() => setRoute([])}>clear</button>
         )}
       </div>
-      <p className="hint">🗺 teleop while SLAM builds the map → 💾 save → 🎯 localize → park anywhere,
+      <p className="agv-hint">🗺 teleop while SLAM builds the map → 💾 save → 🎯 localize → park anywhere,
         hit 📍 P1/P2/P3 to stamp that spot → queue points → START ROUTE. Nothing drives
         until you press it; E-STOP and the link watchdog always win.</p>
     </>
   )
 }
 
-function MapCanvas({ robotId, map, wps, pose, route, onPick }) {
+/* ---------------- saved-map canvas ---------------- */
+
+interface MapImage { img: ImageData; W: number; H: number; ox: number; oy: number; res: number }
+
+function MapCanvas({ robotId, map, wps, pose, route, onPick }: {
+  robotId: string
+  map: string
+  wps: Record<string, Waypoint>
+  pose?: number[]
+  route: string[]
+  onPick: (n: string) => void
+}) {
   // Draws the saved .pgm (dark-theme LUT) + waypoints + live pose. Fetched
   // once per (robot, map); overlays redraw with each 1 Hz nav poll.
   const base = `/api/robot/${encodeURIComponent(robotId)}/maps/${encodeURIComponent(map)}`
-  const cvRef = useRef(null)
-  const imgRef = useRef(null)     // {img, W, H, ox, oy, res}
+  const cvRef = useRef<HTMLCanvasElement | null>(null)
+  const imgRef = useRef<MapImage | null>(null)
   const [ok, setOk] = useState(0)
 
   useEffect(() => {
@@ -727,17 +820,20 @@ function MapCanvas({ robotId, map, wps, pose, route, onPick }) {
       if (!W || !H) return
       cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr)
       const g = cv.getContext('2d')
+      if (!g) return
       g.setTransform(dpr, 0, 0, dpr, 0, 0)
       g.fillStyle = '#0d1017'; g.fillRect(0, 0, W, H)
       const s = Math.min(W / it.W, H / it.H)
       const dx = (W - it.W * s) / 2, dy = (H - it.H * s) / 2
       const off = document.createElement('canvas')
       off.width = it.W; off.height = it.H
-      off.getContext('2d').putImageData(it.img, 0, 0)
+      const og = off.getContext('2d')
+      if (!og) return
+      og.putImageData(it.img, 0, 0)
       g.imageSmoothingEnabled = false
       g.drawImage(off, dx, dy, it.W * s, it.H * s)
-      const wx = (x) => dx + ((x - it.ox) / it.res) * s
-      const wy = (y) => dy + (it.H - (y - it.oy) / it.res) * s   // pgm row 0 = north
+      const wx = (x: number) => dx + ((x - it.ox) / it.res) * s
+      const wy = (y: number) => dy + (it.H - (y - it.oy) / it.res) * s   // pgm row 0 = north
       for (const [n, w] of Object.entries(wps)) {
         g.beginPath(); g.arc(wx(w.x), wy(w.y), 4.5, 0, Math.PI * 2)
         g.fillStyle = route.includes(n) ? '#ffd05f' : '#4cc2ff'
@@ -757,14 +853,14 @@ function MapCanvas({ robotId, map, wps, pose, route, onPick }) {
     return () => window.removeEventListener('resize', draw)
   }, [ok, wps, pose, route])
 
-  const click = (e) => {
+  const click = (e: ReactMouseEvent<HTMLCanvasElement>) => {
     const it = imgRef.current, cv = cvRef.current
     if (!it || !cv) return
     const rect = cv.getBoundingClientRect()
     const s = Math.min(rect.width / it.W, rect.height / it.H)
     const dx = (rect.width - it.W * s) / 2, dy = (rect.height - it.H * s) / 2
     const px = e.clientX - rect.left, py = e.clientY - rect.top
-    let best = null, bd = 18 * 18
+    let best: string | null = null, bd = 18 * 18
     for (const [n, w] of Object.entries(wps)) {
       const ddx = dx + ((w.x - it.ox) / it.res) * s - px
       const ddy = dy + (it.H - (w.y - it.oy) / it.res) * s - py
@@ -774,18 +870,18 @@ function MapCanvas({ robotId, map, wps, pose, route, onPick }) {
     if (best) onPick(best)
   }
 
-  return <canvas ref={cvRef} className="navcanvas" onClick={click}
+  return <canvas ref={cvRef} className="agv-navcanvas" onClick={click}
                  title="click a point to add it to the route" />
 }
 
-function parsePgm(u8) {
+function parsePgm(u8: Uint8Array): { W: number; H: number; data: Uint8Array } | null {
   // Minimal P5 (binary PGM) reader: magic, optional comments, W H maxval,
   // one whitespace byte, then W*H gray bytes (map_server/slam_toolbox style).
   let i = 0
-  const tok = () => {
+  const tok = (): string | null => {
     while (i < u8.length) {
       const c = u8[i]
-      if (c === 0x23) { while (i < u8.length && u8[i++] !== 0x0a) {} ; continue }
+      if (c === 0x23) { while (i < u8.length && u8[i++] !== 0x0a) { /* skip comment */ } continue }
       if (c <= 0x20) { i++; continue }
       let s = ''
       while (i < u8.length && u8[i] > 0x20) s += String.fromCharCode(u8[i++])
@@ -794,18 +890,25 @@ function parsePgm(u8) {
     return null
   }
   if (tok() !== 'P5') return null
-  const W = parseInt(tok(), 10)
-  const H = parseInt(tok(), 10)
-  const maxv = parseInt(tok(), 10)
+  const wt = tok(), ht = tok(), mt = tok()
+  if (!wt || !ht || !mt) return null
+  const W = parseInt(wt, 10)
+  const H = parseInt(ht, 10)
+  const maxv = parseInt(mt, 10)
   if (!W || !H || !(maxv > 0) || maxv > 255) return null
   i++   // exactly one whitespace byte after maxval per the PGM spec
   if (u8.length < i + W * H) return null
   return { W, H, data: u8.subarray(i, i + W * H) }
 }
 
-function DriveBtn({ label, dir, press, disabled }) {
+function DriveBtn({ label, dir, press, disabled }: {
+  label: string
+  dir: DriveDir
+  press: (dir: DriveDir, on: boolean) => void
+  disabled: boolean
+}) {
   const [active, setActive] = useState(false)
-  const on = (e) => {
+  const on = (e: ReactPointerEvent) => {
     e.preventDefault()
     if (disabled) return
     setActive(true); press(dir, true)
@@ -813,7 +916,7 @@ function DriveBtn({ label, dir, press, disabled }) {
   const off = () => { setActive(false); press(dir, false) }
   return (
     <button
-      className={`dbtn ${active ? 'active' : ''} ${disabled ? 'off' : ''}`}
+      className={`agv-dbtn ${active ? 'active' : ''} ${disabled ? 'off' : ''}`}
       disabled={disabled}
       onPointerDown={on} onPointerUp={off} onPointerLeave={off}
       onPointerCancel={off}>

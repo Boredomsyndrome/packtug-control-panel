@@ -24,10 +24,27 @@ export const SKUS: Sku[] = [
   { id: 'SKU-1006', name: 'Fish Fillet Tray', category: 'Frozen seafood', size: { w: 150, d: 120, h: 100 }, weight: 0.15 },
   { id: 'SKU-1007', name: 'Pizza Carton', category: 'Frozen bakery', size: { w: 200, d: 160, h: 90 }, weight: 0.17 },
   { id: 'SKU-1008', name: 'Dessert Cup Tray', category: 'Frozen dessert', size: { w: 120, d: 100, h: 70 }, weight: 0.1 },
-  { id: 'DEMO-BOX', name: 'Stack demo box', category: 'Stack demo', size: { w: 152, d: 85, h: 110 }, weight: 0.2 },
+  { id: 'DEMO-BOX', name: 'Demo box · 152×85×110 (front 152×110, opening 80×40)', category: 'Test carton', size: { w: 152, d: 85, h: 110 }, weight: 0.2, fixedOrientation: true },
+  { id: 'TEST-BOX-A', name: 'Test box A · 200×55×120 (front 200×120, opening 80×40)', category: 'Test carton', size: { w: 200, d: 55, h: 120 }, weight: 0.2, fixedOrientation: true },
+  { id: 'TEST-BOX-B', name: 'Test box B · 200×55×160 (front 200×160, opening 80×40)', category: 'Test carton', size: { w: 200, d: 55, h: 160 }, weight: 0.2, fixedOrientation: true },
+  { id: 'TEST-BOX-C', name: 'Test box C · 250×55×160 (front 250×160, opening 80×40)', category: 'Test carton', size: { w: 250, d: 55, h: 160 }, weight: 0.2, fixedOrientation: true },
 ]
 
 export const ORDERS: Order[] = [
+  {
+    id: 'ORD-TEST-MANUAL',
+    branch: 'Test case MANUAL · B/A left stacks, C/DEMO right',
+    priority: 'normal',
+    status: 'pending',
+    createdAt: '2026-11-23T14:55:00+08:00',
+    dueAt: '2026-11-23T16:05:00+08:00',
+    items: [
+      { skuId: 'TEST-BOX-A', qty: 2 },
+      { skuId: 'TEST-BOX-B', qty: 2 },
+      { skuId: 'TEST-BOX-C', qty: 1 },
+      { skuId: 'DEMO-BOX', qty: 1 },
+    ],
+  },
   {
     id: 'ORD-STACK-5',
     branch: 'STACK DEMO · five boxes',

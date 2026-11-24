@@ -72,9 +72,9 @@ export function Layout() {
             {item.label}
           </NavLink>
         ))}
-        <div style={{ flex: 1 }} />
+        <div className="nav-spacer" style={{ flex: 1 }} />
         <div className="nav-section">Session</div>
-        <div className="row between" style={{ padding: '4px 10px' }}>
+        <div className="row between session-row" style={{ padding: '4px 10px' }}>
           <span className="muted" style={{ fontSize: 12.5 }}>
             {authenticated ? userName : 'Signed out'}
           </span>

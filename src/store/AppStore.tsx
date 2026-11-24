@@ -25,6 +25,7 @@ import type {
 } from '../types'
 import { AGVS, CAGES, CAGE_BIN, MISSIONS, ORDERS, SKUS, THROUGHPUT, ZONES } from '../data/mock'
 import { DEMO_ORDER_ID, DEMO_STACK_PLAN } from '../data/demoStack'
+import { MANUAL_TEST_ORDER_ID, MANUAL_TEST_PLAN } from '../data/manualTest'
 import { api } from '../services/api'
 import type { PackBox } from '../lib/packing'
 
@@ -86,6 +87,7 @@ function expandOrder(order: Order, skuMap: Record<string, Sku>): PackBox[] {
         d: sku.size.d,
         h: sku.size.h,
         weight: sku.weight,
+        fixedOrientation: sku.fixedOrientation,
       })
     }
   }
@@ -186,11 +188,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const plan =
         orderId === DEMO_ORDER_ID
           ? { ...DEMO_STACK_PLAN, generatedAt: nowIso() }
-          : await api.packOrder({
-              orderId,
-              boxes: expandOrder(order, skuMap),
-              bin: CAGE_BIN,
-            })
+          : orderId === MANUAL_TEST_ORDER_ID
+            ? { ...MANUAL_TEST_PLAN, generatedAt: nowIso() }
+            : await api.packOrder({
+                orderId,
+                boxes: expandOrder(order, skuMap),
+                bin: CAGE_BIN,
+              })
       setPlans((prev) => ({ ...prev, [orderId]: plan }))
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId && o.status === 'pending' ? { ...o, status: 'planned' } : o)),

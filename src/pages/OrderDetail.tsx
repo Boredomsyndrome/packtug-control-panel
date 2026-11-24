@@ -56,7 +56,7 @@ export function OrderDetail() {
 
       <div className="grid split">
         <Card title="Items" hint={`${order.items.reduce((a, b) => a + b.qty, 0)} cartons · ${kg(weight)} · ${(volume / 1e9).toFixed(2)} m³`}>
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>SKU</th>
@@ -87,6 +87,7 @@ export function OrderDetail() {
               })}
             </tbody>
           </table>
+        </div>
         </Card>
 
         <div className="stack">

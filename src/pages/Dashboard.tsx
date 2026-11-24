@@ -90,7 +90,7 @@ export function Dashboard() {
           title="Active missions"
           right={<Link className="btn sm ghost" to="/missions">Open console →</Link>}
         >
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>Mission</th>
@@ -121,6 +121,7 @@ export function Dashboard() {
               ))}
             </tbody>
           </table>
+        </div>
         </Card>
 
         <Card title="Activity feed" hint="operator + system events">
@@ -138,7 +139,7 @@ export function Dashboard() {
 
       <div className="grid cols-2">
         <Card title="Fleet snapshot" right={<Link className="btn sm ghost" to="/fleet">View fleet →</Link>}>
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>AGV</th>
@@ -165,10 +166,11 @@ export function Dashboard() {
               ))}
             </tbody>
           </table>
+        </div>
         </Card>
 
         <Card title="Orders requiring attention" right={<Link className="btn sm ghost" to="/orders">View orders →</Link>}>
-          <table className="data">
+          <div className="table-scroll"><table className="data">
             <thead>
               <tr>
                 <th>Order</th>
@@ -194,6 +196,7 @@ export function Dashboard() {
               ))}
             </tbody>
           </table>
+        </div>
         </Card>
       </div>
     </>

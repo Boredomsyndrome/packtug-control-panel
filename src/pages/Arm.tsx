@@ -186,6 +186,9 @@ export function Arm() {
   const [confirmRelease, setConfirmRelease] = useState(false)
   const [poses, setPoses] = useState<ArmPosePreset[]>([])
   const [poseName, setPoseName] = useState('')
+  const [homePoseName, setHomePoseName] = useState(
+    () => localStorage.getItem('packtug.homeFoldPose') ?? '',
+  )
   const [sequences, setSequences] = useState<ArmSequence[]>([])
   const [sequenceName, setSequenceName] = useState('')
   const [dwellSec, setDwellSec] = useState(1)
@@ -287,6 +290,7 @@ export function Arm() {
     () => savedCage?.cage ?? DEFAULT_CAGE,
   )
   const [pathPayloadRadius, setPathPayloadRadius] = useState(0)
+  const [targetZOffset, setTargetZOffset] = useState(-0.01)
   const [pathApproach, setPathApproach] = useState(0.06)
   const [pathGateClearance, setPathGateClearance] = useState(0.08)
   const [pathResult, setPathResult] = useState<PickPathResult | null>(null)
@@ -294,7 +298,7 @@ export function Arm() {
   const [pathError, setPathError] = useState<string | null>(null)
   const [twinTargetNote, setTwinTargetNote] = useState<string | null>(null)
   const [execRetract, setExecRetract] = useState(0.08)
-  const [execHomeLift, setExecHomeLift] = useState(0.08)
+  const [releaseDrop, setReleaseDrop] = useState(0.01)
   const [returnHomeAfter, setReturnHomeAfter] = useState(false)
   const [execPending, setExecPending] = useState(false)
   const [execResult, setExecResult] = useState<ExecutePickResult | null>(null)
@@ -348,6 +352,11 @@ export function Arm() {
   }, [qrTargetOffset])
 
   useEffect(() => {
+    if (homePoseName) localStorage.setItem('packtug.homeFoldPose', homePoseName)
+    else localStorage.removeItem('packtug.homeFoldPose')
+  }, [homePoseName])
+
+  useEffect(() => {
     try {
       const raw = localStorage.getItem(ARM_TARGET_STORAGE_KEY)
       if (!raw) return
@@ -360,6 +369,10 @@ export function Arm() {
         ...placementOrientation(pathCage),
       }))
       setPathPayloadRadius(target.payload_radius_m ?? 0)
+      if (target.payload_length_m !== undefined) {
+        setExecRetract(Math.min(0.40, target.payload_length_m + 0.01))
+      }
+      if (target.target_z_offset_m !== undefined) setTargetZOffset(target.target_z_offset_m)
       setTwinTargetNote(
         `Packing box #${target.placementSeq} (${target.reference}) → front-face centre ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)} m; level placement aligned with cage`,
       )
@@ -824,7 +837,11 @@ export function Arm() {
   }
 
   function homeArm() {
-    void run('Home / fold', () => api.homeArm())
+    const custom = poses.some((pose) => pose.name === homePoseName) ? homePoseName : ''
+    void run(
+      custom ? `Home / fold → ${custom}` : 'Home / fold',
+      () => (custom ? api.applyArmPose(custom, linearPath) : api.homeArm()),
+    )
   }
 
   function recoverArm() {
@@ -1139,6 +1156,7 @@ export function Arm() {
         target: pathTarget,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
+        target_z_offset_m: targetZOffset,
         payload_radius_m: pathPayloadRadius,
         cage: pathCage,
         ...(corners ? { corners, ignored_corners: ignored } : {}),
@@ -1192,7 +1210,9 @@ export function Arm() {
         '3. close the gripper and keep that level attitude while pulling back,\n' +
         '4. reorient at the outer retract point (not near the base),\n' +
         '5. use the retract point as a safe transit and follow the checked path to the target,\n' +
-        '6. verify the level/cage attitude before opening.\n\n' +
+        '6. verify the level/cage attitude before opening,\n' +
+        '7. lower 1 cm after release and back out of the cage,\n' +
+        '8. optionally finish with Home / Fold.\n\n' +
         'Keep the workspace clear and a hand on the power switch. Continue?',
     )
     if (!confirmed) return
@@ -1209,15 +1229,16 @@ export function Arm() {
         ...(useCurrentStart ? {} : { start: pathStart }),
         target: pathTarget,
         home: pathHome,
-        home_lift_m: execHomeLift,
         retract_m: execRetract,
         approach_m: pathApproach,
         gate_clearance_m: pathGateClearance,
+        target_z_offset_m: targetZOffset,
         payload_radius_m: pathPayloadRadius,
         cage: pathCage,
         ...(corners ? { corners, ignored_corners: ignored } : {}),
         speed_percent: status?.max_velocity ?? 5,
-        return_home_after: returnHomeAfter,
+        release_drop_m: releaseDrop,
+        return_home_after: false,
       })
       setExecResult(result)
       if (!result.ok) setExecError(result.error ?? 'Execution stopped')
@@ -1225,6 +1246,26 @@ export function Arm() {
         `Execute ${result.ok ? 'done' : 'stopped'} · ${result.stage}`,
         result.ok ? 'success' : 'error',
       )
+      if (result.ok && returnHomeAfter) {
+        const customHome =
+          homePoseName && poses.some((pose) => pose.name === homePoseName)
+            ? homePoseName
+            : ''
+        try {
+          const homeSnapshot = customHome
+            ? await api.applyArmPose(customHome, linearPath)
+            : await api.homeArm()
+          applySnapshot(homeSnapshot)
+          addLog(
+            `Return Home / Fold → ${customHome || 'native'}`,
+            'success',
+          )
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          setExecError(`Home / Fold — ${msg}`)
+          addLog(`Home / Fold — ${msg}`, 'error')
+        }
+      }
       try {
         applySnapshot(await api.getArmStatus())
       } catch {
@@ -1380,6 +1421,23 @@ export function Arm() {
     }
   }
 
+  async function saveCurrentAsHome() {
+    setPending(true)
+    setError(null)
+    try {
+      const pose = await api.saveArmPose('HOME_FOLD')
+      setPoses(await api.listArmPoses())
+      setHomePoseName(pose.name)
+      addLog(`Home / fold pose saved: ${pose.name}`, 'success')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      addLog(`Save Home / fold — ${msg}`, 'error')
+    } finally {
+      setPending(false)
+    }
+  }
+
   async function deletePose(name: string) {
     setPending(true)
     setError(null)
@@ -1387,6 +1445,7 @@ export function Arm() {
       await api.deleteArmPose(name)
       setPoses(await api.listArmPoses())
       setDraftSteps((steps) => steps.filter((step) => step !== name))
+      if (homePoseName === name) setHomePoseName('')
       addLog(`Pose deleted: ${name}`, 'warn')
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1507,10 +1566,21 @@ export function Arm() {
         const gripperStep = isGripperStep(kind)
         if (!gripperStep && sequence.transit && sequence.transit !== kind) {
           setSequenceRun({ name: sequence.name, step: i + 1, total: sequence.poses.length, phase: 'transit' })
-          addLog(`Transit → ${sequence.transit === '__home__' ? 'Home / fold' : sequence.transit}`, 'info')
+          const transitHome =
+            sequence.transit === '__home__' &&
+            homePoseName &&
+            poses.some((pose) => pose.name === homePoseName)
+              ? homePoseName
+              : ''
+          addLog(
+            `Transit → ${sequence.transit === '__home__' ? (transitHome || 'Home / fold') : sequence.transit}`,
+            'info',
+          )
           const transitSnapshot =
             sequence.transit === '__home__'
-              ? await api.homeArm()
+              ? transitHome
+                ? await api.applyArmPose(transitHome, linearPath)
+                : await api.homeArm()
               : await api.applyArmPose(sequence.transit, linearPath)
           applySnapshot(transitSnapshot)
           if (stopSequenceRef.current) {
@@ -1949,7 +2019,7 @@ export function Arm() {
             </label>
           </div>
           {useVia && <PoseEditor title="Via point" pose={pathVia} onChange={setPathVia} />}
-          <p>Placement target: {pathTarget.x.toFixed(4)}, {pathTarget.y.toFixed(4)}, {pathTarget.z.toFixed(4)} m · box front-face centre · payload radius {(pathPayloadRadius * 1000).toFixed(0)} mm</p>
+          <p>Placement target: {pathTarget.x.toFixed(4)}, {pathTarget.y.toFixed(4)}, {(pathTarget.z + targetZOffset).toFixed(4)} m · box front-face centre · payload radius {(pathPayloadRadius * 1000).toFixed(0)} mm</p>
           <p className="faint" style={{ margin: 0, fontSize: 11.5 }}>
             Gripper attitude: Roll {placementOrientation(pathCage).roll.toFixed(1)}° · Pitch {placementOrientation(pathCage).pitch.toFixed(1)}° · Yaw {placementOrientation(pathCage).yaw.toFixed(1)}°
             {' '}(horizontal, aligned with cage depth). Attitude is verified before release (2° tolerance).
@@ -1979,6 +2049,12 @@ export function Arm() {
               value={pathGateClearance}
               step={0.01}
               onChange={setPathGateClearance}
+            />
+            <NumberField
+              label="Target Z offset (m)"
+              value={targetZOffset}
+              step={0.005}
+              onChange={setTargetZOffset}
             />
             {useVia && (
               <button
@@ -2229,16 +2305,16 @@ export function Arm() {
             </span>
             <div className="row" style={{ gap: 6 }}>
               <NumberField
-                label="Pull back (m)"
+                label="Pull back (m · auto length+1cm)"
                 value={execRetract}
                 step={0.01}
                 onChange={setExecRetract}
               />
               <NumberField
-                label="Home lift (m)"
-                value={execHomeLift}
-                step={0.01}
-                onChange={setExecHomeLift}
+                label="Release drop (m)"
+                value={releaseDrop}
+                step={0.005}
+                onChange={setReleaseDrop}
               />
               <span className="faint" style={{ fontSize: 11.5, alignSelf: 'center' }}>
                 Speed {status?.max_velocity ?? 5}% (arm setting)
@@ -2249,7 +2325,7 @@ export function Arm() {
                   checked={returnHomeAfter}
                   onChange={(event) => setReturnHomeAfter(event.target.checked)}
                 />
-                Return home after
+                Return home after (retract + Home/Fold)
               </label>
               <button
                 className="btn danger"
@@ -2278,7 +2354,7 @@ export function Arm() {
               <span style={{ color: 'var(--red)', fontSize: 12 }}>{execError}</span>
             )}
             {execResult && (
-              <table className="data">
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Step</th>
@@ -2311,6 +2387,7 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
+        </div>
             )}
             {execResult && execResult.plan && (
               <div className="stack" style={{ gap: 4 }}>
@@ -2357,7 +2434,7 @@ export function Arm() {
                   {pathResult.warnings.join(' · ')}
                 </span>
               )}
-              <table className="data">
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Point</th>
@@ -2395,7 +2472,8 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
-              <table className="data">
+        </div>
+              <div className="table-scroll"><table className="data">
                 <thead>
                   <tr>
                     <th>Segment</th>
@@ -2429,6 +2507,7 @@ export function Arm() {
                   ))}
                 </tbody>
               </table>
+        </div>
             </div>
           )}
         </div>
@@ -2746,6 +2825,39 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
         hint={`saved on the arm bridge · recall moves ≤${status?.max_pose_deg ?? 180}°`}
       >
         <div className="stack">
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <span className="faint" style={{ fontSize: 12 }}>Home / Fold target</span>
+            <select
+              value={homePoseName}
+              onChange={(e) => setHomePoseName(e.target.value)}
+              style={{ width: 230 }}
+            >
+              <option value="">Native fold (factory)</option>
+              {homePoseName && !poses.some((pose) => pose.name === homePoseName) && (
+                <option value={homePoseName}>{homePoseName} (missing)</option>
+              )}
+              {poses.map((pose) => (
+                <option key={pose.name} value={pose.name}>{pose.name}</option>
+              ))}
+            </select>
+            <button
+              className="btn sm"
+              onClick={() => void saveCurrentAsHome()}
+              disabled={!status?.connected || pending || status?.busy || !status?.joints_deg}
+            >
+              Save current as Home / Fold
+            </button>
+            {homePoseName && (
+              <button className="btn sm" onClick={() => setHomePoseName('')} disabled={pending || status?.busy}>
+                Use native
+              </button>
+            )}
+          </div>
+          <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+            Home / Fold uses this saved pose only for parking/folding. Pick path keeps its
+            own separate home and reference frame, because a viable fold pose can still be
+            too close to the wall for a safe transit. New pose saves include TCP pose.
+          </p>
           <div className="row">
             <input
               value={poseName}
@@ -2782,7 +2894,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {poses.length === 0 ? (
             <div className="empty">No saved poses yet.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -2830,6 +2942,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
@@ -2958,7 +3071,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {draftSteps.length === 0 ? (
             <div className="empty">Draft is empty.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th style={{ width: 60 }}>#</th>
@@ -3000,6 +3113,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <div className="nav-section" style={{ padding: '10px 0 4px' }}>
@@ -3008,7 +3122,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           {sequences.length === 0 ? (
             <div className="empty">No saved sequences yet.</div>
           ) : (
-            <table className="data">
+            <div className="table-scroll"><table className="data">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -3060,6 +3174,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
                 ))}
               </tbody>
             </table>
+        </div>
           )}
 
           <p className="faint" style={{ fontSize: 12, margin: 0 }}>
@@ -3094,7 +3209,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
           </div>
         }
       >
-        <table className="data" style={{ display: controlMode === 'joint' ? undefined : 'none' }}>
+        <div className="table-scroll"><table className="data" style={{ display: controlMode === 'joint' ? undefined : 'none' }}>
           <thead>
             <tr>
               <th>Joint</th>
@@ -3168,6 +3283,7 @@ Uses the robot's native grasp/release tool commands. Buttons block while the gri
             })}
           </tbody>
         </table>
+        </div>
         {controlMode === 'linear' && (
           <div className="stack" style={{ gap: 14 }}>
             <div className="grid cols-2" style={{ gap: 20 }}>

@@ -607,3 +607,81 @@ input[type='checkbox'] {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+
+/* WHEELTEC low-voltage alert (22.4–22.7 V; charge at <=22.4 V) */
+.voltage-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 11px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--red);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.voltage-alert.critical {
+  border-color: var(--red);
+  background: rgba(248, 113, 113, 0.2);
+  color: #fff;
+}
+.voltage-alert-note {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.voltage-led {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 9px var(--red);
+  animation: voltage-pulse 1s ease-in-out infinite;
+}
+@keyframes voltage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ---------- table wrapper (all viewports: only scrolls when needed) ---------- */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---------- rows wrap (badges/actions never force horizontal scroll) ---------- */
+.row { flex-wrap: wrap; }
+
+/* ---------- phone pass (v4.1): sidebar becomes a sticky top strip ---------- */
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+
+  .sidebar {
+    flex-direction: row; align-items: center; gap: 6px;
+    width: auto; height: auto; overflow-x: auto; overflow-y: hidden;
+    padding: 8px 10px; border-right: none; border-bottom: 1px solid var(--border);
+    scrollbar-width: none; z-index: 30;
+  }
+  .sidebar::-webkit-scrollbar { display: none; }
+  .sidebar .brand { flex: none; padding: 0 10px 0 2px; }
+  .sidebar .brand-sub { display: none; }
+  .sidebar .nav-item { flex: none; padding: 8px 12px; white-space: nowrap; }
+  .sidebar .nav-section, .sidebar .field,
+  .sidebar .session-row, .sidebar .nav-spacer { display: none; }
+
+  .main { min-height: calc(100dvh - 58px); }
+  .topbar { position: static; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  .content { padding: 14px; gap: 14px; }
+
+  .grid.split, .grid.cols-2, .grid.cols-3 { grid-template-columns: minmax(0, 1fr); }
+  .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-head { flex-wrap: wrap; }
+  pre { overflow-x: auto; max-width: 100%; }
+
+  .page-title { font-size: 18px; }
+  .page-desc { font-size: 12.5px; }
+  .kpi-value { font-size: 22px; }
+
+  .badge { white-space: normal; max-width: 100%; }
+  .content canvas, .content select, .content input { max-width: 100%; }
+}

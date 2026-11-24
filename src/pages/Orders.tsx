@@ -119,7 +119,7 @@ export function Orders() {
       )}
 
       <Card>
-        <table className="data">
+        <div className="table-scroll"><table className="data">
           <thead>
             <tr>
               <th>Order</th>
@@ -185,6 +185,7 @@ export function Orders() {
             })}
           </tbody>
         </table>
+        </div>
       </Card>
       <p className="faint" style={{ fontSize: 12, margin: 0 }}>
         Tip: “Pack” runs the client prototype packer; “Dispatch” assigns the order to an idle AGV and opens a mission. Overall avg plan utilisation target: {pct(0.75, 0)}.

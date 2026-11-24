@@ -59,8 +59,8 @@ yaw = cage yaw + 90°** (wrapped to ±180°). The executor levels roll/pitch at
 the grasp pose before closing, then keeps that horizontal attitude while
 retracting, lowering and moving to safe home; yaw remains free until final cage
 alignment. It uses the target attitude through entry, approach and release,
-and checks reported attitude within 2° after each leveling/entry move and
-before release. An unreachable linear move stops; entry/leveling cannot fall
+and checks reported attitude within 2° roll/pitch and 3° yaw after each
+leveling/entry move and before release. An unreachable linear move stops; entry/leveling cannot fall
 back to a joint-space route or the previous attitude. Optional return follows
 the checked route in reverse with the same attitude. The placement attitude is
 mandatory; J2 folding during this sequence is rejected before motion.

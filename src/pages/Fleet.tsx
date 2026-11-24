@@ -6,10 +6,12 @@ import { Badge, Card, PageHeader, Progress } from '../components/ui'
 import { LidarSweep } from '../components/LidarSweep'
 import { AGV_STATUS, CAGE_STATE } from '../components/status'
 import { kg, pct, volumeLitres } from '../lib/format'
+import { wheeltecBatteryWarning } from '../lib/vehicleStatus'
 
 export function Fleet() {
   const { agvs, cages } = useApp()
   const [live, setLive] = useState<LiveRobot | null>(null)
+  const voltageWarning = wheeltecBatteryWarning(live?.battery_v)
 
   useEffect(() => {
     let alive = true
@@ -40,13 +42,32 @@ export function Fleet() {
         title="Fleet & Cages"
         desc="WHEELTEC S200 platforms and roll cages."
         actions={
-          <Badge tone={live?.online ? 'green' : 'red'} dot>
-            {live ? `${live.id} · ${live.online ? 'online' : 'offline'}` : 'AGV server offline'}
-          </Badge>
+          <>
+            {voltageWarning && (
+              <Badge tone="red" dot>{voltageWarning.label}</Badge>
+            )}
+            <Badge tone={live?.online ? 'green' : 'red'} dot>
+              {live ? `${live.id} · ${live.online ? 'online' : 'offline'}` : 'AGV server offline'}
+            </Badge>
+          </>
         }
       />
 
       <Card title="AGV control" hint="fused hub · single websocket · robotctl">
+        {voltageWarning && (
+          <div className={`voltage-alert ${voltageWarning.level}`} role="alert">
+            <span className="voltage-led" />
+            <span>
+              {voltageWarning.level === 'critical' ? 'CHARGE NOW' : 'LOW VOLTAGE'}
+              {live?.battery_v != null ? ` · ${live.battery_v.toFixed(1)} V` : ''}
+            </span>
+            <span className="voltage-alert-note">
+              {voltageWarning.level === 'critical'
+                ? '22.4 V or below — charge before the next run.'
+                : '22.4–22.7 V — plan a charge before the next run.'}
+            </span>
+          </div>
+        )}
         <div className="row between" style={{ gap: 18, flexWrap: 'wrap' }}>
           <div>
             <p style={{ margin: '0 0 4px' }}>Drive the S200 with the hub's AGV console — same site, no second server.</p>
@@ -60,7 +81,7 @@ export function Fleet() {
             <Link className="btn primary" to="/drive">🎮 AGV Drive Console</Link>
             <a
               className="btn"
-              href="/agv/"
+              href="/drive"
               target="_blank"
               rel="noreferrer"
             >
@@ -144,7 +165,7 @@ export function Fleet() {
       </div>
 
       <Card title="Roll cages" hint={`${cages.filter((c) => c.state !== 'empty').length} of ${cages.length} loaded`}>
-        <table className="data">
+        <div className="table-scroll"><table className="data">
           <thead>
             <tr>
               <th>Cage</th>
@@ -187,6 +208,7 @@ export function Fleet() {
             })}
           </tbody>
         </table>
+        </div>
       </Card>
     </>
   )

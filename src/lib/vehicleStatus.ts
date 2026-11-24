@@ -28,3 +28,27 @@ export function armChip(health: { status?: string; mock?: boolean } | null): Chi
     ? { label: 'bridge · mock', tone: 'amber' }
     : { label: 'bridge · live', tone: 'green' }
 }
+
+
+/** WHEELTEC 6S pack: at 22.4 V or below, charge immediately. */
+export const WHEELTEC_CHARGE_V = 22.4
+/** 22.4–22.7 V is the low-voltage warning band. */
+export const WHEELTEC_WARN_V = 22.7
+
+export type BatteryWarning = {
+  level: 'danger' | 'critical'
+  label: string
+}
+
+export function wheeltecBatteryWarning(
+  voltage: number | null | undefined,
+): BatteryWarning | null {
+  if (voltage == null || !Number.isFinite(voltage)) return null
+  if (voltage <= WHEELTEC_CHARGE_V) {
+    return { level: 'critical', label: 'CHARGE NOW · ≤22.4 V' }
+  }
+  if (voltage <= WHEELTEC_WARN_V) {
+    return { level: 'danger', label: 'LOW VOLTAGE · 22.4–22.7 V' }
+  }
+  return null
+}

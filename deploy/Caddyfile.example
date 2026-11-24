@@ -1,7 +1,0 @@
-# /etc/caddy/Caddyfile — the server webctl edge (Option B, docs/ACCESS.md)
-# HTTPS on :8443 -> uvicorn on 127.0.0.1:8090 (WebSocket upgrades automatic).
-<your-domain>:8443 {
-	tls /etc/letsencrypt/live/<your-domain>/fullchain.pem \
-	    /etc/letsencrypt/live/<your-domain>/privkey.pem
-	reverse_proxy 127.0.0.1:8090
-}

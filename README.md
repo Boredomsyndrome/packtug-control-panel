@@ -107,3 +107,9 @@ the same folder (`setup_camera_service.sh`, `setup_arm_link.sh`, …).
 | frontend logic tests | `node --test tests/*.test.mjs` |
 | navctl param render sim | `bash tools/sim_navctl_render.sh` |
 | panel + drive console build | `npm run build` at repo root |
+
+## License
+
+The project code is released under the [MIT License](LICENSE). The PackTug
+name and logo, third-party assets, and course materials are not covered by
+this license.

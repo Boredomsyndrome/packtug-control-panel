@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { api, type IntegrationStatus } from '../services/api'
 import { ENDPOINTS } from '../services/endpoints'
 import { Badge, Card, PageHeader } from '../components/ui'
@@ -9,8 +9,11 @@ const ROS_TOPICS = [
   { name: '/battery_state', dir: 'subscribe', desc: 'Battery voltage / percentage' },
   { name: '/imu/data_raw', dir: 'subscribe', desc: 'ICM20948 nine-axis IMU' },
   { name: '/scan', dir: 'subscribe', desc: '2D lidar scan (N10P / M10P)' },
-  { name: '/mission/command', dir: 'publish', desc: 'High-level routing / task commands' },
-  { name: '/mission/feedback', dir: 'subscribe', desc: 'Execution progress feedback' },
+  { name: '/amcl_pose', dir: 'subscribe', desc: 'AMCL localization — nav plane pose & waypoint frame' },
+  { name: '/map', dir: 'subscribe', desc: 'Occupancy grid served by vendor map_server' },
+  { name: '/follow_waypoints', dir: 'action', desc: 'NavigateToPose action list — routes (up to 256 pts) drive nav2_waypoint_follower' },
+  { name: '/mission/command', dir: 'publish', desc: 'High-level routing / task commands (planned)' },
+  { name: '/mission/feedback', dir: 'subscribe', desc: 'Execution progress feedback (planned)' },
 ]
 
 export function Integration() {
@@ -60,7 +63,7 @@ export function Integration() {
         </Card>
       </div>
 
-      <Card title="REST endpoints" hint="arm/camera/vehicle status live; panel business APIs still mock">
+      <Card title="REST endpoints" hint="One origin (:8090) — robot plane + in-process arm/vision bridge are live; only the panel business rows are mock">
         <div className="table-scroll"><table className="data">
           <thead>
             <tr>
@@ -71,23 +74,33 @@ export function Integration() {
             </tr>
           </thead>
           <tbody>
-            {ENDPOINTS.map((e) => (
-              <tr key={`${e.method} ${e.path}`}>
-                <td>
-                  <span className="tag">{e.method}</span>
-                </td>
-                <td className="mono">{e.path}</td>
-                <td className="muted">{e.description}</td>
-                <td>
-                  <Badge
-                    tone={
-                      e.status === 'implemented-live' ? 'green' : e.status === 'implemented-mock' ? 'amber' : 'grey'
-                    }
-                  >
-                    {e.status}
-                  </Badge>
-                </td>
-              </tr>
+            {[...new Set(ENDPOINTS.map((e) => e.group))].map((group) => (
+              <Fragment key={group}>
+                <tr>
+                  <td colSpan={4} style={{ paddingTop: 16, fontWeight: 700, fontSize: 11,
+                                          letterSpacing: 0.8, textTransform: 'uppercase', opacity: 0.75 }}>
+                    {group}
+                  </td>
+                </tr>
+                {ENDPOINTS.filter((e) => e.group === group).map((e) => (
+                  <tr key={`${e.method} ${e.path}`}>
+                    <td>
+                      <span className="tag">{e.method}</span>
+                    </td>
+                    <td className="mono">{e.path}</td>
+                    <td className="muted">{e.description}</td>
+                    <td>
+                      <Badge
+                        tone={
+                          e.status === 'implemented-live' ? 'green' : e.status === 'implemented-mock' ? 'amber' : 'grey'
+                        }
+                      >
+                        {e.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </Fragment>
             ))}
           </tbody>
         </table>

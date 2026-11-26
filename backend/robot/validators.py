@@ -110,7 +110,10 @@ class NavActionBody(BaseModel):
     action: ActionKind
     name: Optional[NameStr] = None
     map: Optional[NameStr] = None
-    waypoints: Optional[Annotated[list[NameStr], Field(max_length=64)]] = None
+    # cap bounds one route POST's payload; sized for RECORDED paths (≈1 m
+    # spacing → 256 pts ≈ 250 m of route). 64 was fine for hand-picked
+    # waypoints but a "queue all" of a taught path must not 422.
+    waypoints: Optional[Annotated[list[NameStr], Field(max_length=256)]] = None
 
     @model_validator(mode="after")
     def _cross(self):

@@ -571,7 +571,26 @@ function ScanView({ robotId, status }: { robotId: string; status: RobotStatus | 
    one validated POST action. Nothing here moves the robot except START ROUTE
    (server-side the /cmd route also gets a 409 so teleop can't fight Nav2). */
 const NAV_LABEL: Record<string, string> = { off: 'idle', mapping: 'MAPPING', localizing: 'nav ready', route: 'ROUTE ▶' }
-const SLOT = ['p1', 'p2', 'p3'] as const   // the web UI's fixed point slots
+/* Waypoints are an UNBOUNDED set of auto-named p1..pN stamps (the hub only
+   validates [A-Za-z0-9_-]{1,32}, never a count). Display sorts p-stamps
+   numerically (p2 before p10) and any odd names after them alphabetically. */
+const WP_STAMP = /^p(\d+)$/
+function wpSort(a: string, b: string): number {
+  const na = WP_STAMP.exec(a)
+  const nb = WP_STAMP.exec(b)
+  if (na && nb) return Number(na[1]) - Number(nb[1])
+  if (na) return -1
+  if (nb) return 1
+  return a.localeCompare(b)
+}
+function nextWpName(wps: Record<string, Waypoint>): string {
+  let max = 0
+  for (const n of Object.keys(wps)) {
+    const m = WP_STAMP.exec(n)
+    if (m) max = Math.max(max, Number(m[1]))
+  }
+  return `p${max + 1}`
+}
 
 function NavPanel({ robotId, connected }: { robotId: string; connected: boolean }) {
   const data = useNavData(robotId)       // shared single-flight /nav body
@@ -611,7 +630,9 @@ function NavPanel({ robotId, connected }: { robotId: string; connected: boolean 
   }
 
   const live = connected && !busy
-  const wpList = Object.entries(wps)
+  const wpNames = Object.keys(wps).sort(wpSort)
+  const wpList = wpNames.map((n) => [n, wps[n]] as const)
+  const nextName = nextWpName(wps)
   const navActive = mode === 'mapping' || mode === 'localizing' || mode === 'route'
 
   return (
@@ -672,19 +693,17 @@ function NavPanel({ robotId, connected }: { robotId: string; connected: boolean 
                 onClick={() => void act({ action: 'nav_on', map: showMap || maps[0]?.name })}>🎯 nav</button>
       </div>
       <div className="agv-row agv-wpslotrow">
-        {SLOT.map((n) => (
-          <button key={n} className="agv-navbtn save" disabled={!live || !navActive}
-                  title={`store the robot's current pose as ${n}`}
-                  onClick={() => void act({ action: 'record', name: n })}>📍 {n.toUpperCase()}</button>
-        ))}
+        <button className="agv-navbtn save" disabled={!live || !navActive}
+                title={`store the robot's current pose as ${nextName}`}
+                onClick={() => void act({ action: 'record', name: nextName })}>📍 save point</button>
+        {wpNames.length > 1 && (
+          <button className="agv-navbtn" disabled={!live || mode === 'route'}
+                  title="queue ALL saved points in p1→pN order (path replay)"
+                  onClick={() => setRoute([...wpNames])}>⇓ queue all</button>
+        )}
       </div>
       <div className="agv-wpreadout">
-        {SLOT.map((n) => {
-          const w = wps[n]
-          return <span key={n}><b>{n.toUpperCase()}</b>: {w
-            ? `${w.x.toFixed(2)}, ${w.y.toFixed(2)} m · ${(w.yaw * 57.2958).toFixed(0)}°`
-            : '—'}</span>
-        })}
+        <span><b>{wpNames.length}</b> pts saved · next: <b>{nextName}</b></span>
       </div>
 
       <div className="agv-navwps">
@@ -749,8 +768,8 @@ function NavPanel({ robotId, connected }: { robotId: string; connected: boolean 
         )}
       </div>
       <p className="agv-hint">🗺 teleop while SLAM builds the map → 💾 save → 🎯 localize → park anywhere,
-        hit 📍 P1/P2/P3 to stamp that spot → queue points → START ROUTE. Nothing drives
-        until you press it; E-STOP and the link watchdog always win.</p>
+        hit 📍 save point at every stop (auto-names p1, p2, p3 … no limit) → queue points (or ⇓ queue all) →
+        START ROUTE. Nothing drives until you press it; E-STOP and the link watchdog always win.</p>
     </>
   )
 }
